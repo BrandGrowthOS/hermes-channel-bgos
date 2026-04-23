@@ -36,11 +36,13 @@ async def test_pair_exchange_no_pairing_header(mock_bgos_server):
 
 
 async def test_post_message_sends_pairing_header(mock_bgos_server):
+    """Wire format matches backend CreateMessageDto: camelCase chatId + messageType,
+    `sender` is lowercase 'assistant'."""
     api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 101})
 
     resp = await api.post_message(
-        chat_id=7, text="hi", sender_type="ASSISTANT", message_type="standard",
+        chat_id=7, text="hi", sender="assistant", message_type="standard",
     )
 
     assert resp == {"id": 101}
@@ -48,37 +50,52 @@ async def test_post_message_sends_pairing_header(mock_bgos_server):
     assert req.headers["X-BGOS-Pairing"] == "pair_xyz"
     assert req.json_body["chatId"] == 7
     assert req.json_body["text"] == "hi"
-    assert req.json_body["senderType"] == "ASSISTANT"
-    assert req.json_body["message_type"] == "standard"
+    assert req.json_body["sender"] == "assistant"
+    assert req.json_body["messageType"] == "standard"
     # Optional fields absent when not provided
     assert "files" not in req.json_body
     assert "options" not in req.json_body
-    assert "approval_meta" not in req.json_body
+    assert "approvalMeta" not in req.json_body
+    await api.close()
+
+
+async def test_post_message_defaults_sender_to_assistant(mock_bgos_server):
+    """`sender` defaults to 'assistant' — adapter-side `send()` doesn't have
+    to pass it explicitly."""
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 110})
+
+    await api.post_message(chat_id=7, text="hi")
+
+    req = mock_bgos_server.last_request("POST", "/api/v1/messages")
+    assert req.json_body["sender"] == "assistant"
+    assert req.json_body["messageType"] == "standard"
     await api.close()
 
 
 async def test_post_message_full_payload(mock_bgos_server):
-    """Optional fields (files, options, approval_meta, reply_to) flow through correctly."""
+    """Optional fields (files, options, approvalMeta) flow through with the
+    backend-expected key names."""
     api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 200})
 
     await api.post_message(
         chat_id=7,
         text="Proceed?",
-        sender_type="ASSISTANT",
+        sender="assistant",
         message_type="approval_request",
-        files=[{"filename": "x.png", "s3_key": "k/1", "mime": "image/png", "size": 1024}],
-        options=[{"label": "Yes", "callback_data": "ea:once:1", "style": "success"}],
+        files=[{"fileName": "x.png", "s3Key": "k/1", "fileMimeType": "image/png", "size": 1024}],
+        options=[{"text": "Yes", "callbackData": "ea:once:1", "style": "success"}],
         approval_meta={"command": "rm -rf", "session_key": "s1", "approval_id": 1},
-        reply_to_message_id=100,
     )
 
     req = mock_bgos_server.last_request("POST", "/api/v1/messages")
     body = req.json_body
-    assert body["files"][0]["s3_key"] == "k/1"
-    assert body["options"][0]["callback_data"] == "ea:once:1"
-    assert body["approval_meta"]["session_key"] == "s1"
-    assert body["reply_to_message_id"] == 100
+    assert body["files"][0]["s3Key"] == "k/1"
+    assert body["options"][0]["callbackData"] == "ea:once:1"
+    # approvalMeta is camelCase on the wire; its contents keep their DB shape
+    # (snake_case), since they're stored as JSONB and the adapter controls them.
+    assert body["approvalMeta"]["session_key"] == "s1"
     await api.close()
 
 
@@ -190,7 +207,7 @@ async def test_500_with_non_json_body_still_raises(mock_bgos_server):
     mock_bgos_server.on("POST", "/api/v1/messages").respond(500, text="Internal Server Error")
 
     with pytest.raises(BgosApiError) as excinfo:
-        await api.post_message(chat_id=1, text="x", sender_type="ASSISTANT")
+        await api.post_message(chat_id=1, text="x", sender="assistant")
     assert excinfo.value.status == 500
     await api.close()
 

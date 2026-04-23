@@ -40,12 +40,14 @@ async def test_send_image_inline_under_threshold(mock_bgos_server):
         body = req.json_body
         assert body["chatId"] == 11
         assert body["text"] == "hi"
+        assert body["sender"] == "assistant"
         files = body["files"]
         assert len(files) == 1
-        assert files[0]["filename"] == "tiny.png"
-        assert files[0]["mime"] == "image/png"
-        assert "base64" in files[0]
-        assert "s3_key" not in files[0]
+        # Wire shape matches openclaw-channel-bgos types.ts OutboundMessagePayload.files
+        assert files[0]["fileName"] == "tiny.png"
+        assert files[0]["fileMimeType"] == "image/png"
+        assert "fileData" in files[0]
+        assert "s3Key" not in files[0]
         assert files[0]["size"] == len(small_png)
     finally:
         await adapter.disconnect()
@@ -76,11 +78,11 @@ async def test_send_image_presigned_above_threshold(mock_bgos_server):
         assert put.body == big
         assert put.headers["Content-Type"] == "image/png"
 
-        # POST /messages references s3_key, NOT base64
+        # POST /messages references s3Key, NOT fileData
         msg = mock_bgos_server.last_request("POST", "/api/v1/messages")
         file_entry = msg.json_body["files"][0]
-        assert file_entry["s3_key"] == "k/abc"
-        assert "base64" not in file_entry
+        assert file_entry["s3Key"] == "k/abc"
+        assert "fileData" not in file_entry
         assert file_entry["size"] == len(big)
     finally:
         await adapter.disconnect()
@@ -95,7 +97,7 @@ async def test_send_voice_routes_through_same_path(mock_bgos_server):
             mime="audio/ogg", caption=None,
         )
         body = mock_bgos_server.last_request("POST", "/api/v1/messages").json_body
-        assert body["files"][0]["filename"] == "a.ogg"
+        assert body["files"][0]["fileName"] == "a.ogg"
         assert body["text"] == ""
     finally:
         await adapter.disconnect()
@@ -113,7 +115,7 @@ async def test_send_video_document_animation_all_work(mock_bgos_server):
         posts = [r for r in mock_bgos_server.requests
                  if r.method == "POST" and r.path == "/api/v1/messages"]
         assert len(posts) == 3
-        filenames = [r.json_body["files"][0]["filename"] for r in posts]
+        filenames = [r.json_body["files"][0]["fileName"] for r in posts]
         assert filenames == ["v.mp4", "d.pdf", "g.gif"]
     finally:
         await adapter.disconnect()

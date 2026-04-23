@@ -14,9 +14,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import itertools
+import json
 import logging
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -132,10 +135,23 @@ class BGOSAdapter(BasePlatformAdapter):
 
     platform_name = "bgos"
 
-    def __init__(self, config: BgosConfig) -> None:
-        super().__init__()
-        self._config = config
-        self._api = BgosApi(config)
+    def __init__(self, config: Any = None) -> None:
+        """Hermes's gateway passes its own per-platform config object here —
+        not our BgosConfig dataclass. We normalize both shapes: if given a
+        BgosConfig, use it directly; otherwise resolve from the Hermes
+        config / env vars / secrets file in that priority order.
+        """
+        # Call super() only if BasePlatformAdapter takes args. The mock/stub
+        # accepts *args/**kwargs; the real BasePlatformAdapter's __init__
+        # should also be lenient (most adapters go through some setup). Use
+        # a defensive call that handles both.
+        try:
+            super().__init__(config)
+        except TypeError:
+            super().__init__()
+        bgos_config = self._resolve_config(config)
+        self._config = bgos_config
+        self._api = BgosApi(bgos_config)
         self._state = StateStore()
         self._ws: BgosWs | None = None
         self.pairing_id: int | None = None
@@ -144,12 +160,79 @@ class BGOSAdapter(BasePlatformAdapter):
         self._approval_state: dict[int, str] = {}
         self._approval_id_counter = itertools.count(1)
 
+    @staticmethod
+    def _resolve_config(hermes_config: Any) -> BgosConfig:
+        """Resolve a BgosConfig from multiple sources, in priority order:
+
+        1. If `hermes_config` is already a BgosConfig, return as-is.
+        2. Attributes on `hermes_config` (api_key or pairing_token; base_url
+           or backend_url) — populated by Hermes's config loader (see
+           gateway/config.py's `_apply_env_overrides` BGOS block).
+        3. Env vars BGOS_API_KEY + BGOS_BACKEND_URL.
+        4. Secrets file at `$HERMES_HOME/secrets/bgos.json` (default
+           `~/.hermes/secrets/bgos.json`) written by `hermes-pair-bgos`.
+        5. Default base_url to production.
+
+        Raises RuntimeError with a clear message if no pairing token is
+        found anywhere — the user needs to run `hermes-pair-bgos <CODE>`.
+        """
+        if isinstance(hermes_config, BgosConfig):
+            return hermes_config
+
+        def _attr(obj: Any, name: str) -> Any:
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return obj.get(name)
+            return getattr(obj, name, None)
+
+        # Load secrets file if present
+        secrets: dict[str, Any] = {}
+        hermes_home = Path(
+            os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")),
+        )
+        secrets_path = hermes_home / "secrets" / "bgos.json"
+        if secrets_path.is_file():
+            try:
+                secrets = json.loads(secrets_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                log.warning(
+                    "BGOS secrets file at %s is unreadable — ignoring",
+                    secrets_path,
+                )
+                secrets = {}
+
+        pairing_token = (
+            _attr(hermes_config, "api_key")
+            or _attr(hermes_config, "pairing_token")
+            or os.environ.get("BGOS_API_KEY")
+            or secrets.get("pairing_token")
+        )
+        if not pairing_token:
+            raise RuntimeError(
+                "BGOS pairing token not found. Run "
+                "`hermes-pair-bgos <CODE> --device-label <label>` to pair, "
+                "or set the BGOS_API_KEY environment variable."
+            )
+
+        base_url = (
+            _attr(hermes_config, "base_url")
+            or _attr(hermes_config, "backend_url")
+            or os.environ.get("BGOS_BACKEND_URL")
+            or secrets.get("base_url")
+            or "https://api.brandgrowthos.ai"
+        )
+
+        return BgosConfig(base_url=base_url, pairing_token=pairing_token)
+
     # -------------------------------------------------------------------------
     # Lifecycle (abstract on BasePlatformAdapter)
     # -------------------------------------------------------------------------
 
     async def connect(self) -> bool:
-        """Fetch pairing scope, build route map, open the Socket.IO connection.
+        """Fetch pairing scope, build route map, open the Socket.IO connection,
+        and push the agent catalog so the BGOS Integrations UI shows the
+        available-to-bind agents.
 
         Propagates `BgosApiError` on failure (notably 401 / PAIRING_REVOKED so
         the caller can clear stored secrets and prompt for re-pair).
@@ -169,7 +252,89 @@ class BGOSAdapter(BasePlatformAdapter):
             self._ws.bind_pairing(self.pairing_id)
         self._ws.bind_assistants(list(self._state.assistant_route.keys()))
         await self._ws.start()
+
+        # Publish the agent catalog so the BGOS user can tick which Hermes
+        # agents to expose. Fail-open: an empty catalog is valid — the user
+        # can either set BGOS_AGENTS env var next time or bind via curl.
+        await self._push_agent_catalog_safe()
         return True
+
+    async def _push_agent_catalog_safe(self) -> None:
+        if self.pairing_id is None:
+            return
+        try:
+            agents = self._enumerate_agents()
+        except Exception:
+            log.exception("agent enumeration failed — skipping catalog push")
+            return
+        if not agents:
+            log.warning(
+                "no Hermes agents discovered — Hermes Integrations card will "
+                "show an empty catalog. Set BGOS_AGENTS "
+                "(e.g. 'hades:Hades,ramy:Ramy') or BGOS_AGENTS_JSON env var."
+            )
+            return
+        try:
+            await self._api.push_agent_catalog(
+                pairing_id=self.pairing_id, entries=agents,
+            )
+            log.info("pushed agent catalog: %d entries", len(agents))
+        except Exception:
+            log.exception("agent catalog push failed (non-fatal)")
+
+    def _enumerate_agents(self) -> list[dict]:
+        """Discover Hermes's configured agents for the agent-catalog push.
+
+        Checked in order; first non-empty source wins:
+
+        1. `BGOS_AGENTS_JSON` env var — a JSON list of
+           `{"agent_route": str, "name": str, "description"?: str,
+            "avatar_url"?: str}` objects. Use for rich descriptions or when
+           names contain commas/colons.
+        2. `BGOS_AGENTS` env var — comma-separated `route:Display Name` pairs
+           (e.g. `"hades:Hades,ramy:Ramy"`). If a bare route is given without
+           a colon, it's used as both route and display name.
+        3. (TODO — Phase 4) Hermes's runtime agent registry. When the adapter
+           can introspect the gateway's configured agents directly, this
+           env-var indirection goes away.
+
+        Returns `[]` when nothing is configured. Callers should treat an
+        empty list as a warn-but-continue condition, not an error.
+        """
+        raw_json = os.environ.get("BGOS_AGENTS_JSON", "").strip()
+        if raw_json:
+            try:
+                data = json.loads(raw_json)
+            except json.JSONDecodeError:
+                log.warning("BGOS_AGENTS_JSON is not valid JSON — ignoring")
+            else:
+                if isinstance(data, list):
+                    out = []
+                    for entry in data:
+                        if isinstance(entry, dict) and entry.get("agent_route"):
+                            out.append(entry)
+                    if out:
+                        return out
+
+        raw = os.environ.get("BGOS_AGENTS", "").strip()
+        if raw:
+            out: list[dict] = []
+            for piece in raw.split(","):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                if ":" in piece:
+                    route, name = piece.split(":", 1)
+                    route = route.strip()
+                    name = name.strip() or route
+                else:
+                    route = piece
+                    name = piece
+                if route:
+                    out.append({"agent_route": route, "name": name})
+            return out
+
+        return []
 
     async def disconnect(self) -> None:
         """Idempotent — safe to call multiple times (e.g. from a signal handler)."""
@@ -189,15 +354,17 @@ class BGOSAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Post a plain-text assistant message to BGOS.
 
-        Media variants (`send_image`, `send_voice`, …) land in Task 6 as
-        optional class-level overrides the gateway duck-types.
+        Media variants (`send_image`, `send_voice`, …) are optional
+        class-level overrides the gateway duck-types. The `reply_to` and
+        `metadata` args are accepted for Hermes interface compatibility
+        but not yet plumbed through — backend's CreateMessageDto doesn't
+        currently accept them (Phase F follow-up).
         """
         resp = await self._api.post_message(
             chat_id=int(chat_id),
             text=content,
-            sender_type="ASSISTANT",
+            sender="assistant",
             message_type="standard",
-            reply_to_message_id=reply_to,
         )
         message_id = resp.get("id") if isinstance(resp, dict) else None
         if isinstance(chat_id, int) and isinstance(message_id, int):
@@ -216,14 +383,17 @@ class BGOSAdapter(BasePlatformAdapter):
         """Return a files[] entry ready for POST /messages.
 
         Policy: inline base64 below `S3_THRESHOLD`, presigned S3 PUT above.
+        Keys are camelCase on the wire to match OpenClaw's shape
+        (openclaw-channel-bgos/src/types.ts OutboundMessagePayload.files):
+        `fileName`, `fileMimeType`, `fileData` (inline), `s3Key` (presigned).
         """
         size = len(file_bytes)
         if size < S3_THRESHOLD:
             return {
-                "filename": filename,
-                "mime": mime,
+                "fileName": filename,
+                "fileMimeType": mime,
                 "size": size,
-                "base64": base64.b64encode(file_bytes).decode("ascii"),
+                "fileData": base64.b64encode(file_bytes).decode("ascii"),
             }
         presigned = await self._api.create_upload_url(
             filename=filename, mime=mime, size=size,
@@ -239,10 +409,10 @@ class BGOSAdapter(BasePlatformAdapter):
             )
             resp.raise_for_status()
         return {
-            "filename": filename,
-            "mime": mime,
+            "fileName": filename,
+            "fileMimeType": mime,
             "size": size,
-            "s3_key": presigned["s3_key"],
+            "s3Key": presigned["s3_key"],
         }
 
     async def _send_media(
@@ -255,7 +425,7 @@ class BGOSAdapter(BasePlatformAdapter):
         resp = await self._api.post_message(
             chat_id=int(chat_id),
             text=caption or "",
-            sender_type="ASSISTANT",
+            sender="assistant",
             message_type="standard",
             files=[attach],
         )
@@ -327,14 +497,19 @@ class BGOSAdapter(BasePlatformAdapter):
     ) -> SendResult:
         approval_id = next(self._approval_id_counter)
 
+        # Option shape matches backend CreateMessageOptionDto (camelCase
+        # `text` + `callbackData`) + OpenClaw's extended shape (`style`).
+        # `style` and `row_index` are dropped by the backend's whitelist
+        # today (Phase F schema extension will add them); we still send
+        # them for forward-compat.
         options = [
-            {"label": "Allow once",         "callback_data": f"ea:once:{approval_id}",
+            {"text": "Allow once",         "callbackData": f"ea:once:{approval_id}",
              "style": "success", "row_index": 0},
-            {"label": "Allow for session",  "callback_data": f"ea:session:{approval_id}",
+            {"text": "Allow for session",  "callbackData": f"ea:session:{approval_id}",
              "style": "success", "row_index": 0},
-            {"label": "Always allow",       "callback_data": f"ea:always:{approval_id}",
+            {"text": "Always allow",       "callbackData": f"ea:always:{approval_id}",
              "style": "default", "row_index": 1},
-            {"label": "Deny",               "callback_data": f"ea:deny:{approval_id}",
+            {"text": "Deny",               "callbackData": f"ea:deny:{approval_id}",
              "style": "danger",  "row_index": 1},
         ]
         approval_meta = {
@@ -347,7 +522,7 @@ class BGOSAdapter(BasePlatformAdapter):
         resp = await self._api.post_message(
             chat_id=int(chat_id),
             text=description,
-            sender_type="ASSISTANT",
+            sender="assistant",
             message_type="approval_request",
             options=options,
             approval_meta=approval_meta,
@@ -428,7 +603,7 @@ class BGOSAdapter(BasePlatformAdapter):
             await self._api.post_message(
                 chat_id=chat_id,
                 text="Conversation reset. Next message starts fresh.",
-                sender_type="ASSISTANT",
+                sender="assistant",
                 message_type="standard",
             )
         elif command == "retry":
@@ -437,7 +612,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._api.post_message(
                     chat_id=chat_id,
                     text="Nothing to retry yet — send a message first.",
-                    sender_type="ASSISTANT",
+                    sender="assistant",
                     message_type="standard",
                 )
                 return
@@ -463,7 +638,7 @@ class BGOSAdapter(BasePlatformAdapter):
             await self._api.post_message(
                 chat_id=chat_id,
                 text="\n".join(lines),
-                sender_type="ASSISTANT",
+                sender="assistant",
                 message_type="standard",
             )
 

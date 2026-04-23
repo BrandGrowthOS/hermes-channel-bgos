@@ -38,19 +38,26 @@ async def test_send_exec_approval_posts_expected_payload(mock_bgos_server):
         req = mock_bgos_server.last_request("POST", "/api/v1/messages")
         body = req.json_body
 
+        # Wire format matches backend CreateMessageDto: camelCase `messageType`
+        # and `approvalMeta`. The `approvalMeta` contents stay snake_case
+        # because the backend stores them verbatim as JSONB and the adapter
+        # controls the schema (session_key, approval_id, etc.).
         assert body["chatId"] == 11
-        assert body["message_type"] == "approval_request"
+        assert body["messageType"] == "approval_request"
+        assert body["sender"] == "assistant"
         assert body["text"] == "Hades wants to wipe node_modules. Proceed?"
 
-        meta = body["approval_meta"]
+        meta = body["approvalMeta"]
         assert meta["command"] == "rm -rf node_modules"
         assert meta["session_key"] == "sess-abc-123"
         approval_id = meta["approval_id"]
         assert isinstance(approval_id, int) and approval_id >= 1
         assert meta["metadata"] == {"thread_id": "t1"}
 
-        # 4 buttons, Telegram-parity order and callback_data
-        labels_choices = [(o["label"], o["callback_data"]) for o in body["options"]]
+        # 4 buttons, Telegram-parity order and callback_data.
+        # Option keys are camelCase on the wire (text + callbackData) to
+        # match backend CreateMessageOptionDto.
+        labels_choices = [(o["text"], o["callbackData"]) for o in body["options"]]
         assert labels_choices == [
             ("Allow once",         f"ea:once:{approval_id}"),
             ("Allow for session",  f"ea:session:{approval_id}"),
@@ -98,7 +105,7 @@ async def test_metadata_optional(mock_bgos_server):
             chat_id=1, command="ls", session_key="sX", description="Hm?",
         )
         req = mock_bgos_server.last_request("POST", "/api/v1/messages")
-        assert req.json_body["approval_meta"]["metadata"] == {}
+        assert req.json_body["approvalMeta"]["metadata"] == {}
     finally:
         await adapter.disconnect()
 

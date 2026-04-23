@@ -142,27 +142,36 @@ class BgosApi:
         *,
         chat_id: int,
         text: str,
-        sender_type: str,
+        sender: str = "assistant",
         message_type: str = "standard",
         files: list[dict] | None = None,
         options: list[dict] | None = None,
         approval_meta: dict | None = None,
-        reply_to_message_id: int | None = None,
     ) -> dict:
+        """POST to /api/v1/messages. Wire format matches backend CreateMessageDto
+        (camelCase: chatId, messageType, approvalMeta). `sender` is `"assistant"`
+        (lowercase — matches enum) or `"user"`.
+
+        `options` entries should be shaped {text, callbackData, style?} —
+        these are passed through as-is to match backend CreateMessageOptionDto.
+        `files` entries should be shaped
+        {fileName, fileMimeType, fileData? | s3Key?, size?}. Fields not in
+        the backend DTO (e.g. style, row_index, url on options; approvalMeta
+        itself currently) are silently dropped by the backend's whitelist —
+        we still send them for forward compatibility when the backend extends.
+        """
         body: dict[str, Any] = {
             "chatId": chat_id,
             "text": text,
-            "senderType": sender_type,
-            "message_type": message_type,
+            "sender": sender,
+            "messageType": message_type,
         }
         if files:
             body["files"] = files
         if options:
             body["options"] = options
         if approval_meta is not None:
-            body["approval_meta"] = approval_meta
-        if reply_to_message_id is not None:
-            body["reply_to_message_id"] = reply_to_message_id
+            body["approvalMeta"] = approval_meta
         return await self._request("POST", "/api/v1/messages", json=body)
 
     async def patch_message(
@@ -176,7 +185,7 @@ class BgosApi:
         if text is not None:
             body["text"] = text
         if approval_meta is not None:
-            body["approval_meta"] = approval_meta
+            body["approvalMeta"] = approval_meta
         return await self._request("PATCH", f"/api/v1/messages/{message_id}", json=body)
 
     # -------------------------------------------------------------------------

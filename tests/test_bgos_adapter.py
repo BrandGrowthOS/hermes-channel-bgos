@@ -78,11 +78,12 @@ async def test_adapter_send_posts_text_message(mock_bgos_server):
 
         req = mock_bgos_server.last_request("POST", "/api/v1/messages")
         body = req.json_body
+        # Wire format matches backend CreateMessageDto: camelCase chatId +
+        # messageType, lowercase `sender: "assistant"`.
         assert body["chatId"] == 11
         assert body["text"] == "hello back"
-        assert body["senderType"] == "ASSISTANT"
-        assert body["message_type"] == "standard"
-        assert "reply_to_message_id" not in body
+        assert body["sender"] == "assistant"
+        assert body["messageType"] == "standard"
 
         # Adapter records the last assistant message id per chat for future
         # streaming-edit support
@@ -91,7 +92,11 @@ async def test_adapter_send_posts_text_message(mock_bgos_server):
         await adapter.disconnect()
 
 
-async def test_adapter_send_with_reply_to(mock_bgos_server):
+async def test_adapter_send_accepts_reply_to_kwarg(mock_bgos_server):
+    """send() accepts reply_to for Hermes interface compatibility, but
+    backend's CreateMessageDto doesn't have a replyTo field yet — it gets
+    dropped by the whitelist. This test just verifies the kwarg doesn't
+    crash the call; Phase F will add backend support."""
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
         200, {"pairing_id": 42, "assistants": []},
     )
@@ -101,8 +106,9 @@ async def test_adapter_send_with_reply_to(mock_bgos_server):
     await adapter.connect()
     try:
         await adapter.send(chat_id=11, content="re: earlier", reply_to=100)
+        # Just confirms the call went through — no reply_to field on wire yet
         req = mock_bgos_server.last_request("POST", "/api/v1/messages")
-        assert req.json_body["reply_to_message_id"] == 100
+        assert req.json_body["sender"] == "assistant"
     finally:
         await adapter.disconnect()
 
