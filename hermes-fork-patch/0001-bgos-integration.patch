@@ -1,0 +1,256 @@
+From d8ced919ff555a5554c1a012a4c6af4b58e6f5ca Mon Sep 17 00:00:00 2001
+From: Kc <Karim@brandgrowthos.ai>
+Date: Fri, 24 Apr 2026 00:34:05 +0400
+Subject: [PATCH] feat: add BGOS as a channel platform (via hermes-channel-bgos
+ vendor pkg)
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ agent/prompt_builder.py    |  4 ++++
+ cron/scheduler.py          |  3 ++-
+ gateway/config.py          | 20 ++++++++++++++++++++
+ gateway/platforms/bgos.py  |  6 ++++++
+ gateway/run.py             |  7 +++++++
+ hermes_cli/gateway.py      | 24 ++++++++++++++++++++++++
+ hermes_cli/platforms.py    |  1 +
+ hermes_cli/status.py       |  1 +
+ tools/cronjob_tools.py     |  2 +-
+ tools/send_message_tool.py |  1 +
+ toolsets.py                |  8 +++++++-
+ 11 files changed, 74 insertions(+), 3 deletions(-)
+ create mode 100644 gateway/platforms/bgos.py
+
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index 3a6ec244..6676cf4f 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -422,6 +422,10 @@ PLATFORM_HINTS = {
+         "your response. Images are sent as native photos, and other files arrive as downloadable "
+         "documents."
+     ),
++    "bgos": (
++        "You are speaking with the user through BGOS, a mobile-first chat app. "
++        "Keep replies concise; prefer plain text with minimal markdown."
++    ),
+ }
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index e7a22dfb..f287a0c7 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -46,7 +46,7 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
+     "telegram", "discord", "slack", "whatsapp", "signal",
+     "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
+     "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
+-    "qqbot",
++    "qqbot", "bgos",
+ })
+ 
+ # Platforms that support a configured cron/notification home target, mapped to
+@@ -306,6 +306,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
+         "sms": Platform.SMS,
+         "bluebubbles": Platform.BLUEBUBBLES,
+         "qqbot": Platform.QQBOT,
++        "bgos": Platform.BGOS,
+     }
+ 
+     # Optionally wrap the content with a header/footer so the user knows this
+diff --git a/gateway/config.py b/gateway/config.py
+index 67ebf734..fbf2580a 100644
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -67,6 +67,7 @@ class Platform(Enum):
+     WEIXIN = "weixin"
+     BLUEBUBBLES = "bluebubbles"
+     QQBOT = "qqbot"
++    BGOS = "bgos"
+ 
+ 
+ @dataclass
+@@ -1271,6 +1272,25 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
+                 name=os.getenv("QQBOT_HOME_CHANNEL_NAME") or os.getenv(qq_home_name_env, "Home"),
+             )
+ 
++    # BGOS
++    bgos_api_key = os.getenv("BGOS_API_KEY")
++    if bgos_api_key:
++        if Platform.BGOS not in config.platforms:
++            config.platforms[Platform.BGOS] = PlatformConfig()
++        config.platforms[Platform.BGOS].enabled = True
++        config.platforms[Platform.BGOS].api_key = bgos_api_key
++        bgos_backend_url = os.getenv("BGOS_BACKEND_URL", "").strip()
++        if bgos_backend_url:
++            config.platforms[Platform.BGOS].extra["backend_url"] = bgos_backend_url
++
++    bgos_home = os.getenv("BGOS_HOME_CHANNEL")
++    if bgos_home and Platform.BGOS in config.platforms:
++        config.platforms[Platform.BGOS].home_channel = HomeChannel(
++            platform=Platform.BGOS,
++            chat_id=bgos_home,
++            name=os.getenv("BGOS_HOME_CHANNEL_NAME", "Home"),
++        )
++
+     # Session settings
+     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
+     if idle_minutes:
+diff --git a/gateway/platforms/bgos.py b/gateway/platforms/bgos.py
+new file mode 100644
+index 00000000..82446107
+--- /dev/null
++++ b/gateway/platforms/bgos.py
+@@ -0,0 +1,6 @@
++"""BGOS channel adapter — thin shim. Real logic lives in the
++hermes-channel-bgos pip package (install separately).
++"""
++from hermes_channel_bgos.bgos_adapter import BGOSAdapter
++
++__all__ = ["BGOSAdapter"]
+diff --git a/gateway/run.py b/gateway/run.py
+index dcee18e5..36a86d04 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -2888,6 +2888,10 @@ class GatewayRunner:
+                 return None
+             return QQAdapter(config)
+ 
++        elif platform == Platform.BGOS:
++            from gateway.platforms.bgos import BGOSAdapter
++            return BGOSAdapter(config)
++
+         return None
+ 
+     def _is_user_authorized(self, source: SessionSource) -> bool:
+@@ -2930,6 +2934,7 @@ class GatewayRunner:
+             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
+             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
+             Platform.QQBOT: "QQ_ALLOWED_USERS",
++            Platform.BGOS: "BGOS_ALLOWED_USERS",
+         }
+         platform_group_env_map = {
+             Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
+@@ -2951,6 +2956,7 @@ class GatewayRunner:
+             Platform.WEIXIN: "WEIXIN_ALLOW_ALL_USERS",
+             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
+             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
++            Platform.BGOS: "BGOS_ALLOW_ALL_USERS",
+         }
+ 
+         # Per-platform allow-all flag (e.g., DISCORD_ALLOW_ALL_USERS=true)
+@@ -3082,6 +3088,7 @@ class GatewayRunner:
+                 Platform.WEIXIN:   "WEIXIN_ALLOWED_USERS",
+                 Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
+                 Platform.QQBOT:    "QQ_ALLOWED_USERS",
++                Platform.BGOS:     "BGOS_ALLOWED_USERS",
+             }
+             if os.getenv(platform_env_map.get(platform, ""), "").strip():
+                 return "ignore"
+diff --git a/hermes_cli/gateway.py b/hermes_cli/gateway.py
+index 7796cc57..1a2f4b45 100644
+--- a/hermes_cli/gateway.py
++++ b/hermes_cli/gateway.py
+@@ -2663,6 +2663,30 @@ _PLATFORMS = [
+              "help": "OpenID to deliver cron results and notifications to."},
+         ],
+     },
++    {
++        "key": "bgos",
++        "label": "BGOS (Brand GrowthOS)",
++        "emoji": "📱",
++        "token_var": "BGOS_API_KEY",
++        "setup_instructions": [
++            "1. Install the hermes-channel-bgos vendor package:",
++            "   pip install hermes-channel-bgos",
++            "2. Pair this device with your BGOS account — run: hermes-pair-bgos BGOS-XXXX-XX",
++            "3. The pairing command writes BGOS_API_KEY and BGOS_BACKEND_URL to the env",
++            "4. Restrict access with BGOS_ALLOWED_USERS for production use",
++        ],
++        "vars": [
++            {"name": "BGOS_API_KEY", "prompt": "BGOS API key (from pairing)", "password": True,
++             "help": "API key issued by the BGOS backend when the device was paired."},
++            {"name": "BGOS_BACKEND_URL", "prompt": "BGOS backend URL (default: https://api.brandgrowthos.ai)", "password": False,
++             "help": "The BGOS REST API base URL."},
++            {"name": "BGOS_ALLOWED_USERS", "prompt": "Allowed BGOS user IDs (comma-separated, or empty)", "password": False,
++             "is_allowlist": True,
++             "help": "Restrict which BGOS users can interact with the bot."},
++            {"name": "BGOS_HOME_CHANNEL", "prompt": "Home chat ID (optional, for cron/notifications)", "password": False,
++             "help": "BGOS chat ID for scheduled results and notifications."},
++        ],
++    },
+ ]
+ 
+ 
+diff --git a/hermes_cli/platforms.py b/hermes_cli/platforms.py
+index 1fc3a3a8..399c116b 100644
+--- a/hermes_cli/platforms.py
++++ b/hermes_cli/platforms.py
+@@ -36,6 +36,7 @@ PLATFORMS: OrderedDict[str, PlatformInfo] = OrderedDict([
+     ("wecom_callback", PlatformInfo(label="💬 WeCom Callback",  default_toolset="hermes-wecom-callback")),
+     ("weixin",         PlatformInfo(label="💬 Weixin",          default_toolset="hermes-weixin")),
+     ("qqbot",          PlatformInfo(label="💬 QQBot",           default_toolset="hermes-qqbot")),
++    ("bgos",           PlatformInfo(label="📱 BGOS",            default_toolset="hermes-bgos")),
+     ("webhook",        PlatformInfo(label="🔗 Webhook",         default_toolset="hermes-webhook")),
+     ("api_server",     PlatformInfo(label="🌐 API Server",      default_toolset="hermes-api-server")),
+ ])
+diff --git a/hermes_cli/status.py b/hermes_cli/status.py
+index 8541f0a0..a75d3ef2 100644
+--- a/hermes_cli/status.py
++++ b/hermes_cli/status.py
+@@ -320,6 +320,7 @@ def show_status(args):
+         "Weixin": ("WEIXIN_ACCOUNT_ID", "WEIXIN_HOME_CHANNEL"),
+         "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
+         "QQBot": ("QQ_APP_ID", "QQBOT_HOME_CHANNEL"),
++        "BGOS": ("BGOS_API_KEY", "BGOS_HOME_CHANNEL"),
+     }
+     
+     for name, (token_var, home_var) in platforms.items():
+diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
+index 8a685a8c..aa24dc15 100644
+--- a/tools/cronjob_tools.py
++++ b/tools/cronjob_tools.py
+@@ -433,7 +433,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
+             },
+             "deliver": {
+                 "type": "string",
+-                "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), or platform:chat_id:thread_id for a specific destination. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+15551234567'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting."
++                "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), or platform:chat_id:thread_id for a specific destination. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+15551234567', 'bgos:<chat_id>'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting."
+             },
+             "skills": {
+                 "type": "array",
+diff --git a/tools/send_message_tool.py b/tools/send_message_tool.py
+index 19da4f55..a8c561e2 100644
+--- a/tools/send_message_tool.py
++++ b/tools/send_message_tool.py
+@@ -215,6 +215,7 @@ def _handle_send(args):
+         "weixin": Platform.WEIXIN,
+         "email": Platform.EMAIL,
+         "sms": Platform.SMS,
++        "bgos": Platform.BGOS,
+     }
+     platform = platform_map.get(platform_name)
+     if not platform:
+diff --git a/toolsets.py b/toolsets.py
+index f1dc7fca..7c6eba87 100644
+--- a/toolsets.py
++++ b/toolsets.py
+@@ -407,10 +407,16 @@ TOOLSETS = {
+         "includes": []
+     },
+ 
++    "hermes-bgos": {
++        "description": "BGOS bot toolset - interact with Hermes via the BGOS (Brand GrowthOS) chat app",
++        "tools": _HERMES_CORE_TOOLS,
++        "includes": []
++    },
++
+     "hermes-gateway": {
+         "description": "Gateway toolset - union of all messaging platform tools",
+         "tools": [],
+-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook"]
++        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook", "hermes-bgos"]
+     }
+ }
+ 
+-- 
+2.51.2.windows.1
+

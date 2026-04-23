@@ -1,0 +1,27 @@
+# Python
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Test / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local secrets / state
+.env
+.env.local
+*.log

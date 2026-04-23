@@ -1,0 +1,556 @@
+"""BGOS channel adapter — the `BasePlatformAdapter` subclass that Hermes's
+gateway instantiates (via the 5-line shim at `gateway/platforms/bgos.py` in
+the fork, which imports this class).
+
+Task 4 (this commit): connect/disconnect lifecycle, `send()`, `get_chat_info()`,
+and placeholder callback/inbound hooks that later tasks flesh out.
+
+Later tasks wire in: inbound translation → `handle_message` (Task 5), outbound
+media overrides (Task 6), `send_exec_approval` (Task 7), callback routing with
+`resolve_gateway_approval` (Task 8), slash-manifest sync + bridge-locals (Task 9).
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import itertools
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+
+from .bgos_api import BgosApi
+from .bgos_ws import BgosWs
+from .commands_sync import (
+    BRIDGE_LOCAL_COMMANDS,
+    build_manifest,
+    fetch_hermes_native_commands,
+)
+from .config import BgosConfig
+from .state_store import StateStore
+
+try:  # pragma: no cover - exercised only when Hermes is installed
+    from tools.approval import resolve_gateway_approval  # type: ignore
+except ImportError:
+    # Hermes not installed — provide a stub that tests can monkeypatch. The
+    # real function is synchronous and uses threading.Lock + Event internally.
+    def resolve_gateway_approval(session_key: str, choice: str) -> None:  # type: ignore[no-redef]
+        raise RuntimeError(
+            "tools.approval.resolve_gateway_approval is not importable — "
+            "Hermes not installed. Tests should monkeypatch this at the "
+            "module level (hermes_channel_bgos.bgos_adapter)."
+        )
+
+
+# Matches Telegram's callback_data format at gateway/platforms/telegram.py:1275.
+# Four choice values: once, session, always, deny — mapped 1:1 from Hermes's
+# approval vocabulary.
+_APPROVAL_CALLBACK_RE = re.compile(r"^ea:(once|session|always|deny):(\d+)$")
+
+# Threshold below which we inline base64 into POST /messages; at or above,
+# we upload via a presigned S3 PUT and reference by s3_key. Mirrors
+# openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
+S3_THRESHOLD = 500 * 1024
+
+
+@dataclass
+class MessageEvent:
+    """Inbound user event translated for Hermes's `handle_message`.
+
+    Mirrors the shape of `gateway.platforms.base.MessageEvent` closely enough
+    that Hermes's downstream agent dispatch accepts it. Fields:
+      platform       — always "bgos"
+      chat_id        — BGOS chat id
+      message_id     — BGOS message id (monotonic per chat; used for dedup)
+      user_id        — Clerk/DEV user id of the sender
+      assistant_id   — BGOS assistant id the message is addressed to
+      agent_route    — Hermes agent route resolved from assistant_id
+      text           — message text
+      files          — list of {filename, mime, size, url | s3_key, ...}
+      message_type   — "standard" | "slash_command" | ...
+      command_name   — present when message_type == "slash_command"
+      command_args   — raw args string
+    """
+
+    platform: str
+    chat_id: int
+    message_id: int
+    user_id: str
+    assistant_id: int
+    agent_route: str
+    text: str
+    files: list[dict]
+    message_type: str
+    command_name: str | None
+    command_args: str | None
+
+    @classmethod
+    def from_ws(cls, data: dict, *, agent_route: str) -> "MessageEvent":
+        return cls(
+            platform="bgos",
+            chat_id=data["chat_id"],
+            message_id=data["message_id"],
+            user_id=data.get("user_id", ""),
+            assistant_id=data["assistant_id"],
+            agent_route=agent_route,
+            text=data.get("text", ""),
+            files=data.get("files") or [],
+            message_type=data.get("message_type", "standard"),
+            command_name=data.get("command_name"),
+            command_args=data.get("command_args"),
+        )
+
+try:  # pragma: no cover - exercised only when Hermes is installed
+    from gateway.platforms.base import BasePlatformAdapter, SendResult  # type: ignore
+except ImportError:
+    # Hermes not installed (e.g. CI without the fork applied) — use the
+    # in-repo stub so this module remains importable and testable.
+    from tests.mocks.mock_hermes import BasePlatformAdapter, SendResult  # type: ignore
+
+log = logging.getLogger(__name__)
+
+
+class BGOSAdapter(BasePlatformAdapter):
+    """Hermes channel adapter for BGOS.
+
+    Lifecycle:
+      1. Hermes instantiates `BGOSAdapter(config)` (where `config` is Hermes's
+         own config object, NOT our `BgosConfig`). The shim in the fork reads
+         the BGOS-specific fields off `config` and constructs a `BgosConfig`.
+         For test convenience, this class accepts a `BgosConfig` directly.
+      2. Gateway calls `await adapter.connect()` — we fetch the pairing scope
+         via `GET /integrations/me`, build the assistant→route map, and open
+         the Socket.IO connection.
+      3. Inbound events flow via `_handle_inbound` / `_handle_callback` (wired
+         in Tasks 5 and 8). Outbound goes through `send()` + optional
+         `send_image/voice/video/document/animation` (Task 6) +
+         `send_exec_approval` (Task 7).
+      4. Gateway calls `await adapter.disconnect()` on shutdown.
+    """
+
+    platform_name = "bgos"
+
+    def __init__(self, config: BgosConfig) -> None:
+        super().__init__()
+        self._config = config
+        self._api = BgosApi(config)
+        self._state = StateStore()
+        self._ws: BgosWs | None = None
+        self.pairing_id: int | None = None
+        # Approval bookkeeping — approval_id → session_key. Populated by
+        # send_exec_approval, drained by Task 8's callback router.
+        self._approval_state: dict[int, str] = {}
+        self._approval_id_counter = itertools.count(1)
+
+    # -------------------------------------------------------------------------
+    # Lifecycle (abstract on BasePlatformAdapter)
+    # -------------------------------------------------------------------------
+
+    async def connect(self) -> bool:
+        """Fetch pairing scope, build route map, open the Socket.IO connection.
+
+        Propagates `BgosApiError` on failure (notably 401 / PAIRING_REVOKED so
+        the caller can clear stored secrets and prompt for re-pair).
+        """
+        me = await self._api.whoami()
+        self.pairing_id = me["pairing_id"]
+        for entry in me.get("assistants", []):
+            self._state.set_route(entry["id"], entry["agent_route"])
+
+        self._ws = BgosWs(
+            self._config,
+            on_inbound_message=self._handle_inbound,
+            on_callback_result=self._handle_callback,
+            on_reconnect=self._on_reconnect,
+        )
+        if self.pairing_id is not None:
+            self._ws.bind_pairing(self.pairing_id)
+        self._ws.bind_assistants(list(self._state.assistant_route.keys()))
+        await self._ws.start()
+        return True
+
+    async def disconnect(self) -> None:
+        """Idempotent — safe to call multiple times (e.g. from a signal handler)."""
+        if self._ws is not None:
+            try:
+                await self._ws.stop()
+            finally:
+                self._ws = None
+        await self._api.close()
+
+    async def send(
+        self,
+        chat_id: int | str,
+        content: str,
+        reply_to: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Post a plain-text assistant message to BGOS.
+
+        Media variants (`send_image`, `send_voice`, …) land in Task 6 as
+        optional class-level overrides the gateway duck-types.
+        """
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=content,
+            sender_type="ASSISTANT",
+            message_type="standard",
+            reply_to_message_id=reply_to,
+        )
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        if isinstance(chat_id, int) and isinstance(message_id, int):
+            self._state.last_assistant_message_by_chat[chat_id] = message_id
+        return SendResult(message_id=message_id, ok=True)
+
+    # -------------------------------------------------------------------------
+    # Optional media overrides (Task 6) — Hermes duck-types these at send time.
+    # The gateway's fallback is to call `send()` with a caption, so NOT
+    # defining these is "fine" — it just degrades media to a text notice.
+    # -------------------------------------------------------------------------
+
+    async def _upload_and_attach(
+        self, *, file_bytes: bytes, filename: str, mime: str,
+    ) -> dict:
+        """Return a files[] entry ready for POST /messages.
+
+        Policy: inline base64 below `S3_THRESHOLD`, presigned S3 PUT above.
+        """
+        size = len(file_bytes)
+        if size < S3_THRESHOLD:
+            return {
+                "filename": filename,
+                "mime": mime,
+                "size": size,
+                "base64": base64.b64encode(file_bytes).decode("ascii"),
+            }
+        presigned = await self._api.create_upload_url(
+            filename=filename, mime=mime, size=size,
+        )
+        # Direct S3 PUT — bypasses the BGOS backend entirely.
+        async with httpx.AsyncClient(
+            timeout=self._config.request_timeout_seconds,
+        ) as put_client:
+            resp = await put_client.put(
+                presigned["upload_url"],
+                content=file_bytes,
+                headers={"Content-Type": mime},
+            )
+            resp.raise_for_status()
+        return {
+            "filename": filename,
+            "mime": mime,
+            "size": size,
+            "s3_key": presigned["s3_key"],
+        }
+
+    async def _send_media(
+        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
+        mime: str, caption: str | None,
+    ) -> SendResult:
+        attach = await self._upload_and_attach(
+            file_bytes=file_bytes, filename=filename, mime=mime,
+        )
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=caption or "",
+            sender_type="ASSISTANT",
+            message_type="standard",
+            files=[attach],
+        )
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        if isinstance(chat_id, (int, str)) and isinstance(message_id, int):
+            self._state.last_assistant_message_by_chat[int(chat_id)] = message_id
+        return SendResult(message_id=message_id, ok=True)
+
+    async def send_image(
+        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
+        mime: str, caption: str | None = None,
+    ) -> SendResult:
+        return await self._send_media(
+            chat_id=chat_id, file_bytes=file_bytes,
+            filename=filename, mime=mime, caption=caption,
+        )
+
+    async def send_voice(
+        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
+        mime: str, caption: str | None = None,
+    ) -> SendResult:
+        return await self._send_media(
+            chat_id=chat_id, file_bytes=file_bytes,
+            filename=filename, mime=mime, caption=caption,
+        )
+
+    async def send_video(
+        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
+        mime: str, caption: str | None = None,
+    ) -> SendResult:
+        return await self._send_media(
+            chat_id=chat_id, file_bytes=file_bytes,
+            filename=filename, mime=mime, caption=caption,
+        )
+
+    async def send_document(
+        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
+        mime: str, caption: str | None = None,
+    ) -> SendResult:
+        return await self._send_media(
+            chat_id=chat_id, file_bytes=file_bytes,
+            filename=filename, mime=mime, caption=caption,
+        )
+
+    async def send_animation(
+        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
+        mime: str, caption: str | None = None,
+    ) -> SendResult:
+        return await self._send_media(
+            chat_id=chat_id, file_bytes=file_bytes,
+            filename=filename, mime=mime, caption=caption,
+        )
+
+    # -------------------------------------------------------------------------
+    # send_exec_approval (Task 7) — optional duck-typed hook. Gateway calls
+    # us with a 15s hard deadline when the agent requests a dangerous-command
+    # approval. We render BGOS's approval_request bubble with four Telegram-
+    # parity buttons (Allow once / for session / always / Deny) and stash
+    # approval_id → session_key for Task 8's callback router.
+    # -------------------------------------------------------------------------
+
+    async def send_exec_approval(
+        self,
+        chat_id: int | str,
+        command: str,
+        session_key: str,
+        description: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        approval_id = next(self._approval_id_counter)
+
+        options = [
+            {"label": "Allow once",         "callback_data": f"ea:once:{approval_id}",
+             "style": "success", "row_index": 0},
+            {"label": "Allow for session",  "callback_data": f"ea:session:{approval_id}",
+             "style": "success", "row_index": 0},
+            {"label": "Always allow",       "callback_data": f"ea:always:{approval_id}",
+             "style": "default", "row_index": 1},
+            {"label": "Deny",               "callback_data": f"ea:deny:{approval_id}",
+             "style": "danger",  "row_index": 1},
+        ]
+        approval_meta = {
+            "command": command,
+            "session_key": session_key,
+            "approval_id": approval_id,
+            "metadata": metadata or {},
+        }
+
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=description,
+            sender_type="ASSISTANT",
+            message_type="approval_request",
+            options=options,
+            approval_meta=approval_meta,
+        )
+        # Stash AFTER the successful POST so a 5xx doesn't leave us with a
+        # phantom pending approval the router would later try to resolve.
+        self._approval_state[approval_id] = session_key
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        return SendResult(message_id=message_id, ok=True)
+
+    async def get_chat_info(self, chat_id: int | str) -> dict:
+        """BGOS is DM-only — a chat is its own minimal context. If later
+        tasks need real chat metadata (title, participants), we extend this
+        to call an endpoint on BGOS. For now, return a minimal stub that
+        satisfies Hermes's contract."""
+        return {"platform": self.platform_name, "chat_id": int(chat_id)}
+
+    # -------------------------------------------------------------------------
+    # Introspection (used by tests + later tasks)
+    # -------------------------------------------------------------------------
+
+    @property
+    def assistant_route_map(self) -> dict[int, str]:
+        """A defensive copy so tests (and caller code) can't mutate internals."""
+        return dict(self._state.assistant_route)
+
+    # -------------------------------------------------------------------------
+    # WS event hooks — placeholders filled in by later tasks
+    # -------------------------------------------------------------------------
+
+    async def _handle_inbound(self, data: dict) -> None:
+        """Translate a WS inbound_message payload into a Hermes MessageEvent
+        and hand it to `self.handle_message`. Drops events for unknown
+        assistants (e.g. a race where a pairing was just revoked but the WS
+        hasn't caught up).
+
+        Bridge-local slash commands (`/new`, `/retry`, `/status`) are
+        intercepted here and handled adapter-side — they never reach the
+        Hermes agent. Everything else flows through `handle_message`.
+        """
+        assistant_id = data.get("assistant_id")
+        if assistant_id is None:
+            log.debug("inbound missing assistant_id: %s", data)
+            return
+        route = self._state.get_route(assistant_id)
+        if route is None:
+            log.warning(
+                "inbound for unknown assistant_id=%s — dropping", assistant_id,
+            )
+            return
+
+        # Bridge-local intercept (Task 9): slash_command messages whose
+        # command name is in BRIDGE_LOCAL_COMMANDS are handled by the adapter.
+        if data.get("message_type") == "slash_command":
+            command_name = (data.get("command_name") or "").lower()
+            if command_name in BRIDGE_LOCAL_COMMANDS:
+                await self._handle_bridge_local(command_name, data)
+                return
+
+        event = MessageEvent.from_ws(data, agent_route=route)
+        # Keep the retry cache populated so the /retry bridge-local can
+        # resend the last user text in this chat.
+        if event.text and event.message_type != "slash_command":
+            self._state.last_user_text_by_chat[event.chat_id] = event.text
+        await self.handle_message(event)
+
+    async def _handle_bridge_local(self, command: str, data: dict) -> None:
+        """Handle a `/new`, `/retry`, or `/status` slash command locally —
+        no round-trip to Hermes. Posts an ack/result back to BGOS so the
+        user sees a response."""
+        chat_id = data.get("chat_id")
+        if not isinstance(chat_id, int):
+            log.warning("bridge-local slash missing chat_id: %s", data)
+            return
+
+        if command == "new":
+            self._state.reset_conversation(chat_id)
+            await self._api.post_message(
+                chat_id=chat_id,
+                text="Conversation reset. Next message starts fresh.",
+                sender_type="ASSISTANT",
+                message_type="standard",
+            )
+        elif command == "retry":
+            last = self._state.last_user_text_by_chat.get(chat_id)
+            if not last:
+                await self._api.post_message(
+                    chat_id=chat_id,
+                    text="Nothing to retry yet — send a message first.",
+                    sender_type="ASSISTANT",
+                    message_type="standard",
+                )
+                return
+            # Replay the last user text as a normal inbound, forwarded to the
+            # agent this time (recurse with message_type=standard so the
+            # bridge-local check doesn't fire again).
+            replay = {
+                **data,
+                "text": last,
+                "message_type": "standard",
+                "command_name": None,
+                "command_args": None,
+            }
+            await self._handle_inbound(replay)
+        elif command == "status":
+            lines = [
+                "**BGOS adapter status**",
+                f"- Pairing: {self.pairing_id}",
+                f"- Assistants bound: {len(self._state.assistant_route)}",
+                f"- Last message id seen: {self._ws.last_message_id if self._ws else 0}",
+                f"- Pending approvals: {len(self._approval_state)}",
+            ]
+            await self._api.post_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                sender_type="ASSISTANT",
+                message_type="standard",
+            )
+
+    async def sync_commands_for(self, assistant_id: int) -> None:
+        """Build the merged manifest (Hermes native + bridge-locals) and PUT
+        it to BGOS. Fails open — logs but doesn't raise so a catalog hiccup
+        doesn't break the adapter."""
+        route = self._state.get_route(assistant_id)
+        if route is None:
+            log.debug("sync_commands_for: unknown assistant_id=%d", assistant_id)
+            return
+        try:
+            native = fetch_hermes_native_commands(route)
+            manifest = build_manifest(native)
+            await self._api.put_commands(
+                assistant_id=assistant_id, commands=manifest,
+            )
+        except Exception:
+            log.exception(
+                "command manifest sync failed for assistant_id=%d (route=%s)",
+                assistant_id, route,
+            )
+
+    async def _handle_callback(self, data: dict) -> None:
+        """Route a callback_result WS event.
+
+        `ea:{choice}:{approval_id}` → look up session_key in self._approval_state,
+        call `resolve_gateway_approval(session_key, choice)` from tools.approval
+        (synchronous, thread-safe — safe from this async handler).
+
+        Anything else → defer to `self.handle_button_press(data)` so the
+        Hermes agent sees the press naturally. If no such handler exists,
+        log and drop.
+
+        Stale approval clicks (approval_id missing from _approval_state —
+        e.g. timed out, already resolved, or the adapter restarted) log and
+        no-op. Telegram answers these via `"already resolved"`; BGOS's
+        equivalent would need a separate API call and isn't worth the
+        complexity for Phase 1.
+        """
+        cb = data.get("callback_data", "")
+        m = _APPROVAL_CALLBACK_RE.match(cb)
+        if m is not None:
+            choice = m.group(1)
+            approval_id = int(m.group(2))
+            session_key = self._approval_state.pop(approval_id, None)
+            if session_key is None:
+                log.info(
+                    "stale approval click approval_id=%d — already resolved or timed out",
+                    approval_id,
+                )
+                return
+            # Route via the module-level binding so tests can monkeypatch it.
+            import hermes_channel_bgos.bgos_adapter as _self_mod
+            _self_mod.resolve_gateway_approval(session_key, choice)
+            return
+
+        handler = getattr(self, "handle_button_press", None)
+        if handler is None:
+            log.debug("no handle_button_press; dropping callback_data=%s", cb)
+            return
+        result = handler(data)
+        if asyncio.iscoroutine(result):
+            await result
+
+    def _on_reconnect(self, last_message_id: int) -> None:
+        """Called by BgosWs after a successful reconnect. Schedules a REST
+        backfill so messages that arrived while the socket was down are
+        replayed through the same translation pipeline. Fire-and-forget — we
+        don't want to block the WS connect handler."""
+        asyncio.create_task(self._run_backfill(last_message_id))
+
+    async def _run_backfill(self, last_message_id: int) -> None:
+        """Fetch `GET /integrations/inbound?since_message_id=<last>` and
+        replay each message. Exposed as a public-ish method so tests can
+        invoke it directly without forcing a real WS disconnect."""
+        try:
+            resp = await self._api.fetch_inbound_since(last_message_id)
+        except Exception:
+            log.exception("backfill fetch failed for since_message_id=%d",
+                          last_message_id)
+            return
+        messages = resp.get("messages") if isinstance(resp, dict) else None
+        if not messages:
+            return
+        for msg in messages:
+            try:
+                await self._handle_inbound(msg)
+            except Exception:
+                log.exception("backfill replay failed for message=%s", msg)

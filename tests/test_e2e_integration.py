@@ -1,0 +1,305 @@
+"""End-to-end pytest suite — cross-cutting flows that exercise multiple
+components together against the in-memory MockBgosServer.
+
+Per-task tests in the sibling test files cover unit behavior. These tests
+exist to catch regressions where the seams between components (REST ↔ WS,
+adapter ↔ approval state ↔ callback router, inbound → handle_message →
+outbound send) silently drift.
+"""
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+import hermes_channel_bgos.bgos_adapter as adapter_mod
+from hermes_channel_bgos.bgos_adapter import BGOSAdapter, MessageEvent
+from hermes_channel_bgos.bgos_api import BgosApi
+from hermes_channel_bgos.config import BgosConfig
+
+
+pytestmark = pytest.mark.asyncio
+
+
+def _seed_whoami(server, assistants=None) -> None:
+    server.on("GET", "/api/v1/integrations/me").respond(
+        200,
+        {
+            "pairing_id": 42,
+            "assistants": assistants or [{"id": 7, "agent_route": "hades"}],
+        },
+    )
+
+
+async def test_full_pair_then_message_round_trip(mock_bgos_server):
+    """Pair → connect → inbound user message → agent replies via send()."""
+    # 1. Pairing
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_xyz", "pairing_id": 42},
+    )
+    # 2. Whoami
+    _seed_whoami(mock_bgos_server)
+    # 3. Outbound message endpoint
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 301})
+
+    # Simulate the pair CLI's handshake
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token=None))
+    paired = await api.pair_exchange(
+        code="BGOS-ABCD-EF", device_label="test", integration="hermes",
+    )
+    await api.close()
+    assert paired["pairing_token"] == "pair_xyz"
+
+    # Adapter uses the paired token
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token=paired["pairing_token"],
+    ))
+
+    # Fake agent behavior: on any inbound, echo back the text
+    async def fake_handle(event: MessageEvent) -> None:
+        await adapter.send(chat_id=event.chat_id, content=f"echo: {event.text}")
+
+    adapter.handle_message = fake_handle  # type: ignore[method-assign]
+
+    await adapter.connect()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+
+        # Simulate user message arriving via WS
+        await mock_bgos_server.emit_to_room(
+            "assistant:7", "inbound_message",
+            {"chat_id": 11, "message_id": 200, "text": "hi",
+             "user_id": "u1", "assistant_id": 7, "message_type": "standard"},
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        await adapter.disconnect()
+
+    posts = [r for r in mock_bgos_server.requests
+             if r.method == "POST" and r.path == "/api/v1/messages"]
+    assert len(posts) == 1
+    assert posts[-1].json_body["text"] == "echo: hi"
+    assert posts[-1].headers["X-BGOS-Pairing"] == "pair_xyz"
+
+
+async def test_approval_round_trip_via_ws(mock_bgos_server, monkeypatch):
+    """send_exec_approval posts bubble → WS callback_result arrives →
+    _handle_callback routes to resolve_gateway_approval with session_key."""
+    _seed_whoami(mock_bgos_server)
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 555})
+
+    verdicts: list[tuple[str, str]] = []
+
+    def fake_resolve(session_key: str, choice: str) -> None:
+        verdicts.append((session_key, choice))
+
+    monkeypatch.setattr(adapter_mod, "resolve_gateway_approval", fake_resolve)
+
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    await adapter.connect()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+
+        await adapter.send_exec_approval(
+            chat_id=11, command="rm -rf node_modules",
+            session_key="DANGER-KEY", description="Proceed?",
+        )
+        # approval_id=1 is the first minted by itertools.count(1)
+        await mock_bgos_server.emit_to_room(
+            "assistant:7", "callback_result",
+            {"message_id": 555, "callback_data": "ea:deny:1"},
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        await adapter.disconnect()
+
+    assert verdicts == [("DANGER-KEY", "deny")]
+    # Pending state cleaned up
+    assert adapter._approval_state == {}
+
+
+async def test_bridge_local_roundtrip_through_ws(mock_bgos_server, monkeypatch):
+    """Full: WS slash_command inbound → bridge-local intercept → adapter
+    posts ack message → agent never involved."""
+    _seed_whoami(mock_bgos_server)
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 700})
+
+    agent_calls: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+
+    async def fake_handle(event: MessageEvent) -> None:
+        agent_calls.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+
+        # /new slash command over WS
+        await mock_bgos_server.emit_to_room(
+            "assistant:7", "inbound_message",
+            {"chat_id": 11, "message_id": 501, "text": "/new",
+             "user_id": "u1", "assistant_id": 7,
+             "message_type": "slash_command", "command_name": "new",
+             "command_args": ""},
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        await adapter.disconnect()
+
+    # Agent never invoked
+    assert agent_calls == []
+    # But an ack was posted to BGOS
+    posts = [r for r in mock_bgos_server.requests
+             if r.method == "POST" and r.path == "/api/v1/messages"]
+    assert len(posts) == 1
+    assert "reset" in posts[0].json_body["text"].lower()
+
+
+async def test_retry_replay_flows_to_agent(mock_bgos_server, monkeypatch):
+    """Setup: prior user message arrives and caches text; /retry then
+    replays it through _handle_inbound → handle_message."""
+    _seed_whoami(mock_bgos_server)
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 701})
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+
+    async def fake_handle(event: MessageEvent) -> None:
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+
+        # Real user message first
+        await mock_bgos_server.emit_to_room(
+            "assistant:7", "inbound_message",
+            {"chat_id": 11, "message_id": 100, "text": "what's the weather?",
+             "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+        )
+        await asyncio.sleep(0.2)
+
+        # Then /retry
+        await mock_bgos_server.emit_to_room(
+            "assistant:7", "inbound_message",
+            {"chat_id": 11, "message_id": 101, "text": "/retry",
+             "user_id": "u", "assistant_id": 7,
+             "message_type": "slash_command", "command_name": "retry",
+             "command_args": ""},
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        await adapter.disconnect()
+
+    # Two handle_message calls: original + replay
+    texts = [ev.text for ev in handled]
+    assert texts == ["what's the weather?", "what's the weather?"]
+
+
+async def test_reconnect_backfill_replays_missed_messages(mock_bgos_server, monkeypatch):
+    """After a reconnect, the adapter pulls missed messages via REST and
+    replays them through _handle_inbound."""
+    _seed_whoami(mock_bgos_server)
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        200,
+        {"messages": [
+            {"chat_id": 11, "message_id": 305, "text": "missed 1",
+             "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+            {"chat_id": 11, "message_id": 306, "text": "missed 2",
+             "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+        ]},
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+
+    async def fake_handle(event: MessageEvent) -> None:
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        # Simulate reconnect by invoking the backfill path directly with a
+        # cursor. (The actual WS-reconnect test is skipped on Windows due to
+        # python-socketio's clean-close behavior — see test_bgos_ws.py.)
+        await adapter._run_backfill(300)
+    finally:
+        await adapter.disconnect()
+
+    assert [ev.message_id for ev in handled] == [305, 306]
+    req = mock_bgos_server.last_request("GET", "/api/v1/integrations/inbound")
+    assert req.query["since_message_id"] == "300"
+
+
+async def test_pairing_revoked_mid_session_surfaces_as_401(mock_bgos_server):
+    """If the pairing is revoked, the adapter's next whoami returns 401 on
+    connect, which propagates out so the caller can clear secrets +
+    re-pair."""
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        401, {"error": "PAIRING_REVOKED"},
+    )
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_revoked",
+    ))
+    from hermes_channel_bgos.bgos_api import BgosApiError
+    with pytest.raises(BgosApiError) as excinfo:
+        await adapter.connect()
+    assert excinfo.value.code == "PAIRING_REVOKED"
+    # Disconnect after a failed connect must not crash
+    await adapter.disconnect()
+
+
+async def test_multi_assistant_routing(mock_bgos_server, monkeypatch):
+    """Two assistants on the same pairing route to the correct agent_route."""
+    _seed_whoami(
+        mock_bgos_server,
+        assistants=[
+            {"id": 7, "agent_route": "hades"},
+            {"id": 8, "agent_route": "ramy"},
+        ],
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+
+    async def fake_handle(event: MessageEvent) -> None:
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+
+        await mock_bgos_server.emit_to_room(
+            "assistant:7", "inbound_message",
+            {"chat_id": 11, "message_id": 1, "text": "to hades",
+             "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+        )
+        await mock_bgos_server.emit_to_room(
+            "assistant:8", "inbound_message",
+            {"chat_id": 12, "message_id": 2, "text": "to ramy",
+             "user_id": "u", "assistant_id": 8, "message_type": "standard"},
+        )
+        await asyncio.sleep(0.3)
+    finally:
+        await adapter.disconnect()
+
+    by_route = {ev.agent_route: ev.text for ev in handled}
+    assert by_route == {"hades": "to hades", "ramy": "to ramy"}

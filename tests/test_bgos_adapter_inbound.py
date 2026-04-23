@@ -1,0 +1,185 @@
+"""Tests for BGOSAdapter's inbound pipeline (Task 5).
+
+`inbound_message` WS events → MessageEvent → self.handle_message(event).
+Also verifies the reconnect backfill path: on WS reconnect, fetch_inbound_since
+is called with the last seen message_id, and each returned message is fed
+through the same translation path.
+"""
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from hermes_channel_bgos.bgos_adapter import BGOSAdapter, MessageEvent
+from hermes_channel_bgos.config import BgosConfig
+
+
+pytestmark = pytest.mark.asyncio
+
+
+async def test_inbound_message_translates_and_handles(mock_bgos_server, monkeypatch):
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+
+    async def fake_handle(event):
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        # Wait for WS connection + room join to settle
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+
+        await mock_bgos_server.emit_to_room(
+            "assistant:7",
+            "inbound_message",
+            {
+                "chat_id": 11, "message_id": 200, "text": "hello world",
+                "user_id": "user_1", "assistant_id": 7, "message_type": "standard",
+            },
+        )
+        await asyncio.sleep(0.2)
+
+        assert len(handled) == 1
+        event = handled[0]
+        assert event.platform == "bgos"
+        assert event.chat_id == 11
+        assert event.message_id == 200
+        assert event.user_id == "user_1"
+        assert event.assistant_id == 7
+        assert event.agent_route == "hades"
+        assert event.text == "hello world"
+        assert event.files == []
+        assert event.message_type == "standard"
+        assert event.command_name is None
+        assert event.command_args is None
+
+        # Retry cache populated
+        assert adapter._state.last_user_text_by_chat[11] == "hello world"
+    finally:
+        await adapter.disconnect()
+
+
+async def test_inbound_for_unknown_assistant_is_dropped(mock_bgos_server, monkeypatch):
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+
+    async def fake_handle(event):
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        # Deliver inbound directly (bypass room routing) with unknown assistant
+        await adapter._handle_inbound({
+            "chat_id": 11, "message_id": 201, "text": "ignored",
+            "user_id": "u", "assistant_id": 999, "message_type": "standard",
+        })
+        assert handled == []
+    finally:
+        await adapter.disconnect()
+
+
+async def test_inbound_carries_command_metadata_for_slash_commands(
+    mock_bgos_server, monkeypatch,
+):
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+
+    async def fake_handle(event):
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        await adapter._handle_inbound({
+            "chat_id": 11, "message_id": 500, "text": "/help",
+            "user_id": "u", "assistant_id": 7,
+            "message_type": "slash_command", "command_name": "help", "command_args": "",
+        })
+        assert len(handled) == 1
+        ev = handled[0]
+        assert ev.message_type == "slash_command"
+        assert ev.command_name == "help"
+        assert ev.command_args == ""
+    finally:
+        await adapter.disconnect()
+
+
+async def test_reconnect_triggers_backfill(mock_bgos_server, monkeypatch):
+    """After reconnect the adapter calls fetch_inbound_since(last_id) and
+    feeds each returned message through the translation pipeline."""
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+    )
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        200, {
+            "messages": [
+                {"chat_id": 11, "message_id": 300, "text": "while-you-were-out-1",
+                 "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+                {"chat_id": 11, "message_id": 301, "text": "while-you-were-out-2",
+                 "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+            ],
+        },
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+
+    async def fake_handle(event):
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        # Simulate reconnect: fire the _on_reconnect hook directly (in
+        # production the WS client invokes it after a successful re-handshake)
+        await adapter._run_backfill(250)
+
+        assert [ev.message_id for ev in handled] == [300, 301]
+        assert [ev.text for ev in handled] == [
+            "while-you-were-out-1",
+            "while-you-were-out-2",
+        ]
+
+        req = mock_bgos_server.last_request("GET", "/api/v1/integrations/inbound")
+        assert req.query["since_message_id"] == "250"
+    finally:
+        await adapter.disconnect()
+
+
+async def test_reconnect_with_empty_backfill_noop(mock_bgos_server, monkeypatch):
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+    )
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        200, {"messages": []},
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+
+    async def fake_handle(event):
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        await adapter._run_backfill(100)
+        assert handled == []
+    finally:
+        await adapter.disconnect()
