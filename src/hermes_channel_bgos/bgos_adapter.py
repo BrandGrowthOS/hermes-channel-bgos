@@ -106,11 +106,14 @@ class MessageEvent:
         )
 
 try:  # pragma: no cover - exercised only when Hermes is installed
+    from gateway.config import Platform as _HermesPlatform  # type: ignore
     from gateway.platforms.base import BasePlatformAdapter, SendResult  # type: ignore
+    _HERMES_BGOS_PLATFORM = getattr(_HermesPlatform, "BGOS", None)
 except ImportError:
     # Hermes not installed (e.g. CI without the fork applied) — use the
     # in-repo stub so this module remains importable and testable.
     from tests.mocks.mock_hermes import BasePlatformAdapter, SendResult  # type: ignore
+    _HERMES_BGOS_PLATFORM = None
 
 log = logging.getLogger(__name__)
 
@@ -140,14 +143,16 @@ class BGOSAdapter(BasePlatformAdapter):
         not our BgosConfig dataclass. We normalize both shapes: if given a
         BgosConfig, use it directly; otherwise resolve from the Hermes
         config / env vars / secrets file in that priority order.
+
+        Super signature: real Hermes `BasePlatformAdapter.__init__(config,
+        platform)` requires both args; the in-repo mock accepts `*args,
+        **kwargs`. We pass `Platform.BGOS` when Hermes is importable,
+        fall back otherwise.
         """
-        # Call super() only if BasePlatformAdapter takes args. The mock/stub
-        # accepts *args/**kwargs; the real BasePlatformAdapter's __init__
-        # should also be lenient (most adapters go through some setup). Use
-        # a defensive call that handles both.
-        try:
-            super().__init__(config)
-        except TypeError:
+        if _HERMES_BGOS_PLATFORM is not None:
+            super().__init__(config, _HERMES_BGOS_PLATFORM)
+        else:
+            # Mock path — accepts whatever we pass.
             super().__init__()
         bgos_config = self._resolve_config(config)
         self._config = bgos_config
