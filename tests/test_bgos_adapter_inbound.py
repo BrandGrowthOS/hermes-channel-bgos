@@ -146,6 +146,11 @@ async def test_reconnect_triggers_backfill(mock_bgos_server, monkeypatch):
 
     await adapter.connect()
     try:
+        # connect() schedules a first-connect backfill(0); drain and reset
+        # so we're only asserting against the explicit reconnect call.
+        await asyncio.sleep(0.15)
+        handled.clear()
+
         # Simulate reconnect: fire the _on_reconnect hook directly (in
         # production the WS client invokes it after a successful re-handshake)
         await adapter._run_backfill(250)
@@ -156,8 +161,11 @@ async def test_reconnect_triggers_backfill(mock_bgos_server, monkeypatch):
             "while-you-were-out-2",
         ]
 
-        req = mock_bgos_server.last_request("GET", "/api/v1/integrations/inbound")
-        assert req.query["since_message_id"] == "250"
+        last_inbound = [
+            r for r in mock_bgos_server.requests
+            if r.method == "GET" and r.path == "/api/v1/integrations/inbound"
+        ][-1]
+        assert last_inbound.query["since_message_id"] == "250"
     finally:
         await adapter.disconnect()
 
@@ -179,6 +187,10 @@ async def test_reconnect_with_empty_backfill_noop(mock_bgos_server, monkeypatch)
 
     await adapter.connect()
     try:
+        # connect() fires a first-connect backfill(0) — with the mock
+        # returning {messages: []} it's a no-op too. Just drain any
+        # scheduled task before the explicit call to be safe.
+        await asyncio.sleep(0.1)
         await adapter._run_backfill(100)
         assert handled == []
     finally:

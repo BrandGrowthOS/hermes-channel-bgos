@@ -34,7 +34,7 @@ async def test_send_image_inline_under_threshold(mock_bgos_server):
             chat_id=11, file_bytes=small_png, filename="tiny.png",
             mime="image/png", caption="hi",
         )
-        assert result.message_id == 700
+        assert result.message_id == "700"  # fork's SendResult typing is str
 
         req = mock_bgos_server.last_request("POST", "/api/v1/messages")
         body = req.json_body

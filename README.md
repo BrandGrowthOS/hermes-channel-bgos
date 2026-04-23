@@ -53,7 +53,11 @@ The token is stored at `~/.hermes/secrets/bgos.json` (mode 0600 on POSIX). Re-ru
 
 | Var | Default | What |
 |---|---|---|
-| `BGOS_API_URL` | `https://api.brandgrowthos.ai` | BGOS backend base URL. Override for local dev. |
+| `BGOS_API_KEY` | — | Pairing token. Set by `hermes-pair-bgos`; also readable from `~/.hermes/secrets/bgos.json`. Put in the Hermes systemd service's `EnvironmentFile=` to persist across reboots. |
+| `BGOS_BACKEND_URL` | `https://api.brandgrowthos.ai` | BGOS backend base URL. Override for local dev. |
+| `BGOS_AGENTS` | — | Comma-separated `route:Display Name` pairs (e.g. `"hades:Hades,ramy:Ramy"`) — adapter publishes these on connect as the agent catalog. Without this, the BGOS Integrations card's Hermes checklist stays empty. `BGOS_AGENTS_JSON` is a richer JSON-list alternative. |
+| `BGOS_ALLOW_ALL_USERS` | `false` | **Required for live WS messages to pass auth.** The fork's `BasePlatformAdapter._is_user_authorized` rejects inbound messages unless this is `true` OR `BGOS_ALLOWED_USERS` lists the sender's Clerk user_id. Set to `true` in the Hermes systemd env if you only pair your own BGOS user. Without it, messages from BGOS are silently dropped. |
+| `BGOS_ALLOWED_USERS` | — | Comma-separated Clerk user IDs allowed to send messages to this Hermes. Alternative to `ALLOW_ALL_USERS`. |
 | `HERMES_HOME` | `~/.hermes` | Root for Hermes config + secrets. |
 
 Hermes itself gets the pairing token by reading `$HERMES_HOME/secrets/bgos.json` when it instantiates the adapter (via the fork's 5-line shim at `gateway/platforms/bgos.py`).

@@ -233,6 +233,13 @@ async def test_reconnect_backfill_replays_missed_messages(mock_bgos_server, monk
 
     await adapter.connect()
     try:
+        # connect() now schedules a first-connect backfill via
+        # asyncio.create_task(_run_backfill(0)). Let it drain and reset the
+        # handled list so the explicit reconnect call below is what we assert
+        # against.
+        await asyncio.sleep(0.15)
+        handled.clear()
+
         # Simulate reconnect by invoking the backfill path directly with a
         # cursor. (The actual WS-reconnect test is skipped on Windows due to
         # python-socketio's clean-close behavior — see test_bgos_ws.py.)
@@ -241,8 +248,12 @@ async def test_reconnect_backfill_replays_missed_messages(mock_bgos_server, monk
         await adapter.disconnect()
 
     assert [ev.message_id for ev in handled] == [305, 306]
-    req = mock_bgos_server.last_request("GET", "/api/v1/integrations/inbound")
-    assert req.query["since_message_id"] == "300"
+    # Last call to /integrations/inbound should be the cursor=300 one
+    last_inbound = [
+        r for r in mock_bgos_server.requests
+        if r.method == "GET" and r.path == "/api/v1/integrations/inbound"
+    ][-1]
+    assert last_inbound.query["since_message_id"] == "300"
 
 
 async def test_pairing_revoked_mid_session_surfaces_as_401(mock_bgos_server):

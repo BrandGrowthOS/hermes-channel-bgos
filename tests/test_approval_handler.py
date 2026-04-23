@@ -33,7 +33,7 @@ async def test_send_exec_approval_posts_expected_payload(mock_bgos_server):
             description="Hades wants to wipe node_modules. Proceed?",
             metadata={"thread_id": "t1"},
         )
-        assert result.message_id == 777
+        assert result.message_id == "777"  # fork's SendResult typing is str
 
         req = mock_bgos_server.last_request("POST", "/api/v1/messages")
         body = req.json_body

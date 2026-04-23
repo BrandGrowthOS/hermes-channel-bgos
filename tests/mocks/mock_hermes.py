@@ -40,7 +40,13 @@ class BasePlatformAdapter:
 
 @dataclass
 class SendResult:
-    """Stand-in for `gateway.platforms.base.SendResult`."""
+    """Stand-in for `gateway.platforms.base.SendResult`.
 
-    message_id: int | None = None
-    ok: bool = True
+    Mirrors the fork's field names: `success` (bool) and `message_id` (str).
+    Earlier drafts used `ok` and an int here — but the real fork uses
+    success + str, and bypassing that caused TypeError at runtime (caught
+    during live testing on kc's server 2026-04-24).
+    """
+
+    message_id: str | None = None
+    success: bool = True

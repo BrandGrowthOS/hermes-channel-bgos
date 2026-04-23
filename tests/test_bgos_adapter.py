@@ -73,8 +73,10 @@ async def test_adapter_send_posts_text_message(mock_bgos_server):
     await adapter.connect()
     try:
         result = await adapter.send(chat_id=11, content="hello back")
-        assert result.message_id == 300
-        assert result.ok is True
+        # SendResult.message_id is str (matches fork's type), SendResult.success
+        # is the fork's field name (not `ok` as earlier drafts used).
+        assert result.message_id == "300"
+        assert result.success is True
 
         req = mock_bgos_server.last_request("POST", "/api/v1/messages")
         body = req.json_body

@@ -107,13 +107,39 @@ class MessageEvent:
 
 try:  # pragma: no cover - exercised only when Hermes is installed
     from gateway.config import Platform as _HermesPlatform  # type: ignore
-    from gateway.platforms.base import BasePlatformAdapter, SendResult  # type: ignore
+    from gateway.platforms.base import (  # type: ignore
+        BasePlatformAdapter,
+        MessageEvent as _GatewayMessageEvent,
+        MessageType as _GatewayMessageType,
+        SendResult,
+    )
     _HERMES_BGOS_PLATFORM = getattr(_HermesPlatform, "BGOS", None)
 except ImportError:
     # Hermes not installed (e.g. CI without the fork applied) — use the
     # in-repo stub so this module remains importable and testable.
     from tests.mocks.mock_hermes import BasePlatformAdapter, SendResult  # type: ignore
     _HERMES_BGOS_PLATFORM = None
+    _GatewayMessageEvent = None  # type: ignore
+    _GatewayMessageType = None  # type: ignore
+
+
+def _send_result(*, message_id: int | None) -> SendResult:
+    """Construct a SendResult using the fork's actual field names.
+
+    Fork's SendResult wants `success=True` and `message_id: str | None` (see
+    gateway/platforms/base.py); earlier drafts used `ok=True` and passed an
+    int. This helper centralizes the adaptation so all send paths stay
+    consistent. Test-mode SendResult (tests/mocks/mock_hermes.py) accepts
+    either field name because it's a dataclass we control — we mirror the
+    real fork there.
+    """
+    mid = str(message_id) if message_id is not None else None
+    try:
+        return SendResult(success=True, message_id=mid)  # type: ignore[call-arg]
+    except TypeError:
+        # Older mock path (kept for backwards compat on any third-party test
+        # suite that hasn't updated to the `success=` name yet)
+        return SendResult(ok=True, message_id=mid)  # type: ignore[call-arg]
 
 log = logging.getLogger(__name__)
 
@@ -275,6 +301,13 @@ class BGOSAdapter(BasePlatformAdapter):
         # agents to expose. Fail-open: an empty catalog is valid — the user
         # can either set BGOS_AGENTS env var next time or bind via curl.
         await self._push_agent_catalog_safe()
+
+        # Replay any messages that arrived while the adapter was down. Only
+        # fires on the first connect here; subsequent reconnects trigger
+        # backfill via _on_reconnect with the WS's last_message_id cursor.
+        # since_message_id=0 is the "start of time" cursor — backend returns
+        # only messages the pairing hasn't seen.
+        asyncio.create_task(self._run_backfill(0))
         return True
 
     async def _push_agent_catalog_safe(self) -> None:
@@ -387,7 +420,7 @@ class BGOSAdapter(BasePlatformAdapter):
         message_id = resp.get("id") if isinstance(resp, dict) else None
         if isinstance(chat_id, int) and isinstance(message_id, int):
             self._state.last_assistant_message_by_chat[chat_id] = message_id
-        return SendResult(message_id=message_id, ok=True)
+        return _send_result(message_id=message_id)
 
     # -------------------------------------------------------------------------
     # Optional media overrides (Task 6) — Hermes duck-types these at send time.
@@ -450,7 +483,7 @@ class BGOSAdapter(BasePlatformAdapter):
         message_id = resp.get("id") if isinstance(resp, dict) else None
         if isinstance(chat_id, (int, str)) and isinstance(message_id, int):
             self._state.last_assistant_message_by_chat[int(chat_id)] = message_id
-        return SendResult(message_id=message_id, ok=True)
+        return _send_result(message_id=message_id)
 
     async def send_image(
         self, *, chat_id: int | str, file_bytes: bytes, filename: str,
@@ -549,7 +582,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # phantom pending approval the router would later try to resolve.
         self._approval_state[approval_id] = session_key
         message_id = resp.get("id") if isinstance(resp, dict) else None
-        return SendResult(message_id=message_id, ok=True)
+        return _send_result(message_id=message_id)
 
     async def get_chat_info(self, chat_id: int | str) -> dict:
         """BGOS is DM-only — a chat is its own minimal context. If later
@@ -605,7 +638,43 @@ class BGOSAdapter(BasePlatformAdapter):
         # resend the last user text in this chat.
         if event.text and event.message_type != "slash_command":
             self._state.last_user_text_by_chat[event.chat_id] = event.text
-        await self.handle_message(event)
+
+        # Hermes's handle_message expects a gateway-native MessageEvent with
+        # a SessionSource `source` attribute (BasePlatformAdapter inspects
+        # event.source immediately for auth + routing). We wrap our flat
+        # vendor event into the gateway shape when Hermes is installed;
+        # fall through to the vendor event otherwise (tests).
+        if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
+            user_id = str(event.user_id) if event.user_id else None
+            # REST backfill entries don't carry user_id — mark them internal
+            # so the fork's auth gate (which requires source.user_id) lets
+            # them through instead of dropping.
+            is_backfill = user_id is None
+            try:
+                source = self.build_source(  # type: ignore[attr-defined]
+                    chat_id=str(event.chat_id), user_id=user_id,
+                )
+            except AttributeError:
+                # Older fork revision without build_source — skip the wrap
+                # and hope the base class's default is forgiving.
+                await self.handle_message(event)
+                return
+            msg_type = (
+                _GatewayMessageType.COMMAND  # type: ignore[attr-defined]
+                if event.message_type == "slash_command"
+                else _GatewayMessageType.TEXT  # type: ignore[attr-defined]
+            )
+            gateway_event = _GatewayMessageEvent(
+                text=event.text,
+                message_type=msg_type,
+                source=source,
+                message_id=str(event.message_id),
+                raw_message=event,
+                internal=is_backfill,
+            )
+            await self.handle_message(gateway_event)
+        else:
+            await self.handle_message(event)
 
     async def _handle_bridge_local(self, command: str, data: dict) -> None:
         """Handle a `/new`, `/retry`, or `/status` slash command locally —
@@ -731,8 +800,14 @@ class BGOSAdapter(BasePlatformAdapter):
 
     async def _run_backfill(self, last_message_id: int) -> None:
         """Fetch `GET /integrations/inbound?since_message_id=<last>` and
-        replay each message. Exposed as a public-ish method so tests can
-        invoke it directly without forcing a real WS disconnect."""
+        replay each message through `_handle_inbound`. Exposed as a
+        public-ish method so tests can invoke it directly without forcing
+        a real WS disconnect.
+
+        Field-name adaptation: backend REST responses use the primary-key
+        name `id` for message rows, while the WS event uses `message_id`.
+        MessageEvent.from_ws reads `message_id`, so we normalize here.
+        """
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -743,6 +818,10 @@ class BGOSAdapter(BasePlatformAdapter):
         if not messages:
             return
         for msg in messages:
+            # Normalize REST → WS field name so _handle_inbound's assumption
+            # (data["message_id"]) holds regardless of source.
+            if "message_id" not in msg and "id" in msg:
+                msg = {**msg, "message_id": msg["id"]}
             try:
                 await self._handle_inbound(msg)
             except Exception:
