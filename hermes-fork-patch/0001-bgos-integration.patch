@@ -1,4 +1,4 @@
-From d8ced919ff555a5554c1a012a4c6af4b58e6f5ca Mon Sep 17 00:00:00 2001
+From 0c9b2fecbc166f629cdbb1c48a88ce6ad8f790c5 Mon Sep 17 00:00:00 2001
 From: Kc <Karim@brandgrowthos.ai>
 Date: Fri, 24 Apr 2026 00:34:05 +0400
 Subject: [PATCH] feat: add BGOS as a channel platform (via hermes-channel-bgos
@@ -8,7 +8,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ---
  agent/prompt_builder.py    |  4 ++++
  cron/scheduler.py          |  3 ++-
- gateway/config.py          | 20 ++++++++++++++++++++
+ gateway/config.py          | 35 +++++++++++++++++++++++++++++++++++
  gateway/platforms/bgos.py  |  6 ++++++
  gateway/run.py             |  7 +++++++
  hermes_cli/gateway.py      | 24 ++++++++++++++++++++++++
@@ -17,7 +17,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
  tools/cronjob_tools.py     |  2 +-
  tools/send_message_tool.py |  1 +
  toolsets.py                |  8 +++++++-
- 11 files changed, 74 insertions(+), 3 deletions(-)
+ 11 files changed, 89 insertions(+), 3 deletions(-)
  create mode 100644 gateway/platforms/bgos.py
 
 diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
@@ -57,7 +57,7 @@ index e7a22dfb..f287a0c7 100644
  
      # Optionally wrap the content with a header/footer so the user knows this
 diff --git a/gateway/config.py b/gateway/config.py
-index 67ebf734..fbf2580a 100644
+index 67ebf734..a8336d92 100644
 --- a/gateway/config.py
 +++ b/gateway/config.py
 @@ -67,6 +67,7 @@ class Platform(Enum):
@@ -68,12 +68,27 @@ index 67ebf734..fbf2580a 100644
  
  
  @dataclass
-@@ -1271,6 +1272,25 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
+@@ -1271,6 +1272,40 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                  name=os.getenv("QQBOT_HOME_CHANNEL_NAME") or os.getenv(qq_home_name_env, "Home"),
              )
  
 +    # BGOS
 +    bgos_api_key = os.getenv("BGOS_API_KEY")
++    if not bgos_api_key:
++        # Fall back to the secrets file written by `hermes-pair-bgos`
++        # so users don't have to manually copy the pairing token into
++        # systemd env after pairing. Matches the adapter's own
++        # BgosConfig resolution order (see hermes-channel-bgos/src/
++        # hermes_channel_bgos/bgos_adapter.py::_resolve_config).
++        try:
++            bgos_home_dir = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
++            bgos_secrets_file = bgos_home_dir / "secrets" / "bgos.json"
++            if bgos_secrets_file.is_file():
++                bgos_api_key = json.loads(bgos_secrets_file.read_text()).get("pairing_token")
++        except Exception:
++            # Fail silently — if the secrets file is unreadable, user
++            # can still provide BGOS_API_KEY via env.
++            bgos_api_key = None
 +    if bgos_api_key:
 +        if Platform.BGOS not in config.platforms:
 +            config.platforms[Platform.BGOS] = PlatformConfig()
