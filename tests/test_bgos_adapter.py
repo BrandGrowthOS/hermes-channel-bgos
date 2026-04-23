@@ -22,8 +22,8 @@ async def test_adapter_connect_calls_whoami_and_builds_route_map(mock_bgos_serve
         {
             "pairing_id": 42,
             "assistants": [
-                {"id": 7, "agent_route": "hades", "command_count": 0},
-                {"id": 8, "agent_route": "ramy", "command_count": 3},
+                {"assistant_id": 7, "agent_route": "hades", "command_count": 0},
+                {"assistant_id": 8, "agent_route": "ramy", "command_count": 3},
             ],
         },
     )
@@ -65,7 +65,7 @@ async def test_adapter_401_raises(mock_bgos_server):
 
 async def test_adapter_send_posts_text_message(mock_bgos_server):
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 300})
 
@@ -128,7 +128,7 @@ async def test_adapter_get_chat_info_returns_minimal(mock_bgos_server):
 
 async def test_assistant_route_map_is_defensive_copy(mock_bgos_server):
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
     adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     await adapter.connect()

@@ -96,7 +96,7 @@ def test_build_manifest_lowercases_names():
 @pytest.mark.asyncio
 async def _connected_adapter(server) -> BGOSAdapter:
     server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
     adapter = BGOSAdapter(BgosConfig(base_url=server.url, pairing_token="pair_xyz"))
     await adapter.connect()

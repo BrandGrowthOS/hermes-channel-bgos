@@ -128,7 +128,7 @@ async def test_whoami_returns_pairing_context(mock_bgos_server):
     api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
         200,
-        {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
 
     resp = await api.whoami()

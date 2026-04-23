@@ -244,8 +244,21 @@ class BGOSAdapter(BasePlatformAdapter):
         """
         me = await self._api.whoami()
         self.pairing_id = me["pairing_id"]
+        # Backend /api/v1/integrations/me returns assistants with the key
+        # `assistant_id` (see backend/src/integrations/pairing.controller.ts
+        # line ~128: `assistant_id: Number(r.id)`). Earlier drafts guessed
+        # `id` and silently failed with KeyError on real traffic. The fall-
+        # back to `entry.get("id")` keeps old-shape mocks in third-party
+        # test suites working, but the canonical key is `assistant_id`.
         for entry in me.get("assistants", []):
-            self._state.set_route(entry["id"], entry["agent_route"])
+            assistant_id = entry.get("assistant_id", entry.get("id"))
+            if assistant_id is None or entry.get("agent_route") is None:
+                log.warning(
+                    "whoami assistant entry missing fields (skipping): %s",
+                    entry,
+                )
+                continue
+            self._state.set_route(assistant_id, entry["agent_route"])
 
         self._ws = BgosWs(
             self._config,

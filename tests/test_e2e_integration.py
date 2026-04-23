@@ -26,7 +26,7 @@ def _seed_whoami(server, assistants=None) -> None:
         200,
         {
             "pairing_id": 42,
-            "assistants": assistants or [{"id": 7, "agent_route": "hades"}],
+            "assistants": assistants or [{"assistant_id": 7, "agent_route": "hades"}],
         },
     )
 
@@ -268,8 +268,8 @@ async def test_multi_assistant_routing(mock_bgos_server, monkeypatch):
     _seed_whoami(
         mock_bgos_server,
         assistants=[
-            {"id": 7, "agent_route": "hades"},
-            {"id": 8, "agent_route": "ramy"},
+            {"assistant_id": 7, "agent_route": "hades"},
+            {"assistant_id": 8, "agent_route": "ramy"},
         ],
     )
 

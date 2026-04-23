@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_inbound_message_translates_and_handles(mock_bgos_server, monkeypatch):
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
 
     handled: list[MessageEvent] = []
@@ -68,7 +68,7 @@ async def test_inbound_message_translates_and_handles(mock_bgos_server, monkeypa
 
 async def test_inbound_for_unknown_assistant_is_dropped(mock_bgos_server, monkeypatch):
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
 
     handled: list[MessageEvent] = []
@@ -94,7 +94,7 @@ async def test_inbound_carries_command_metadata_for_slash_commands(
     mock_bgos_server, monkeypatch,
 ):
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
 
     handled: list[MessageEvent] = []
@@ -124,7 +124,7 @@ async def test_reconnect_triggers_backfill(mock_bgos_server, monkeypatch):
     """After reconnect the adapter calls fetch_inbound_since(last_id) and
     feeds each returned message through the translation pipeline."""
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
     mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
         200, {
@@ -164,7 +164,7 @@ async def test_reconnect_triggers_backfill(mock_bgos_server, monkeypatch):
 
 async def test_reconnect_with_empty_backfill_noop(mock_bgos_server, monkeypatch):
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": [{"id": 7, "agent_route": "hades"}]},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
     mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
         200, {"messages": []},
