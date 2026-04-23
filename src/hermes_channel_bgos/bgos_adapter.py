@@ -302,13 +302,46 @@ class BGOSAdapter(BasePlatformAdapter):
         # can either set BGOS_AGENTS env var next time or bind via curl.
         await self._push_agent_catalog_safe()
 
-        # Replay any messages that arrived while the adapter was down. Only
-        # fires on the first connect here; subsequent reconnects trigger
-        # backfill via _on_reconnect with the WS's last_message_id cursor.
-        # since_message_id=0 is the "start of time" cursor — backend returns
-        # only messages the pairing hasn't seen.
-        asyncio.create_task(self._run_backfill(0))
+        # Replay any messages that arrived while the adapter was down. The
+        # cursor comes from the persisted last-id file ($HERMES_HOME/
+        # bgos_last_id) — WITHOUT persistence every restart would backfill
+        # from 0, replaying all history and sending duplicate agent replies
+        # indefinitely. Fresh installs start at 0 (replay once), then the
+        # file auto-advances as messages flow through _handle_inbound.
+        asyncio.create_task(self._run_backfill(self._load_last_id()))
         return True
+
+    # -------------------------------------------------------------------------
+    # Last-seen message-id persistence — prevents duplicate-replay on restart.
+    # Lives at $HERMES_HOME/bgos_last_id. Monotonically advances; never
+    # regresses. Read on connect(), written after every successful inbound
+    # (both WS live and REST backfill).
+    # -------------------------------------------------------------------------
+
+    def _last_id_path(self) -> Path:
+        hermes_home = Path(
+            os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")),
+        )
+        return hermes_home / "bgos_last_id"
+
+    def _load_last_id(self) -> int:
+        try:
+            return int(self._last_id_path().read_text().strip())
+        except (OSError, ValueError):
+            return 0
+
+    def _save_last_id(self, message_id: int) -> None:
+        if not isinstance(message_id, int) or message_id <= 0:
+            return
+        try:
+            path = self._last_id_path()
+            if message_id > self._load_last_id():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(str(message_id))
+        except OSError:
+            # Disk full / read-only / permission denied — don't crash the
+            # connect; worst case we replay on next restart.
+            log.warning("could not persist bgos_last_id=%d", message_id)
 
     async def _push_agent_catalog_safe(self) -> None:
         if self.pairing_id is None:
@@ -634,6 +667,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
         event = MessageEvent.from_ws(data, agent_route=route)
+        # Persist the last-seen message id BEFORE dispatch, so even if
+        # handle_message crashes we don't infinite-loop on restart.
+        self._save_last_id(event.message_id)
         # Keep the retry cache populated so the /retry bridge-local can
         # resend the last user text in this chat.
         if event.text and event.message_type != "slash_command":

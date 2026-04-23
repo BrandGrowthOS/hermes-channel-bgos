@@ -187,11 +187,52 @@ async def test_reconnect_with_empty_backfill_noop(mock_bgos_server, monkeypatch)
 
     await adapter.connect()
     try:
-        # connect() fires a first-connect backfill(0) — with the mock
-        # returning {messages: []} it's a no-op too. Just drain any
-        # scheduled task before the explicit call to be safe.
+        # connect() fires a first-connect backfill using the cursor from
+        # $HERMES_HOME/bgos_last_id. The autouse _isolate_hermes_home
+        # fixture ensures that file starts absent → cursor=0. Mock returns
+        # empty → handled stays []. Drain any scheduled task before
+        # the explicit call.
         await asyncio.sleep(0.1)
         await adapter._run_backfill(100)
         assert handled == []
     finally:
         await adapter.disconnect()
+
+
+async def test_last_id_persists_across_connects(mock_bgos_server, monkeypatch, tmp_path):
+    """bgos_last_id file advances as messages are processed; subsequent
+    connect() uses the saved cursor, not 0 — preventing history replay
+    on every Hermes restart."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
+    )
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        200, {"messages": []},
+    )
+
+    adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    async def _noop(event): return None
+    monkeypatch.setattr(adapter, "handle_message", _noop)
+
+    await adapter.connect()
+    try:
+        await asyncio.sleep(0.1)
+        # Simulate processing of a high-id message (as would happen on WS)
+        await adapter._handle_inbound({
+            "chat_id": 11, "message_id": 9999, "text": "hi",
+            "user_id": "u", "assistant_id": 7, "message_type": "standard",
+        })
+        # File should now contain 9999
+        last_id_file = tmp_path / "hermes_home" / "bgos_last_id"
+        assert last_id_file.read_text().strip() == "9999"
+    finally:
+        await adapter.disconnect()
+
+    # A fresh adapter with the same HERMES_HOME should load cursor=9999
+    adapter2 = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    assert adapter2._load_last_id() == 9999
+
+    # Older message ids don't regress the cursor
+    adapter2._save_last_id(100)
+    assert adapter2._load_last_id() == 9999

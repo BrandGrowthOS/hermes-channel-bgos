@@ -8,6 +8,21 @@ import pytest
 from tests.mocks.mock_bgos_server import MockBgosServer
 
 
+@pytest.fixture(autouse=True)
+def _isolate_hermes_home(tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto-used: redirect HERMES_HOME to a per-test tmp dir so nothing
+    the adapter writes (bgos_last_id, secrets/bgos.json, …) leaks between
+    tests or pollutes the developer's real ~/.hermes.
+
+    Tests that need to read/write a specific subdirectory (e.g. the
+    pairing CLI's `secrets/bgos.json`) can additionally request the
+    explicit `tmp_secrets_dir` fixture below — it points at the secrets/
+    folder inside this same tmp HERMES_HOME.
+    """
+    hermes_home = tmp_path_factory.mktemp("hermes_home")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+
 @pytest.fixture
 async def mock_bgos_server():
     """Start a fresh MockBgosServer on an ephemeral port for each test."""
@@ -21,7 +36,11 @@ async def mock_bgos_server():
 
 @pytest.fixture
 def tmp_secrets_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Monkeypatch HERMES_HOME to a tmp dir and return the secrets/ subdir."""
+    """Explicit `secrets/` dir inside HERMES_HOME for tests that need to
+    write a `bgos.json` file (primarily the pair CLI suite). Resets
+    HERMES_HOME to its own tmp_path rather than inheriting from the
+    autouse fixture, so the pair CLI writes land in a predictable
+    location the caller controls."""
     hermes_home = tmp_path / "hermes_home"
     secrets_dir = hermes_home / "secrets"
     secrets_dir.mkdir(parents=True, exist_ok=True)
