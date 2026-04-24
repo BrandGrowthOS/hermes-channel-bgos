@@ -52,6 +52,23 @@ except ImportError:
 # approval vocabulary.
 _APPROVAL_CALLBACK_RE = re.compile(r"^ea:(once|session|always|deny):(\d+)$")
 
+# Agent-emitted inline-button marker block. See PLATFORM_HINTS["bgos"] in the
+# Hermes fork patch — the agent writes its choices between these tags and the
+# adapter translates them into a BGOS options payload before posting. `mode=`
+# is optional (default inline). Entries are one per line as `Label | value`
+# (pipe-separated). Case-insensitive tags. Blank lines are skipped.
+_BUTTONS_BLOCK_RE = re.compile(
+    r"\[\[BGOS_BUTTONS(?:\s+mode=(inline|modal))?\]\]"
+    r"(.*?)"
+    r"\[\[/BGOS_BUTTONS\]\]",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Backend rejects inline messages with >6 options (see PR #62 + memory
+# `inline_buttons_shipped.md`). Agents that emit more get truncated; we log
+# a warning so this isn't silent.
+_INLINE_OPTION_LIMIT = 6
+
 # Threshold below which we inline base64 into POST /messages; at or above,
 # we upload via a presigned S3 PUT and reference by s3_key. Mirrors
 # openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
@@ -121,6 +138,70 @@ except ImportError:
     _HERMES_BGOS_PLATFORM = None
     _GatewayMessageEvent = None  # type: ignore
     _GatewayMessageType = None  # type: ignore
+
+
+def _parse_buttons_block(content: str) -> tuple[str, list[dict], str | None]:
+    """Extract a `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` block from agent text.
+
+    Returns `(cleaned_text, options, render_mode)`. If no block matches,
+    returns `(content, [], None)` unchanged. The block is stripped from the
+    text and stray blank lines around it are collapsed. Lines inside the
+    block shaped `label | value` (pipe-separated) become
+    `{"text": label, "callbackData": value}` entries.
+
+    Malformed lines (missing pipe, empty label or value) are skipped and
+    logged. If the block is empty after parsing, we return `(cleaned, [],
+    None)` so the text still goes through without an options payload.
+
+    Backend caps inline options at 6; we truncate and warn rather than
+    letting the POST 400.
+    """
+    match = _BUTTONS_BLOCK_RE.search(content)
+    if match is None:
+        return content, [], None
+
+    mode = (match.group(1) or "inline").lower()
+    body = match.group(2)
+    options: list[dict] = []
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Accept both bullet-prefixed and bare lines: "- Foo | foo" or "Foo | foo".
+        if line.startswith(("-", "*")):
+            line = line[1:].strip()
+        if "|" not in line:
+            log.warning(
+                "BGOS_BUTTONS: skipping malformed line (missing '|'): %r", raw_line,
+            )
+            continue
+        label, _, value = line.partition("|")
+        label = label.strip()
+        value = value.strip()
+        if not label or not value:
+            log.warning(
+                "BGOS_BUTTONS: skipping line with empty label or value: %r",
+                raw_line,
+            )
+            continue
+        options.append({"text": label, "callbackData": value})
+
+    if len(options) > _INLINE_OPTION_LIMIT:
+        log.warning(
+            "BGOS_BUTTONS: %d options exceeds inline limit (%d) — truncating",
+            len(options), _INLINE_OPTION_LIMIT,
+        )
+        options = options[:_INLINE_OPTION_LIMIT]
+
+    # Strip the block from the text and tidy up resulting blank-line noise.
+    cleaned = (content[: match.start()] + content[match.end():])
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    if not options:
+        # Block was empty or fully malformed — drop options/mode so we don't
+        # send an empty payload the backend would reject.
+        return cleaned, [], None
+    return cleaned, options, mode
 
 
 def _send_result(*, message_id: int | None) -> SendResult:
@@ -295,6 +376,7 @@ class BGOSAdapter(BasePlatformAdapter):
             on_inbound_message=self._handle_inbound,
             on_callback_result=self._handle_callback,
             on_reconnect=self._on_reconnect,
+            on_inbound_click=self._handle_inbound_click,
         )
         if self.pairing_id is not None:
             self._ws.bind_pairing(self.pairing_id)
@@ -474,7 +556,12 @@ class BGOSAdapter(BasePlatformAdapter):
         reply_to: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
-        """Post a plain-text assistant message to BGOS.
+        """Post an assistant message to BGOS.
+
+        If the agent embeds a `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` block
+        in its reply, the adapter extracts it into a BGOS options payload so
+        the user sees inline chips instead of raw marker text. Block syntax
+        lives in PLATFORM_HINTS["bgos"] (fork patch `agent/prompt_builder.py`).
 
         Media variants (`send_image`, `send_voice`, …) are optional
         class-level overrides the gateway duck-types. The `reply_to` and
@@ -482,11 +569,14 @@ class BGOSAdapter(BasePlatformAdapter):
         but not yet plumbed through — backend's CreateMessageDto doesn't
         currently accept them (Phase F follow-up).
         """
+        cleaned_text, options, render_mode = _parse_buttons_block(content)
         resp = await self._api.post_message(
             chat_id=int(chat_id),
-            text=content,
+            text=cleaned_text,
             sender="assistant",
             message_type="standard",
+            options=options or None,
+            render_mode=render_mode,
         )
         message_id = resp.get("id") if isinstance(resp, dict) else None
         if isinstance(chat_id, int) and isinstance(message_id, int):
@@ -864,6 +954,100 @@ class BGOSAdapter(BasePlatformAdapter):
         result = handler(data)
         if asyncio.iscoroutine(result):
             await result
+
+    async def _handle_inbound_click(self, data: dict) -> None:
+        """Translate a backend `inbound_click` event into a synthetic user
+        MessageEvent and hand it to `self.handle_message`.
+
+        The backend emits this event on the `assistant:<id>` room whenever a
+        user taps an inline option chip on a message belonging to a paired
+        assistant. Sentinel clicks (`__skip__`, `__custom__`) flow through the
+        same path — the agent sees them as regular user text, matching
+        Telegram/Grix behavior where a click is a pseudo-message.
+
+        Approval clicks use a different event (`callback_result` with
+        `ea:*` callback_data) — those are handled in `_handle_callback` and
+        never reach here.
+
+        Payload (camelCase — see backend websocket-outcome-event.service.ts
+        `emitInboundClick`):
+          { assistantId, userId, chatId, messageId, optionId, callbackData,
+            buttonText, customText? }
+        """
+        assistant_id = data.get("assistantId")
+        if assistant_id is None:
+            log.debug("inbound_click missing assistantId: %s", data)
+            return
+        route = self._state.get_route(assistant_id)
+        if route is None:
+            log.warning(
+                "inbound_click for unknown assistant_id=%s — dropping",
+                assistant_id,
+            )
+            return
+
+        chat_id = data.get("chatId")
+        message_id = data.get("messageId")
+        user_id = data.get("userId") or ""
+        button_text = data.get("buttonText") or ""
+        callback_data = data.get("callbackData") or ""
+        custom_text = data.get("customText")
+
+        # The agent's natural view: the user's reply is the button's visible
+        # label. `__custom__` sentinels carry the user's typed text — prefer
+        # it so the agent sees the actual response.
+        if callback_data == "__custom__" and custom_text:
+            text = custom_text
+        else:
+            text = button_text
+
+        # Persist the last-seen id so the poll loop doesn't replay the same
+        # click later via REST backfill (which shouldn't happen for clicks
+        # today — backfill only returns sender='user' messages — but cheap
+        # insurance against future changes).
+        if isinstance(message_id, int):
+            self._save_last_id(message_id)
+
+        # Wrap into a gateway-native MessageEvent when Hermes is installed.
+        if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
+            try:
+                source = self.build_source(  # type: ignore[attr-defined]
+                    chat_id=str(chat_id),
+                    user_id=str(user_id) if user_id else None,
+                )
+            except AttributeError:
+                log.warning(
+                    "inbound_click: gateway build_source unavailable — "
+                    "dropping click for chat=%s", chat_id,
+                )
+                return
+            gateway_event = _GatewayMessageEvent(
+                text=text,
+                message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
+                source=source,
+                message_id=str(message_id) if message_id is not None else None,
+                raw_message=data,
+                internal=False,
+            )
+            await self.handle_message(gateway_event)
+            return
+
+        # Test path (no gateway) — pass a flat MessageEvent with the bits
+        # tests usually inspect.
+        event = MessageEvent(
+            platform="bgos",
+            chat_id=int(chat_id) if isinstance(chat_id, int) else 0,
+            message_id=int(message_id) if isinstance(message_id, int) else 0,
+            user_id=str(user_id),
+            assistant_id=int(assistant_id),
+            agent_route=route,
+            text=text,
+            files=[],
+            message_type="standard",
+            command_name=None,
+            command_args=None,
+        )
+        await self.handle_message(event)
 
     def _on_reconnect(self, last_message_id: int) -> None:
         """Called by BgosWs after a successful reconnect. Schedules a REST

@@ -24,7 +24,7 @@ diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
 index 3a6ec244..dcd5d165 100644
 --- a/agent/prompt_builder.py
 +++ b/agent/prompt_builder.py
-@@ -422,6 +422,33 @@ PLATFORM_HINTS = {
+@@ -422,6 +422,57 @@ PLATFORM_HINTS = {
          "your response. Images are sent as native photos, and other files arrive as downloadable "
          "documents."
      ),
@@ -50,8 +50,32 @@ index 3a6ec244..dcd5d165 100644
 +## Slash commands
 +Users can type bridge-local commands handled by the adapter (not forwarded to you): `/new` resets the conversation binding for the current chat; `/retry` resends the user's last message through you; `/status` shows adapter health. Your own native slash commands (/help, /reset, /stop, /approve, /deny, /status — if the adapter's /status didn't intercept) arrive as regular user text starting with a slash; parse as usual.
 +
-+## Inline option buttons and ask_user_input (NOT YET WIRED)
-+The BGOS UI supports inline option chips (non-approval) and a polished multi-question modal (ask_user_input). Hermes-side support for both is scheduled but NOT YET shipped — for now, if you want to offer choices, ask in plain text ("Pick one: 1. A, 2. B") and the user will type back. Do not emit hypothetical JSON button payloads.
++## Inline option buttons
++You can offer the user tappable inline choice chips by embedding a `[[BGOS_BUTTONS]]` block in your reply. The adapter extracts the block, renders the chips in the BGOS chat, and translates the user's tap into a regular user MessageEvent carrying the button label as its text — so your next turn sees the tap just like typed input.
++
++Syntax:
++```
++Your body text goes here.
++
++[[BGOS_BUTTONS]]
++- Option A | value_a
++- Option B | value_b
++- Option C | value_c
++[[/BGOS_BUTTONS]]
++```
++
++Rules:
++- One button per line, `Label | value` (pipe-separated). Dash/bullet prefix optional.
++- Max 6 options. The backend rejects inline messages with more, the adapter truncates + warns.
++- Labels ≤ 24 chars render cleanly; longer labels wrap.
++- The `value` side is machine-readable (callback_data). The `Label` is what the user sees and what you receive back on tap.
++- When the user taps a chip, your next inbound MessageEvent has `text == "Option A"` (or the label of the clicked option). If the user picks "Custom reply" and types free text, you receive the typed text as the MessageEvent text — treat it as a normal reply.
++- Don't try to render buttons through any other channel (raw JSON, markdown lists, etc.) — the marker syntax is the ONLY wired path.
++
++Use inline chips for async / proactive prompts ("Want me to summarize this?"), lightweight confirmations, and anywhere the user might not be actively watching the chat. The chips stay tappable indefinitely, so the user can answer later.
++
++## ask_user_input modal (NOT YET WIRED)
++BGOS also supports a full-screen multi-question modal (`ask_user_input` in the n8n BGOSAction node). Hermes-side support is scheduled but NOT YET shipped — for multi-question flows today, use sequential inline-button messages instead.
 +
 +## Conversation context
 +Each BGOS chat maps to a single Hermes conversation. DMs only — no group threads, no forum topics. The user can wipe context via `/new`. Typing indicators, stickers, reactions, and message editing by the user are not supported.""",

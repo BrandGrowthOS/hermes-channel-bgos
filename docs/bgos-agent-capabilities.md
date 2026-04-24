@@ -188,8 +188,8 @@ Hermes agents learn about BGOS via a `PLATFORM_HINTS` entry in `agent/prompt_bui
 - **Text** — just reply normally, markdown is honored.
 - **Files / media** — include `MEDIA:/absolute/path/to/file` lines in the reply. Handled natively by the adapter's `send_image/voice/video/document/animation` overrides.
 - **Approvals** — agent doesn't initiate; Hermes's approvals system calls `adapter.send_exec_approval` when a sensitive tool fires. Rendered as the 4-button bubble.
-- **Inline buttons, non-approval** — **NOT YET WIRED.** Planned via `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` marker block parsed by adapter's `send()`. Until shipped, ask in plain text.
-- **`ask_user_input`** — **NOT YET WIRED.** Planned via `[[BGOS_ASK]]...[[/BGOS_ASK]]` marker. Until shipped, ask in plain text.
+- **Inline buttons (non-approval)** — embed a `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` block in the reply. Lines inside the block are `Label | value` (pipe-separated), one per line, max 6. Adapter extracts the block and posts `options: [{text, callbackData}]` with `renderMode: 'inline'`. When the user taps a chip, the adapter receives `inbound_click` on the `assistant:<id>` WS room and synthesizes a user `MessageEvent` with `text = <clicked button label>` — the agent sees the tap as a normal user reply.
+- **`ask_user_input` modal** — **NOT YET WIRED.** Planned via `[[BGOS_ASK]]...[[/BGOS_ASK]]` marker. Until shipped, use sequential inline-button messages.
 - **Slash commands from agent to user** — push via `PUT /integrations/assistants/:id/commands` (adapter's `sync_commands_for` method).
 - **Home-channel cron** — set `BGOS_HOME_CHANNEL` env var on the Hermes server. Crons scheduled with `deliver="bgos"` route to that chat id.
 

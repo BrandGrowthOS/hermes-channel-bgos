@@ -99,6 +99,8 @@ Both outcomes expected per the README — the shim only resolves once `hermes-ch
 3. **`_HOME_TARGET_ENV_VARS` dict in `cron/scheduler.py`** (~line 54) — maps platform names to home-channel env vars. **Not registered** — BGOS can still be set via `BGOS_HOME_CHANNEL` (we wire that in `gateway/config.py`), but bare `deliver="bgos"` without home-channel lookup will require the vendor package to handle it or `_KNOWN_DELIVERY_PLATFORMS` alone to suffice. Flagged as a follow-up if BGOS users report "cron delivery silently drops."
 
 > Updated 2026-04-24: PLATFORM_HINTS BGOS entry expanded from a one-line placeholder to a ~450-word agent-facing capabilities doc (markdown, MEDIA: file syntax, inbound files[], approvals, slash commands, NOT-YET-WIRED status for inline buttons + ask_user_input). `cron/scheduler.py` `_HOME_TARGET_ENV_VARS` now includes `bgos: "BGOS_HOME_CHANNEL"` so `deliver="bgos"` resolves to the BGOS home chat instead of silently falling back to another platform.
+>
+> Updated 2026-04-24 (round 2): Inline buttons now WIRED via `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` marker block. PLATFORM_HINTS section rewritten from "NOT YET WIRED" to full syntax docs (pipe-separated label|value, max 6, click delivery via `inbound_click` WS event → synthetic user MessageEvent). `ask_user_input` modal is still NOT YET WIRED — documented as a follow-up. Corresponding adapter changes live in vendor pkg v0.3.0; backend change emits `inbound_click` to `assistant:<id>` on every paired-assistant button click.
 
 ### Skipped touch-points summary
 

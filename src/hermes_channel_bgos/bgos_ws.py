@@ -43,6 +43,7 @@ class BgosWs:
         on_inbound_message: _Handler,
         on_callback_result: _Handler,
         on_reconnect: _ReconnectHandler | None = None,
+        on_inbound_click: _Handler | None = None,
         reconnection_delay: float = 1.0,
         reconnection_delay_max: float = 30.0,
     ) -> None:
@@ -50,6 +51,7 @@ class BgosWs:
         self._on_inbound = on_inbound_message
         self._on_callback = on_callback_result
         self._on_reconnect = on_reconnect
+        self._on_inbound_click = on_inbound_click
 
         self._assistants: set[int] = set()
         self._pairing_id: int | None = None
@@ -154,6 +156,16 @@ class BgosWs:
                 await _maybe_await(self._on_callback(data))
             except Exception:
                 log.exception("bgos_ws.on_callback_result callback failed")
+
+        @self._sio.on("inbound_click")  # type: ignore[misc]
+        async def _inbound_click(data: dict) -> None:
+            if self._on_inbound_click is None:
+                log.debug("inbound_click received but no handler registered")
+                return
+            try:
+                await _maybe_await(self._on_inbound_click(data))
+            except Exception:
+                log.exception("bgos_ws.on_inbound_click callback failed")
 
     async def _join_current_rooms(self) -> None:
         if self._pairing_id is not None:

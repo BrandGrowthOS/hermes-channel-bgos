@@ -147,18 +147,19 @@ class BgosApi:
         files: list[dict] | None = None,
         options: list[dict] | None = None,
         approval_meta: dict | None = None,
+        render_mode: str | None = None,
     ) -> dict:
         """POST to /api/v1/messages. Wire format matches backend CreateMessageDto
-        (camelCase: chatId, messageType, approvalMeta). `sender` is `"assistant"`
-        (lowercase — matches enum) or `"user"`.
+        (camelCase: chatId, messageType, approvalMeta, renderMode). `sender` is
+        `"assistant"` (lowercase — matches enum) or `"user"`.
 
         `options` entries should be shaped {text, callbackData, style?} —
         these are passed through as-is to match backend CreateMessageOptionDto.
         `files` entries should be shaped
-        {fileName, fileMimeType, fileData? | s3Key?, size?}. Fields not in
-        the backend DTO (e.g. style, row_index, url on options; approvalMeta
-        itself currently) are silently dropped by the backend's whitelist —
-        we still send them for forward compatibility when the backend extends.
+        {fileName, fileMimeType, fileData? | s3Key?, size?}. `render_mode` is
+        `"inline"` (default when options present) or `"modal"`. Fields not in
+        the backend DTO are silently dropped by the whitelist — we still send
+        them for forward compatibility when the backend extends.
         """
         body: dict[str, Any] = {
             "chatId": chat_id,
@@ -172,6 +173,8 @@ class BgosApi:
             body["options"] = options
         if approval_meta is not None:
             body["approvalMeta"] = approval_meta
+        if render_mode is not None:
+            body["renderMode"] = render_mode
         return await self._request("POST", "/api/v1/messages", json=body)
 
     async def patch_message(
