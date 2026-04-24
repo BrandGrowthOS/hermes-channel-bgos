@@ -62,7 +62,7 @@ Patch produced 2026-04-23 (Phase 4 Task 11).
 
 | # | File | Status | Notes |
 |---|---|---|---|
-| 1 | `gateway/config.py` | applied cleanly | Added `BGOS = "bgos"` to `Platform` enum. Also added a BGOS block to `_apply_env_overrides` reading `BGOS_API_KEY`, `BGOS_BACKEND_URL`, `BGOS_HOME_CHANNEL` — this is standard registration per the checklist §2. `_token_env_names` (line 803) not updated because BGOS auths via `api_key`, not `token`; `get_connected_platforms()` already handles `api_key` generically. **Updated 2026-04-24:** `_apply_env_overrides` BGOS block now reads the pairing token from `~/.hermes/secrets/bgos.json` when `BGOS_API_KEY` isn't in env — matches the adapter's own `_resolve_config` resolution order. Systemd `EnvironmentFile` workarounds no longer required; `hermes-pair-bgos` → restart is enough. |
+| 1 | `gateway/config.py` | applied cleanly | Added `BGOS = "bgos"` to `Platform` enum. Also added a BGOS block to `_apply_env_overrides` reading `BGOS_API_KEY`, `BGOS_BACKEND_URL`, `BGOS_HOME_CHANNEL` — this is standard registration per the checklist §2. `_token_env_names` (line 803) not updated because BGOS auths via `api_key`, not `token`; `get_connected_platforms()` already handles `api_key` generically. |
 | 2 | `gateway/run.py` — `_create_adapter` | applied cleanly | Factory branch lives near line 2890 (end of elif chain before `return None`), not 2737 as the original FORK-NOTES approximated. |
 | 3 | `gateway/run.py` — first auth map | applied cleanly | `platform_env_map` at line ~2920 (was ~2075 in FORK-NOTES — map moved). |
 | 4 | `gateway/run.py` — second auth map | applied cleanly | `platform_allow_all_map` at line ~2941 and a third `platform_env_map` at line ~3074 in `_resolve_unauthorized_dm_behavior`. Both updated. Third map wasn't in original FORK-NOTES — **new touch-point added by upstream**. |
@@ -97,6 +97,8 @@ Both outcomes expected per the README — the shim only resolves once `hermes-ch
 1. **Third `platform_env_map` dict in `_resolve_unauthorized_dm_behavior`** (`gateway/run.py` ~line 3074) — registered.
 2. **`_KNOWN_DELIVERY_PLATFORMS` frozenset in `cron/scheduler.py`** — a security validator for user-supplied deliver targets. Registered.
 3. **`_HOME_TARGET_ENV_VARS` dict in `cron/scheduler.py`** (~line 54) — maps platform names to home-channel env vars. **Not registered** — BGOS can still be set via `BGOS_HOME_CHANNEL` (we wire that in `gateway/config.py`), but bare `deliver="bgos"` without home-channel lookup will require the vendor package to handle it or `_KNOWN_DELIVERY_PLATFORMS` alone to suffice. Flagged as a follow-up if BGOS users report "cron delivery silently drops."
+
+> Updated 2026-04-24: PLATFORM_HINTS BGOS entry expanded from a one-line placeholder to a ~450-word agent-facing capabilities doc (markdown, MEDIA: file syntax, inbound files[], approvals, slash commands, NOT-YET-WIRED status for inline buttons + ask_user_input). `cron/scheduler.py` `_HOME_TARGET_ENV_VARS` now includes `bgos: "BGOS_HOME_CHANNEL"` so `deliver="bgos"` resolves to the BGOS home chat instead of silently falling back to another platform.
 
 ### Skipped touch-points summary
 

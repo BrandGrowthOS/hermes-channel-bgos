@@ -1,4 +1,4 @@
-From 0c9b2fecbc166f629cdbb1c48a88ce6ad8f790c5 Mon Sep 17 00:00:00 2001
+From 8daebe4836f4c45335feb048e0fbb22835fd5dcd Mon Sep 17 00:00:00 2001
 From: Kc <Karim@brandgrowthos.ai>
 Date: Fri, 24 Apr 2026 00:34:05 +0400
 Subject: [PATCH] feat: add BGOS as a channel platform (via hermes-channel-bgos
@@ -6,8 +6,8 @@ Subject: [PATCH] feat: add BGOS as a channel platform (via hermes-channel-bgos
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ---
- agent/prompt_builder.py    |  4 ++++
- cron/scheduler.py          |  3 ++-
+ agent/prompt_builder.py    | 27 +++++++++++++++++++++++++++
+ cron/scheduler.py          |  4 +++-
  gateway/config.py          | 35 +++++++++++++++++++++++++++++++++++
  gateway/platforms/bgos.py  |  6 ++++++
  gateway/run.py             |  7 +++++++
@@ -17,26 +17,49 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
  tools/cronjob_tools.py     |  2 +-
  tools/send_message_tool.py |  1 +
  toolsets.py                |  8 +++++++-
- 11 files changed, 89 insertions(+), 3 deletions(-)
+ 11 files changed, 113 insertions(+), 3 deletions(-)
  create mode 100644 gateway/platforms/bgos.py
 
 diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
-index 3a6ec244..6676cf4f 100644
+index 3a6ec244..dcd5d165 100644
 --- a/agent/prompt_builder.py
 +++ b/agent/prompt_builder.py
-@@ -422,6 +422,10 @@ PLATFORM_HINTS = {
+@@ -422,6 +422,33 @@ PLATFORM_HINTS = {
          "your response. Images are sent as native photos, and other files arrive as downloadable "
          "documents."
      ),
-+    "bgos": (
-+        "You are speaking with the user through BGOS, a mobile-first chat app. "
-+        "Keep replies concise; prefer plain text with minimal markdown."
-+    ),
++    "bgos": """You are speaking with the user through BGOS — a mobile-first chat app (iOS, Android, desktop) polished like Telegram or iMessage. The user sees your responses as chat bubbles in a rich UI.
++
++## Message formatting
++Your replies render as markdown via react-native-markdown. Supported: **bold**, *italic*, `inline code`, ```fenced code```, [links](url), and #/##/### headers. Tables and inline-image markdown (![alt](url)) are not yet rendered natively — use MEDIA:/path for images. Keep replies concise; the user is often on a phone.
++
++## Sending files and media
++To deliver an image/video/audio/document, include `MEDIA:/absolute/path/to/file` in your reply (one per line, alongside your text). Handled natively by the BGOS adapter:
++- Images — PNG, JPG, WebP, GIF. Displayed as a tappable thumbnail; tap opens fullscreen viewer.
++- Video — MP4, WebM, MOV. Plays inline.
++- Audio / voice — OGG, MP3, M4A. Renders as a voice bubble with scrubber.
++- Documents — PDF, TXT, DOCX, XLSX, ZIP, etc. Shows as a download card with filename.
++25 MB per file cap. You can mix normal text and multiple MEDIA: lines in one reply.
++
++## Receiving files from the user
++When the user attaches a file, your inbound MessageEvent carries a `files: [{file_name, mime, url}]` list — URLs are presigned S3 links valid ~10 minutes. For images, pass the URL to your vision-capable model or download the bytes. For text documents, fetch the content via HTTP GET.
++
++## Dangerous-command approvals (automatic)
++Whenever you invoke a tool gated by the approvals system, BGOS renders a 4-button bubble — Allow once / Allow for session / Always allow / Deny — identical to Telegram's approval prompt. The user's tap resolves the approval synchronously. Default timeout 60s fail-closed. You don't do anything special; the gateway + adapter handle bubble rendering. Just call the tool normally.
++
++## Slash commands
++Users can type bridge-local commands handled by the adapter (not forwarded to you): `/new` resets the conversation binding for the current chat; `/retry` resends the user's last message through you; `/status` shows adapter health. Your own native slash commands (/help, /reset, /stop, /approve, /deny, /status — if the adapter's /status didn't intercept) arrive as regular user text starting with a slash; parse as usual.
++
++## Inline option buttons and ask_user_input (NOT YET WIRED)
++The BGOS UI supports inline option chips (non-approval) and a polished multi-question modal (ask_user_input). Hermes-side support for both is scheduled but NOT YET shipped — for now, if you want to offer choices, ask in plain text ("Pick one: 1. A, 2. B") and the user will type back. Do not emit hypothetical JSON button payloads.
++
++## Conversation context
++Each BGOS chat maps to a single Hermes conversation. DMs only — no group threads, no forum topics. The user can wipe context via `/new`. Typing indicators, stickers, reactions, and message editing by the user are not supported.""",
  }
  
  # ---------------------------------------------------------------------------
 diff --git a/cron/scheduler.py b/cron/scheduler.py
-index e7a22dfb..f287a0c7 100644
+index e7a22dfb..4c06fe46 100644
 --- a/cron/scheduler.py
 +++ b/cron/scheduler.py
 @@ -46,7 +46,7 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
@@ -48,7 +71,15 @@ index e7a22dfb..f287a0c7 100644
  })
  
  # Platforms that support a configured cron/notification home target, mapped to
-@@ -306,6 +306,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
+@@ -66,6 +66,7 @@ _HOME_TARGET_ENV_VARS = {
+     "weixin": "WEIXIN_HOME_CHANNEL",
+     "bluebubbles": "BLUEBUBBLES_HOME_CHANNEL",
+     "qqbot": "QQBOT_HOME_CHANNEL",
++    "bgos": "BGOS_HOME_CHANNEL",
+ }
+ 
+ # Legacy env var names kept for back-compat.  Each entry is the current
+@@ -306,6 +307,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
          "sms": Platform.SMS,
          "bluebubbles": Platform.BLUEBUBBLES,
          "qqbot": Platform.QQBOT,
