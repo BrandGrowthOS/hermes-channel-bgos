@@ -190,6 +190,10 @@ class BGOSAdapter(BasePlatformAdapter):
         # send_exec_approval, drained by Task 8's callback router.
         self._approval_state: dict[int, str] = {}
         self._approval_id_counter = itertools.count(1)
+        # REST poll loop — fallback for server-side WS push gap (see
+        # _poll_loop for details). Started in connect(), cancelled in
+        # disconnect().
+        self._poll_task: asyncio.Task | None = None
 
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
@@ -309,6 +313,14 @@ class BGOSAdapter(BasePlatformAdapter):
         # indefinitely. Fresh installs start at 0 (replay once), then the
         # file auto-advances as messages flow through _handle_inbound.
         asyncio.create_task(self._run_backfill(self._load_last_id()))
+
+        # Start the REST poll loop. Server currently doesn't deliver
+        # inbound_message over WS to integration sockets — the join-room
+        # ack is silently dropped, so io.to("assistant:<id>").emit(...)
+        # reaches nobody. Until that's fixed server-side, we poll REST
+        # every BGOS_POLL_INTERVAL seconds (default 5s).
+        poll_interval = float(os.environ.get("BGOS_POLL_INTERVAL", "5"))
+        self._poll_task = asyncio.create_task(self._poll_loop(poll_interval))
         return True
 
     # -------------------------------------------------------------------------
@@ -420,8 +432,34 @@ class BGOSAdapter(BasePlatformAdapter):
 
         return []
 
+    async def _poll_loop(self, interval: float) -> None:
+        """Poll REST inbound every `interval` seconds.
+
+        Fallback for the server-side WS push gap: the backend currently does
+        not emit `inbound_message` to integration sockets — the join-room
+        message (`42["join",{"room":"assistant:<id>"}]`) receives no
+        acknowledgement and sockets are never added to rooms, so
+        `io.to("assistant:<id>").emit(...)` reaches nobody. Until the server
+        joins integration sockets into their rooms, this poll is the only
+        way we see inbound user messages.
+
+        Cancel-safe. Crashes are logged but don't kill the adapter — the
+        gateway would have no other way to recover inbound traffic.
+        """
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                await self._run_backfill(self._load_last_id())
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("poll_loop crashed unexpectedly")
+
     async def disconnect(self) -> None:
         """Idempotent — safe to call multiple times (e.g. from a signal handler)."""
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
         if self._ws is not None:
             try:
                 await self._ws.stop()
