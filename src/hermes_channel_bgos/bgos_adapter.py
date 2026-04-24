@@ -140,6 +140,46 @@ except ImportError:
     _GatewayMessageType = None  # type: ignore
 
 
+def _format_inbound_files(text: str, files: list[dict]) -> str:
+    """Append inbound user attachments to the agent's view of the message.
+
+    Hermes's `MessageEvent` only carries `text` through to the agent's prompt
+    — there's no first-class `files`/`attachments` field downstream, so the
+    only way the agent learns about images and documents is to surface them
+    inside the text. We format images as markdown images (`![name](url)`)
+    so vision-capable models can fetch them automatically; other files as
+    a labeled link line.
+
+    The backend (BGOS) emits one of `url` (presigned S3, 1h TTL) or `dataUri`
+    (`data:<mime>;base64,...`) per file. Older backends without the URL
+    plumbing emit neither; we surface those as a placeholder so the agent
+    knows files arrived even if it can't fetch them.
+    """
+    if not files:
+        return text
+
+    lines: list[str] = []
+    for f in files:
+        name = f.get("filename") or f.get("file_name") or "file"
+        mime = f.get("mime") or "application/octet-stream"
+        url = f.get("url") or f.get("dataUri") or f.get("data_uri")
+        if not url:
+            lines.append(f"- {name} ({mime}) — [no fetch URL — backend out of date?]")
+            continue
+        if mime.startswith("image/"):
+            lines.append(f"![{name}]({url})")
+        else:
+            lines.append(f"- [{name}]({url}) ({mime})")
+
+    if not lines:
+        return text
+
+    suffix = "\n\n## Attachments from user\n" + "\n".join(lines)
+    if text:
+        return text + suffix
+    return f"[User attached {len(files)} file(s)]" + suffix
+
+
 def _parse_buttons_block(content: str) -> tuple[str, list[dict], str | None]:
     """Extract a `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` block from agent text.
 
@@ -795,13 +835,21 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
         event = MessageEvent.from_ws(data, agent_route=route)
+        # Surface user-attached files into the agent's view of the message.
+        # Hermes's MessageEvent only carries `text` to the agent's prompt —
+        # there's no first-class files/attachments slot downstream — so the
+        # only way the model learns about an inbound image or document is by
+        # finding it in the text. Images become markdown image syntax for
+        # vision-capable models; docs become labeled link lines.
+        agent_visible_text = _format_inbound_files(event.text, event.files)
         # Persist the last-seen message id BEFORE dispatch, so even if
         # handle_message crashes we don't infinite-loop on restart.
         self._save_last_id(event.message_id)
         # Keep the retry cache populated so the /retry bridge-local can
-        # resend the last user text in this chat.
-        if event.text and event.message_type != "slash_command":
-            self._state.last_user_text_by_chat[event.chat_id] = event.text
+        # resend the last user text in this chat. Use the agent-visible text
+        # so attachment context replays on /retry.
+        if agent_visible_text and event.message_type != "slash_command":
+            self._state.last_user_text_by_chat[event.chat_id] = agent_visible_text
 
         # Hermes's handle_message expects a gateway-native MessageEvent with
         # a SessionSource `source` attribute (BasePlatformAdapter inspects
@@ -820,7 +868,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
             except AttributeError:
                 # Older fork revision without build_source — skip the wrap
-                # and hope the base class's default is forgiving.
+                # and hope the base class's default is forgiving. Use the
+                # agent-visible text so attachments still surface.
+                event.text = agent_visible_text
                 await self.handle_message(event)
                 return
             msg_type = (
@@ -829,7 +879,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 else _GatewayMessageType.TEXT  # type: ignore[attr-defined]
             )
             gateway_event = _GatewayMessageEvent(
-                text=event.text,
+                text=agent_visible_text,
                 message_type=msg_type,
                 source=source,
                 message_id=str(event.message_id),
@@ -838,6 +888,7 @@ class BGOSAdapter(BasePlatformAdapter):
             )
             await self.handle_message(gateway_event)
         else:
+            event.text = agent_visible_text
             await self.handle_message(event)
 
     async def _handle_bridge_local(self, command: str, data: dict) -> None:

@@ -125,18 +125,26 @@ files: [
 
 ### 6. Inbound files & media (user → agent)
 
-When the user attaches a file, the agent's inbound `MessageEvent` carries:
+The backend's `inbound_message` WS payload (sent to `assistant:<id>` rooms) carries a `files` array shaped:
 
 ```ts
 files: [
-  { file_name, mime, url, type }   // type: "image" | "video" | "audio" | "document"
+  {
+    id: number,
+    filename: string,
+    mime: string,
+    url?: string,      // presigned S3 GET, ~1h TTL — present for files >= 500KB
+    dataUri?: string,  // "data:<mime>;base64,..." — present for inline files <500KB
+  }
 ]
 ```
 
-- **`url`** is a presigned S3 link valid for ~10 minutes. Use it within the window.
-- **For images**, pass the URL to a vision-capable model OR fetch the bytes via HTTP GET.
-- **For documents**, fetch with HTTP GET — BGOS doesn't OCR PDFs server-side.
-- The message `text` may also carry a `[Attached image: name.png]` marker (legacy hint; prefer `files[]`).
+How that surfaces to the agent depends on the plugin's internal model:
+
+- **MCP / OpenClaw plugins** — the agent receives the `files[]` directly via the protocol's structured fields and can iterate them.
+- **Hermes** — Hermes's `MessageEvent` has no first-class `files` slot, so the adapter inlines attachments into the message `text`: images become markdown image syntax (`![filename](url)`) so vision models pick them up automatically; other files become labeled link lines (`- [filename](url) (mime)`) under an `## Attachments from user` heading. Vision-capable models fetch the URL automatically; non-vision models can choose to fetch via HTTP GET.
+
+URLs are presigned for ~1 hour. Inline `data:` URIs work indefinitely (the bytes are right there). Backend ALWAYS includes one of `url` or `dataUri` for every file — older backend versions emitted only `{id, filename, mime}` with no fetch path; treat that as an out-of-date deploy.
 
 ### 7. Slash commands
 

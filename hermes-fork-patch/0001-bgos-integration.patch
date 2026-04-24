@@ -24,7 +24,7 @@ diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
 index 3a6ec244..dcd5d165 100644
 --- a/agent/prompt_builder.py
 +++ b/agent/prompt_builder.py
-@@ -422,6 +422,57 @@ PLATFORM_HINTS = {
+@@ -422,6 +422,60 @@ PLATFORM_HINTS = {
          "your response. Images are sent as native photos, and other files arrive as downloadable "
          "documents."
      ),
@@ -42,7 +42,10 @@ index 3a6ec244..dcd5d165 100644
 +25 MB per file cap. You can mix normal text and multiple MEDIA: lines in one reply.
 +
 +## Receiving files from the user
-+When the user attaches a file, your inbound MessageEvent carries a `files: [{file_name, mime, url}]` list — URLs are presigned S3 links valid ~10 minutes. For images, pass the URL to your vision-capable model or download the bytes. For text documents, fetch the content via HTTP GET.
++When the user attaches files, the adapter appends an `## Attachments from user` block to the inbound message text:
++- Images render as markdown image syntax (`![filename](url)`) so vision-capable models pick them up automatically.
++- Other files render as labeled links (`- [filename](url) (mime)`).
++URLs are presigned S3 links valid ~1 hour. Small files (<500KB) may arrive as inline `data:` URIs instead. Fetch the URL with HTTP GET to get the bytes; the link is one-time-use friendly but works for repeated GETs within the TTL.
 +
 +## Dangerous-command approvals (automatic)
 +Whenever you invoke a tool gated by the approvals system, BGOS renders a 4-button bubble — Allow once / Allow for session / Always allow / Deny — identical to Telegram's approval prompt. The user's tap resolves the approval synchronously. Default timeout 60s fail-closed. You don't do anything special; the gateway + adapter handle bubble rendering. Just call the tool normally.

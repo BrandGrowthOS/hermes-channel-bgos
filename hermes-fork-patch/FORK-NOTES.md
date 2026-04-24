@@ -101,6 +101,8 @@ Both outcomes expected per the README — the shim only resolves once `hermes-ch
 > Updated 2026-04-24: PLATFORM_HINTS BGOS entry expanded from a one-line placeholder to a ~450-word agent-facing capabilities doc (markdown, MEDIA: file syntax, inbound files[], approvals, slash commands, NOT-YET-WIRED status for inline buttons + ask_user_input). `cron/scheduler.py` `_HOME_TARGET_ENV_VARS` now includes `bgos: "BGOS_HOME_CHANNEL"` so `deliver="bgos"` resolves to the BGOS home chat instead of silently falling back to another platform.
 >
 > Updated 2026-04-24 (round 2): Inline buttons now WIRED via `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` marker block. PLATFORM_HINTS section rewritten from "NOT YET WIRED" to full syntax docs (pipe-separated label|value, max 6, click delivery via `inbound_click` WS event → synthetic user MessageEvent). `ask_user_input` modal is still NOT YET WIRED — documented as a follow-up. Corresponding adapter changes live in vendor pkg v0.3.0; backend change emits `inbound_click` to `assistant:<id>` on every paired-assistant button click.
+>
+> Updated 2026-04-25: Inbound file surfacing now WIRED. Backend `emitInboundMessage` payload's files entries gain `url` (presigned S3 GET, 1h TTL) and `dataUri` (inline base64 for <500KB files). Adapter inlines attachments into the agent-visible text — images as markdown image syntax (vision models pick them up automatically), other files as labeled link lines under `## Attachments from user`. PLATFORM_HINTS "Receiving files from the user" section rewritten to describe the actual surfacing path. Vendor pkg v0.4.0 + backend SendMessageService change ship together.
 
 ### Skipped touch-points summary
 
