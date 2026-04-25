@@ -152,6 +152,63 @@ async def test_inbound_with_image_surfaces_markdown_to_agent(
         await adapter.disconnect()
 
 
+async def test_rest_backfill_surfaces_files(mock_bgos_server, monkeypatch):
+    """The REST poll/backfill response includes a `files` array per message
+    (since 2026-04-25 backend change). The same `_format_inbound_files`
+    pipeline that handles WS push also handles backfilled messages, so
+    images sent while WS was down still surface to the agent on the next
+    poll tick.
+    """
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
+    )
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        200,
+        {
+            "messages": [
+                {
+                    "id": 700,
+                    "message_id": 700,
+                    "chat_id": 11,
+                    "text": "look at this",
+                    "user_id": "user_1",
+                    "assistant_id": 7,
+                    "message_type": "standard",
+                    "files": [
+                        {
+                            "id": 50,
+                            "filename": "photo.jpg",
+                            "mime": "image/jpeg",
+                            "url": "https://bgos.test/photo.jpg?sig=xyz",
+                        },
+                    ],
+                },
+            ],
+        },
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(
+        BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
+    )
+    monkeypatch.setattr(adapter, "handle_message", lambda e: handled.append(e))
+
+    await adapter.connect()
+    try:
+        # connect() schedules a first-connect backfill(0). Wait, then explicitly
+        # call again so we hit the new endpoint shape with files.
+        await asyncio.sleep(0.15)
+        handled.clear()
+        await adapter._run_backfill(699)
+
+        assert len(handled) == 1
+        ev = handled[0]
+        assert "look at this" in ev.text
+        assert "![photo.jpg](https://bgos.test/photo.jpg?sig=xyz)" in ev.text
+    finally:
+        await adapter.disconnect()
+
+
 async def test_inbound_with_no_files_unchanged(mock_bgos_server, monkeypatch):
     """Regression guard: messages without files must not get the attachment
     suffix appended."""
