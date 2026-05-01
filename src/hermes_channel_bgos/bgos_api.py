@@ -148,18 +148,23 @@ class BgosApi:
         options: list[dict] | None = None,
         approval_meta: dict | None = None,
         render_mode: str | None = None,
+        reply_to_id: int | None = None,
     ) -> dict:
         """POST to /api/v1/messages. Wire format matches backend CreateMessageDto
-        (camelCase: chatId, messageType, approvalMeta, renderMode). `sender` is
-        `"assistant"` (lowercase — matches enum) or `"user"`.
+        (camelCase: chatId, messageType, approvalMeta, renderMode, replyToId).
+        `sender` is `"assistant"` (lowercase — matches enum) or `"user"`.
 
         `options` entries should be shaped {text, callbackData, style?} —
         these are passed through as-is to match backend CreateMessageOptionDto.
         `files` entries should be shaped
         {fileName, fileMimeType, fileData? | s3Key?, size?}. `render_mode` is
-        `"inline"` (default when options present) or `"modal"`. Fields not in
-        the backend DTO are silently dropped by the whitelist — we still send
-        them for forward compatibility when the backend extends.
+        `"inline"` (default when options present) or `"modal"`. `reply_to_id`
+        tags this message as a reply to a prior message — required in
+        agent-to-agent (a2a) side-thread chats so the originator's
+        pollForReply() can correlate this assistant message with the inbound
+        peer message that prompted it. Fields not in the backend DTO are
+        silently dropped by the whitelist — we still send them for forward
+        compatibility when the backend extends.
         """
         body: dict[str, Any] = {
             "chatId": chat_id,
@@ -175,6 +180,8 @@ class BgosApi:
             body["approvalMeta"] = approval_meta
         if render_mode is not None:
             body["renderMode"] = render_mode
+        if reply_to_id is not None:
+            body["replyToId"] = reply_to_id
         return await self._request("POST", "/api/v1/messages", json=body)
 
     async def patch_message(

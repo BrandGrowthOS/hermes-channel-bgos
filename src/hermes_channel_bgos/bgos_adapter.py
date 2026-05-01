@@ -604,10 +604,13 @@ class BGOSAdapter(BasePlatformAdapter):
         lives in PLATFORM_HINTS["bgos"] (fork patch `agent/prompt_builder.py`).
 
         Media variants (`send_image`, `send_voice`, …) are optional
-        class-level overrides the gateway duck-types. The `reply_to` and
-        `metadata` args are accepted for Hermes interface compatibility
-        but not yet plumbed through — backend's CreateMessageDto doesn't
-        currently accept them (Phase F follow-up).
+        class-level overrides the gateway duck-types. `metadata` is accepted
+        for Hermes interface compatibility but not currently plumbed through.
+        `reply_to` IS plumbed: it maps to backend `replyToId`, which is what
+        agent-to-agent (a2a) side-thread chats use to correlate the target
+        assistant's reply with the inbound peer message — without it, the
+        originator's pollForReply() falls back to positional matching, which
+        works for 1:1 side threads but not for any future fan-in patterns.
         """
         cleaned_text, options, render_mode = _parse_buttons_block(content)
         resp = await self._api.post_message(
@@ -617,6 +620,7 @@ class BGOSAdapter(BasePlatformAdapter):
             message_type="standard",
             options=options or None,
             render_mode=render_mode,
+            reply_to_id=int(reply_to) if reply_to is not None else None,
         )
         message_id = resp.get("id") if isinstance(resp, dict) else None
         if isinstance(chat_id, int) and isinstance(message_id, int):
@@ -669,7 +673,7 @@ class BGOSAdapter(BasePlatformAdapter):
 
     async def _send_media(
         self, *, chat_id: int | str, file_bytes: bytes, filename: str,
-        mime: str, caption: str | None,
+        mime: str, caption: str | None, reply_to: int | None = None,
     ) -> SendResult:
         attach = await self._upload_and_attach(
             file_bytes=file_bytes, filename=filename, mime=mime,
@@ -680,6 +684,7 @@ class BGOSAdapter(BasePlatformAdapter):
             sender="assistant",
             message_type="standard",
             files=[attach],
+            reply_to_id=int(reply_to) if reply_to is not None else None,
         )
         message_id = resp.get("id") if isinstance(resp, dict) else None
         if isinstance(chat_id, (int, str)) and isinstance(message_id, int):
