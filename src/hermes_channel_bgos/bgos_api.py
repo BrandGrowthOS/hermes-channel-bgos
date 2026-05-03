@@ -53,7 +53,12 @@ class BgosApi:
     # Internals
     # -------------------------------------------------------------------------
 
-    def _headers(self, *, require_pairing: bool = True) -> dict[str, str]:
+    def _headers(
+        self,
+        *,
+        require_pairing: bool = True,
+        caller_assistant_id: int | None = None,
+    ) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self._config.pairing_token:
             headers["X-BGOS-Pairing"] = self._config.pairing_token
@@ -61,6 +66,11 @@ class BgosApi:
             raise RuntimeError(
                 "pairing token required for this endpoint but not configured"
             )
+        if caller_assistant_id is not None:
+            # Required for the peer (a2a) endpoints. The backend uses this to
+            # enforce the introduction matrix and stamp the inbound message
+            # with the originator. See bgos-agent-capabilities.md §11.
+            headers["X-Caller-Assistant-Id"] = str(caller_assistant_id)
         return headers
 
     async def _request(
@@ -71,13 +81,17 @@ class BgosApi:
         json: Any = None,
         params: Any = None,
         require_pairing: bool = True,
+        caller_assistant_id: int | None = None,
     ) -> Any:
         resp = await self._client.request(
             method,
             path,
             json=json,
             params=params,
-            headers=self._headers(require_pairing=require_pairing),
+            headers=self._headers(
+                require_pairing=require_pairing,
+                caller_assistant_id=caller_assistant_id,
+            ),
         )
         if resp.status_code >= 400:
             body: Any
@@ -241,4 +255,173 @@ class BgosApi:
             "POST",
             "/api/v1/integrations/files/upload-url",
             json={"filename": filename, "mime": mime, "size": size},
+        )
+
+    # -------------------------------------------------------------------------
+    # Peer (agent-to-agent) endpoints — see bgos-agent-capabilities.md §11
+    # -------------------------------------------------------------------------
+    #
+    # Every peer call carries `X-Caller-Assistant-Id: <calling assistant id>`
+    # IN ADDITION to the standard `X-BGOS-Pairing` header. The backend uses
+    # the caller id to enforce the introduction matrix and stamp the inbound
+    # peer message with the originator's identity.
+
+    async def list_peers(self, *, caller_assistant_id: int) -> list[dict]:
+        """GET /api/v1/peers — discovery.
+
+        Returns a list of `{assistantId, name, avatarUrl, color, introduced,
+        expiresAt}` for every other assistant on the user's account. The
+        `introduced` flag is True ONLY if the user has enabled this direction
+        in the BGOS Agent Permissions matrix; if False, `send_to_peer` will
+        return `status='requires_introduction'`.
+        """
+        result = await self._request(
+            "GET",
+            "/api/v1/peers",
+            caller_assistant_id=caller_assistant_id,
+        )
+        if isinstance(result, list):
+            return result
+        # Some backend versions wrap the list in `{peers: [...]}`.
+        if isinstance(result, dict) and isinstance(result.get("peers"), list):
+            return result["peers"]
+        return []
+
+    async def peer_status(
+        self, *, caller_assistant_id: int, peer_assistant_id: int,
+    ) -> dict:
+        """GET /api/v1/peers/:id/status — presence + open-conversation state.
+
+        Returns `{online, lastSeenAt, hasOpenConversation, conversationId,
+        turnHolderId}`. Use BEFORE `send_to_peer` to know if the peer is
+        actively connected (immediate delivery) vs. offline (next-reconnect
+        pickup).
+        """
+        return await self._request(
+            "GET",
+            f"/api/v1/peers/{peer_assistant_id}/status",
+            caller_assistant_id=caller_assistant_id,
+        )
+
+    async def send_to_peer(
+        self,
+        *,
+        caller_assistant_id: int,
+        target_assistant_id: int,
+        text: str,
+        parent_message_id: int,
+        wait_for_reply: bool = False,
+        timeout_seconds: int | None = None,
+        turn_state: str | None = None,
+    ) -> dict:
+        """POST /api/v1/peers/:targetAssistantId/send — send to peer.
+
+        `parent_message_id` must reference one of YOUR previous reply messages
+        in the user's chat — it anchors the SideConversationCard to that
+        message visually. Pattern: send a "Looping in <peer>..." reply first,
+        capture its message id, then call this with that id as parent.
+
+        `wait_for_reply=True` blocks until the peer replies (their reply must
+        carry `replyToId` set to the message id we returned). Server cap is
+        85s. **Do NOT retry on timeout** — the message is already saved.
+        Either drop wait_for_reply and poll the side-thread later, or accept
+        the timeout.
+
+        `turn_state` lifecycle hint:
+        - `expecting_reply` (default) — yields the turn to the peer.
+        - `more_coming` — keeps the turn for back-to-back updates.
+        - `final` — closes the conversation server-side.
+
+        Returns `{status, sideThreadChatId, messageId, conversationId,
+        turnState, reply?}`. `status` is either `'sent'` or
+        `'requires_introduction'` (returned 200 so the caller can degrade
+        gracefully).
+        """
+        body: dict[str, Any] = {
+            "text": text,
+            "parentMessageId": parent_message_id,
+            "waitForReply": wait_for_reply,
+        }
+        if timeout_seconds is not None:
+            body["timeoutSeconds"] = timeout_seconds
+        if turn_state is not None:
+            body["turnState"] = turn_state
+        return await self._request(
+            "POST",
+            f"/api/v1/peers/{target_assistant_id}/send",
+            json=body,
+            caller_assistant_id=caller_assistant_id,
+        )
+
+    async def complete_peer_thread(
+        self,
+        *,
+        caller_assistant_id: int,
+        peer_assistant_id: int,
+        summary: str | None = None,
+    ) -> dict:
+        """POST /api/v1/peers/conversations/close — close the active conversation
+        between caller and peer. The optional `summary` becomes the
+        collapsed-state caption on the SideConversationCard. Strongly
+        recommended; without it the UI shows a generic "Conversation
+        completed" line.
+        """
+        body: dict[str, Any] = {"peerAssistantId": peer_assistant_id}
+        if summary is not None and summary.strip():
+            body["summary"] = summary.strip()
+        return await self._request(
+            "POST",
+            "/api/v1/peers/conversations/close",
+            json=body,
+            caller_assistant_id=caller_assistant_id,
+        )
+
+    async def complete_side_thread(
+        self,
+        *,
+        caller_assistant_id: int,
+        parent_message_id: int,
+        summary: str,
+    ) -> dict:
+        """POST /api/v1/peers/threads/:parentMessageId/complete — flip the
+        SideConversationCard from live to completed-collapsed with the given
+        one-line summary. Only the agent that initiated the side-thread
+        (i.e., the chat owner) may call this.
+        """
+        return await self._request(
+            "POST",
+            f"/api/v1/peers/threads/{parent_message_id}/complete",
+            json={"summary": summary},
+            caller_assistant_id=caller_assistant_id,
+        )
+
+    async def get_side_thread(
+        self,
+        *,
+        caller_assistant_id: int,
+        parent_message_id: int,
+    ) -> dict:
+        """GET /api/v1/peers/threads/:parentMessageId — fetch a side-thread.
+
+        Used as a fallback when `send_to_peer` with `wait_for_reply` times out
+        — poll this endpoint and look for a message whose `replyToId`
+        matches the message id you sent.
+        """
+        return await self._request(
+            "GET",
+            f"/api/v1/peers/threads/{parent_message_id}",
+            caller_assistant_id=caller_assistant_id,
+        )
+
+    async def get_peer_inbox(self, *, caller_assistant_id: int) -> dict:
+        """GET /api/v1/peers/inbox — list ALL chats (main + a2a side-threads)
+        where this assistant is the recipient. Use this for plugin-side
+        chat discovery so a2a chats don't get dropped (the main
+        `/integrations/inbound` endpoint omits them so they don't pollute
+        the user's sidebar).
+        """
+        return await self._request(
+            "GET",
+            "/api/v1/peers/inbox",
+            caller_assistant_id=caller_assistant_id,
         )

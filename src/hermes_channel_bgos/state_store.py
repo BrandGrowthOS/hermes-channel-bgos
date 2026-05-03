@@ -19,6 +19,11 @@ class StateStore:
     last_user_text_by_chat: dict[int, str] = field(default_factory=dict)
     conversation_by_chat: dict[int, str] = field(default_factory=dict)
     last_assistant_message_by_chat: dict[int, int] = field(default_factory=dict)
+    # `/peer-complete` needs to know which peer conversation to close. We
+    # track the most recent open one per chat as `(peer_assistant_id,
+    # conversation_id)`. Cleared by `/peer-complete` and (on backend cron
+    # auto-close) by the `peer_conversation_closed` WS event handler.
+    peer_conversation_by_chat: dict[int, tuple[int, int]] = field(default_factory=dict)
 
     def set_route(self, assistant_id: int, route: str) -> None:
         self.assistant_route[assistant_id] = route

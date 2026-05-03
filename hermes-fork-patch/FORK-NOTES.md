@@ -103,6 +103,77 @@ Both outcomes expected per the README — the shim only resolves once `hermes-ch
 > Updated 2026-04-24 (round 2): Inline buttons now WIRED via `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` marker block. PLATFORM_HINTS section rewritten from "NOT YET WIRED" to full syntax docs (pipe-separated label|value, max 6, click delivery via `inbound_click` WS event → synthetic user MessageEvent). `ask_user_input` modal is still NOT YET WIRED — documented as a follow-up. Corresponding adapter changes live in vendor pkg v0.3.0; backend change emits `inbound_click` to `assistant:<id>` on every paired-assistant button click.
 >
 > Updated 2026-04-25: Inbound file surfacing now WIRED. Backend `emitInboundMessage` payload's files entries gain `url` (presigned S3 GET, 1h TTL) and `dataUri` (inline base64 for <500KB files). Adapter inlines attachments into the agent-visible text — images as markdown image syntax (vision models pick them up automatically), other files as labeled link lines under `## Attachments from user`. PLATFORM_HINTS "Receiving files from the user" section rewritten to describe the actual surfacing path. Vendor pkg v0.4.0 + backend SendMessageService change ship together.
+>
+> Updated 2026-05-03: **Cross-channel agent-to-agent (P2P discussion) WIRED.** Hermes agents can now collaborate with the user's other BGOS assistants via four bridge-local slash commands (`/peers`, `/peer-status`, `/peer-send`, `/peer-complete`) AND two inline marker blocks the agent embeds in its reply text:
+>
+> ```
+> [[BGOS_PEER_SEND name="Hades" text="Can you create a bucket?" wait="false" turn="expecting_reply"]]
+> [[BGOS_PEER_COMPLETE summary="Hades created bgos-dev-uploads in us-east-1"]]
+> ```
+>
+> The adapter strips the markers from the user-visible reply, posts the cleaned reply, then dispatches the parsed directives against the new BGOS peer endpoints (`GET /api/v1/peers`, `POST /api/v1/peers/:id/send`, `POST /api/v1/peers/conversations/close`, etc.) using the new `X-Caller-Assistant-Id` header.
+>
+> PLATFORM_HINTS section needs a new **"Collaborating with other agents"** subsection appended — see `hermes-channel-bgos/docs/bgos-agent-capabilities.md` §11 for the agent-facing wording. Vendor pkg v0.5.0 ships the adapter changes (`bgos_api.py` peer methods, marker parser in `bgos_adapter._extract_peer_directives`, bridge-local handlers in `_handle_peer_bridge_local`). No upstream Hermes file changes — the four new slash commands are bridge-local in `commands_sync.BRIDGE_LOCAL_COMMANDS`.
+
+## PLATFORM_HINTS — section to append (P2P discussion, 2026-05-03)
+
+Add this block to the BGOS entry in `agent/prompt_builder.py`:
+
+```
+## Collaborating with other BGOS agents
+
+The user may have other AI assistants on this BGOS account (e.g. an Ops
+agent, a research agent, a domain specialist). You can DISCOVER them and
+COLLABORATE with them in real time. The user sees the exchange unfold inline
+as a minimalist "side conversation" card anchored to your reply.
+
+When to use this:
+- The user's question would be better answered by a peer agent on this
+  account (e.g. "ask Hades to create that S3 bucket").
+- A multi-step task has a hand-off — your peer is the domain owner.
+- You want a quick check from a coworker agent without burning a turn.
+
+When NOT to use this:
+- A simple slash command would do.
+- The peer is offline AND you need an answer in this turn.
+- The user has not enabled the introduction (you'll see introduced=false in
+  /peers — ASK the user "Want me to ask <peer>?" first; do not auto-send).
+
+Discovery (via slash commands):
+- `/peers` — lists peer assistants visible from your account, with an
+  introduced ✓ / ✗ flag indicating whether the user has enabled this
+  direction in the BGOS Agent Permissions matrix.
+- `/peer-status <name|id>` — checks whether a peer is online + has an open
+  conversation with you.
+
+Sending — embed in your reply text (preferred over slash commands when YOU
+the agent are driving the call):
+
+  [[BGOS_PEER_SEND name="Hades" text="Can you create a bgos-dev-uploads
+  bucket in us-east-1, public access blocked?" wait="false"
+  turn="expecting_reply"]]
+
+The adapter extracts the marker and dispatches to the peer's side-thread.
+The user sees a SideConversationCard live-rendering each turn under YOUR
+reply that contained the marker. `wait="true"` blocks until the peer
+replies (max 85s — server cap; do NOT retry on timeout).
+
+Closing — when the back-and-forth is complete, embed:
+
+  [[BGOS_PEER_COMPLETE summary="Hades created bgos-dev-uploads in us-east-1
+  with public access blocked"]]
+
+The card flips from live (pulsing dot) to completed-collapsed with the
+summary. If you don't close, the server auto-closes after 15 minutes idle
+with a generic summary — always prefer your own real summary.
+
+Pre-send pattern: send a "Looping in <peer>..." reply FIRST so the
+SideConversationCard has a parent message to anchor against. The marker in
+that same reply uses that reply's id as the parent.
+
+The user controls who can talk to whom in BGOS Settings → Agent
+Permissions. Asymmetric: Ava→Hades enabled doesn't imply Hades→Ava.
+```
 
 ### Skipped touch-points summary
 

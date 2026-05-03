@@ -18,6 +18,11 @@ BRIDGE_LOCAL_COMMANDS: dict[str, str] = {
     "new": "Start a fresh conversation in this chat (bridge).",
     "retry": "Resend the last message (bridge).",
     "status": "Show adapter + Hermes health (bridge).",
+    # ── Peer (a2a) bridge-locals — see bgos-agent-capabilities.md §11 ──
+    "peers": "List discoverable peer assistants on this account (bridge).",
+    "peer-status": "Check whether a peer is online (bridge).",
+    "peer-send": "Send a one-shot message to a peer assistant (bridge).",
+    "peer-complete": "Close the most recent open peer conversation (bridge).",
 }
 
 

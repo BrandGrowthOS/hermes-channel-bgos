@@ -169,7 +169,98 @@ Adapter intercepts these before `handle_message` is called. Agent never sees the
 - One BGOS chat maps to one agent conversation.
 - The user can reset context via `/new` (bridge-local).
 - Chat title is user-editable; agents can rename via `PATCH /chats/:id/title` (plugin-specific).
-- **Not supported:** user-side message editing, reactions, stickers, typing indicators on the user side, `reply_to` message threading (noted in design spec but not shipped; do not rely on it).
+- **Not supported:** user-side message editing, stickers, typing indicators on the user side. Reactions ARE supported (see §10). `reply_to` message threading IS supported (used by §11 a2a side-threads to correlate replies — agents may also use it for normal user-facing quoted-reply UX).
+
+### 9. Telegram-style emoji reactions
+
+Tap-and-hold (or right-click) any message to open an emoji tray; tap to add a pill, tap again to remove. Single-reaction-per-actor — switching emojis is atomic (the old pill is replaced, not stacked). Reactions render as pills below the bubble; the user's own reaction renders cyan-tinted.
+
+**Read-side (chat-history payload):** every `message` row carries an aggregated `reactions[]` array shaped `{ emoji, count, mine, actorIds[] }`. Aggregation runs server-side so the agent doesn't have to count.
+
+**Write-side (agent → user):** `POST /api/v1/messages/:messageId/reactions` with body `{ emoji, fromAgent? }`. The optional `fromAgent` block tags the reaction with the calling agent's identity (registry id or inline name+avatar). Default emoji set is `👍 ❤️ 🔥 🎉 😂 🤔` plus the full Unicode picker.
+
+**WS events:** `MESSAGE_REACTION_ADDED` / `MESSAGE_REACTION_REMOVED` carry `actor`, `emoji`, and `replaced_emoji` (set when the actor switched). Agents receive these on the same room as inbound messages.
+
+**Use for:** lightweight inter-agent acknowledgements (✅ "received, working on it") that don't burn a turn. The recipient agent's runtime should poll for new reactions on its own messages or subscribe to the WS events.
+
+### 10. Agent-to-agent identity (`fromAgent`)
+
+When an n8n LLM (or any peer AI) injects a message into a BGOS chat, the message renders in a distinct cyan bubble with the agent's name + avatar header instead of looking like a human user message.
+
+**Wire (on `POST /messages` and `POST /send-message`):**
+```ts
+fromAgent: {
+  peerId?: number;            // registry id from agent_peers table (preferred)
+  externalId?: string;        // agent's own opaque id (≤ 128 chars)
+  name?: string;              // display name (≤ 80 chars)
+  avatarUrl?: string;         // https only (≤ 2048 chars)
+  color?: string;             // hex
+  type?: string;              // 'a-z0-9_-' ≤ 32 chars
+}
+```
+
+**Hybrid resolver:** registry > inline > null. If `peerId` matches a row in `agent_peers`, that row's display fields win. Otherwise inline fields are persisted on the message row and rendered as-is.
+
+**On the receiving agent's webhook:** payload now carries `fromAgent`, `humanInLoop: true`, and a derived `systemHint` string (see §11 for limits) so the recipient's LLM knows it's talking to a peer rather than a human.
+
+### 11. Cross-channel agent-to-agent (peer side-conversations)
+
+The big one. Any agent on any channel can:
+
+1. **Discover** the user's other assistants (peer agents) via `GET /api/v1/peers`.
+2. **Send** a message into a peer's side-thread via `POST /api/v1/peers/:targetAssistantId/send` — the user sees the live exchange unfold inline as a minimalist `<SideConversationCard>` rendered against the parent message in the originator's chat. The peer receives the message tagged with `fromAgent` (see §10) so its LLM knows it's a peer, not a human.
+3. **Wait for the peer's reply** synchronously (`waitForReply: true`, capped at 85s server-side) or fire-and-forget then poll the side-thread later.
+4. **Close the conversation** with a one-line summary via `POST /api/v1/peers/conversations/close` — flips the card from live (pulsing dot + last 2 turns) to completed-collapsed (static dot + summary line).
+5. **Check peer presence** via `GET /api/v1/peers/:peerAssistantId/status` before sending — `{ online, lastSeenAt, hasOpenConversation, conversationId, turnHolderId }`.
+
+**Auth:** every peer call carries the channel's existing auth (`X-API-Key` for n8n, `X-BGOS-Pairing` for Hermes/OpenClaw/Gobot, MCP env for Claude Code) **plus** a new `X-Caller-Assistant-Id` header set to the calling assistant's id. The backend uses this to enforce the introduction matrix and tag the message with the originator.
+
+**Wire (peer endpoints):**
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| `GET` | `/api/v1/peers` | — | `[{ assistantId, name, avatarUrl, color, introduced, expiresAt }]` |
+| `GET` | `/api/v1/peers/:peerAssistantId/status` | — | `{ online, lastSeenAt, hasOpenConversation, conversationId, turnHolderId }` |
+| `POST` | `/api/v1/peers/:targetAssistantId/send` | `{ text, parentMessageId, waitForReply?, timeoutSeconds?, turnState? }` | `{ status, sideThreadChatId, messageId, conversationId, turnState, reply? }` |
+| `POST` | `/api/v1/peers/conversations/close` | `{ peerAssistantId, summary? }` | `{ closed, conversationId }` |
+| `POST` | `/api/v1/peers/threads/:parentMessageId/complete` | `{ summary }` | `{ ok: true }` |
+| `GET` | `/api/v1/peers/inbox` | — | `{ chats: [{ id, assistantId, kind: 'main' \| 'a2a' }] }` (use this for plugin discovery so a2a chats aren't dropped) |
+
+**`status` values:** `'sent'` (success — proceed) or `'requires_introduction'` (200 not 4xx so the calling agent can degrade gracefully and ask the user to enable the row in the BGOS Agent Permissions matrix).
+
+**`turnState` lifecycle hint:**
+- `'expecting_reply'` (default) — yields the turn to the peer; their next reply uses your `messageId` as `replyToId`.
+- `'more_coming'` — keeps the turn; you intend to send more updates back-to-back.
+- `'final'` — closes the conversation server-side; further sends auto-open a new conversation.
+
+**Auto-close:** server cron closes idle peer conversations after 15 minutes with a generic summary. Always prefer calling close yourself with a real summary so the user sees what happened.
+
+**Reply correlation:** when the recipient agent replies, it MUST set `replyToId` to the inbound peer message id. Without it, the originator's `waitForReply` polling falls back to positional matching (works for 1:1 threads but breaks fan-in).
+
+**Idempotency / retry rule:** **do NOT retry `send_to_peer` after a 504 or network timeout** — the message is already saved server-side. Either drop `waitForReply` (cap is 85s anyway) and poll the side-thread later via `GET /api/v1/peers/threads/{parentMessageId}`, or accept the timeout.
+
+**Security model:** discovery is automatic — every agent sees the names+avatars of every other assistant on the user's account. `system_hint` is intentionally omitted to prevent capability leakage between agents. Sending requires an enabled `agent_introductions` row from caller→target (asymmetric — Ava→Hades enabled does NOT imply Hades→Ava). `expires_at` non-null = ephemeral allow-once; null = persistent allow-always.
+
+**WS events:**
+- `side_thread_message` — new turn in a side conversation, rendered inside the card.
+- `side_thread_completed` — card flips to collapsed-state.
+- `introduction_changed` — Agent Permissions matrix updated.
+- `peer_conversation_closed` — server cron auto-closed an idle conversation.
+
+**When to use:**
+- Your reply needs information another agent on this user's account is better suited for (e.g., DevOps agent → Infra agent for an AWS query).
+- Hand-off a multi-step task to a domain-specialist peer.
+- Async ack/coordination between agents working on a shared workflow.
+
+**When NOT to use:**
+- A simple slash-command would do (e.g., the user can `/reroute hades …` themselves).
+- The peer is offline AND you need the answer in this turn — call `peer_status` first or fall back to suggesting the peer in your reply.
+- The user has not enabled the introduction — call `list_peers`, see `introduced: false`, then ask the user "Want me to ask Hades?" and stop. Don't auto-send.
+
+**Pre-send pattern (recommended):**
+1. Send your own "Looping in <peer>…" reply FIRST and capture its `messageId`.
+2. Pass that `messageId` as `parentMessageId` to `send_to_peer` so the SideConversationCard anchors against your own reply.
+3. When the exchange ends, call close with a one-line synthesis so the card collapses cleanly.
 
 ---
 
@@ -180,9 +271,10 @@ How the agent connected through each plugin actually invokes these capabilities.
 ### Claude Code MCP plugin (`bgos-claude-plugin`, private repo)
 
 MCP server with typed tools:
-- `reply` — text + files + inline buttons in one call. Fields: `chat_id`, `text`, `files[]`, `buttons[]`, `render_mode: "inline" | "modal"`.
+- `reply` — text + files + inline buttons + `reply_to_id` (for a2a side-thread correlation). Fields: `chat_id`, `text`, `files[]`, `buttons[]`, `render_mode: "inline" | "modal"`, `reply_to_id?`.
 - `ask_user_input` — blocking modal. Fields: `chat_id`, `questions[]`.
 - `edit_message`, `rename_chat` — message ops.
+- **a2a peer tools (§11):** `list_peers`, `peer_status`, `send_to_peer`, `complete_peer_thread`, `complete_side_thread`. Mapped 1:1 to the canonical endpoints. The plugin's `discoverChats` reads `GET /api/v1/peers/inbox` so a2a chats are polled too.
 
 Agent learns this via the MCP server's `instructions` + per-tool `description` fields. Canonical source: `bgos-claude-plugin/server.ts` lines ~244–337 + tool-registration block.
 
@@ -198,6 +290,12 @@ Hermes agents learn about BGOS via a `PLATFORM_HINTS` entry in `agent/prompt_bui
 - **Approvals** — agent doesn't initiate; Hermes's approvals system calls `adapter.send_exec_approval` when a sensitive tool fires. Rendered as the 4-button bubble.
 - **Inline buttons (non-approval)** — embed a `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` block in the reply. Lines inside the block are `Label | value` (pipe-separated), one per line, max 6. Adapter extracts the block and posts `options: [{text, callbackData}]` with `renderMode: 'inline'`. When the user taps a chip, the adapter receives `inbound_click` on the `assistant:<id>` WS room and synthesizes a user `MessageEvent` with `text = <clicked button label>` — the agent sees the tap as a normal user reply.
 - **`ask_user_input` modal** — **NOT YET WIRED.** Planned via `[[BGOS_ASK]]...[[/BGOS_ASK]]` marker. Until shipped, use sequential inline-button messages.
+- **a2a peer collaboration (§11)** — bridge-local slash commands the user/agent can type:
+  - `/peers` — list discoverable peer assistants (markdown table; `introduced ✓/✗`).
+  - `/peer-status <name|id>` — print online/offline + open-conversation state.
+  - `/peer-send <name|id> <text>` — send to peer; uses the most recent agent message in the chat as `parentMessageId`. Uses `--wait` to block on reply (default fire-and-forget).
+  - `/peer-complete <summary>` — close the most recent open peer conversation.
+  - The agent itself can also embed `[[BGOS_PEER_SEND name="Hades" text="..."]]` markers in its reply text — adapter extracts and dispatches identically to the slash form.
 - **Slash commands from agent to user** — push via `PUT /integrations/assistants/:id/commands` (adapter's `sync_commands_for` method).
 - **Home-channel cron** — set `BGOS_HOME_CHANNEL` env var on the Hermes server. Crons scheduled with `deliver="bgos"` route to that chat id.
 
@@ -210,16 +308,41 @@ Standalone daemon with method-based API:
 - `BgosOutbound.sendButtons({assistantId, chatId, text, options})` — inline options.
 - `BgosOutbound.sendApprovalRequest({assistantId, chatId, text, meta, options?})` — 4-button.
 - `BgosOutbound.sendAgentError({assistantId, chatId, reason})` — styled error bubble.
+- **a2a peer methods (§11):** `BgosPeerClient.listPeers({callerAssistantId})`, `peerStatus({callerAssistantId, peerAssistantId})`, `sendToPeer({callerAssistantId, targetAssistantId, text, parentMessageId, waitForReply?, timeoutSeconds?, turnState?})`, `completePeerThread({callerAssistantId, peerAssistantId, summary?})`, `completeSideThread({callerAssistantId, parentMessageId, summary})`. The daemon also surfaces these as bridge-local slash commands `/peers`, `/peer-status`, `/peer-send`, `/peer-complete` so users can drive them by hand.
 
-Today OpenClaw does NOT expose an agent-facing instruction document — the agent is assumed to know what BGOS supports from its own system prompt. **This canonical doc should be surfaced to OpenClaw agents** (either by injecting a summary into their system prompt at connect time, or by exposing a `bgos-capabilities` text resource the agent can query). Implementation TBD.
+OpenClaw agents learn about BGOS via the `BGOS_AGENT_HINTS` system-prompt addendum injected by the daemon at dispatch time (mirrors Gobot's mechanism).
 
-**When you update this canonical, also update:** `openclaw-channel-bgos/src/` — add or update whatever capability-description mechanism exists (TBD — see above). Bump `openclaw-channel-bgos/package.json` version. Release on npm or refresh the VPS install.
+**When you update this canonical, also update:** `openclaw-channel-bgos/src/agent-hints.ts` — keep the addendum in sync. Bump `openclaw-channel-bgos/package.json` version. Release on npm or refresh the VPS install.
+
+### Gobot (`gobot-channel-bgos` + `gobot-bgos-fork`)
+
+Plugin pairs with Gobot via a fork-side adapter. Agents learn about BGOS via the `BGOS_AGENT_HINTS` system-prompt addendum (`gobot-channel-bgos/src/agent-hints.ts`) injected on every dispatch.
+
+**Concrete surface:**
+- Text + media + buttons + approvals — embedded markers (see Hermes section + agent-hints).
+- **a2a peer methods (§11):** `BgosPeerClient` exposes `listPeers / peerStatus / sendToPeer / completePeerThread / completeSideThread`. Embedded markers `[[BGOS_PEER_SEND name="..." text="..." wait=false]]` and `[[BGOS_PEER_COMPLETE summary="..."]]` work in agent replies — the adapter extracts and dispatches them.
+- The `ReplyHandle` passed to the fork's `dispatch()` gains a `peers` namespace: `replyHandle.peers.list()`, `peers.send({ targetAssistantId, text, parentMessageId, waitForReply? })`, `peers.complete({ peerAssistantId, summary? })`, `peers.status({ peerAssistantId })`.
+
+**When you update this canonical, also update:** `gobot-channel-bgos/src/agent-hints.ts` + `gobot-channel-bgos/src/bgos-peer-client.ts`. Bump version. Republish if the fork pulls from npm.
+
+### n8n nodes (`n8n-nodes-bgos`)
+
+`BGOSAction` node has a **Peer Agent** resource with four operations:
+- **List Peers** (`listPeers`) — input: caller assistant id. Output: peer list with `introduced` flag.
+- **Send to Peer** (`sendToPeer`) — input: caller, target id, parent message id, text, optional `waitForReply`, `timeoutSeconds`, `turnState`. Output: `{status, sideThreadChatId, messageId, conversationId, reply?}`.
+- **Complete Peer Thread** (`completePeerThread`) — input: caller, peer id, optional summary. Output: `{closed, conversationId}`.
+- **Peer Status** (`peerStatus`) — input: caller, peer id. Output: `{online, lastSeenAt, hasOpenConversation, conversationId, turnHolderId}`.
+
+All operations use the existing `BGOS API` credential (`X-API-Key`) and the node sends `X-Caller-Assistant-Id` automatically from the `Caller Assistant ID` parameter.
+
+**When you update this canonical, also update:** `bgos-n8n-nodes/nodes/BGOSAction/BGOSAction.node.ts` peer-resource section + `bgos-n8n-nodes/nodes/BGOSAction/techWebhook.ts`. Bump `package.json` version, republish to npm.
 
 ### Future plugins
 
-Any new plugin (Gobot, ChatGPT, etc.) follows the `channel_integration_pattern.md` blueprint + agrees to:
+Any new plugin (ChatGPT, etc.) follows the `channel_integration_pattern.md` blueprint + agrees to:
 1. Consume this canonical doc in its agent-facing surface (however is idiomatic for that channel).
-2. Subscribe to updates — when a capability here changes, propagate.
+2. Surface §10 (`fromAgent`) and §11 (peer endpoints) — without those, the integration is missing the cross-agent collaboration capability.
+3. Subscribe to updates — when a capability here changes, propagate.
 
 ---
 
@@ -230,8 +353,10 @@ When a BGOS frontend capability changes (new `MessageType`, new DTO field, new U
 - [ ] **This file first** — update the relevant capability section. Be concrete about wire format + user-visible behavior.
 - [ ] **`bgos-claude-plugin`** — update `server.ts` MCP `instructions` string + any affected tool `inputSchema` descriptions. Bump `package.json` version. Push; users `git pull` + re-run with `bun`.
 - [ ] **`hermes-channel-bgos`** — update the `PLATFORM_HINTS` BGOS entry in `hermes-fork-patch/0001-bgos-integration.patch` (regenerate patch from a fresh Hermes clone). Update the "Per-plugin syntax cheat-sheet" → Hermes section here. Push; users `git pull` + re-apply patch + restart service.
-- [ ] **`openclaw-channel-bgos`** — update the agent-facing capability mechanism (once one exists). Bump `package.json`. Release.
-- [ ] **Sanity check** — cross-read the three plugin docs side-by-side: do they describe the same capability the same way? Fix drift before shipping.
+- [ ] **`openclaw-channel-bgos`** — update `src/agent-hints.ts` + the peer-client surface in `src/bgos-peer-client.ts`. Bump `package.json`. Release.
+- [ ] **`gobot-channel-bgos`** — update `src/agent-hints.ts` + `src/bgos-peer-client.ts` + the `ReplyHandle` plumbing in `src/inbound-handler.ts`. Bump `package.json`. Republish if the fork consumes from npm.
+- [ ] **`bgos-n8n-nodes`** — update `nodes/BGOSAction/BGOSAction.node.ts` resource definitions + `nodes/BGOSAction/techWebhook.ts` peer helpers + `nodes/BGOSAction/handler/eventHandler.ts` switch. Bump `package.json` version, republish to npm.
+- [ ] **Sanity check** — cross-read the five plugin docs side-by-side: do they describe the same capability the same way? Fix drift before shipping.
 
 **Who owns propagation:** whichever developer/agent shipped the frontend change. Don't merge the frontend PR until the plugin updates are also staged (or at least issues are filed).
 

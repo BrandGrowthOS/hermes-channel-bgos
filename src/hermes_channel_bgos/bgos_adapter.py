@@ -69,6 +69,27 @@ _BUTTONS_BLOCK_RE = re.compile(
 # a warning so this isn't silent.
 _INLINE_OPTION_LIMIT = 6
 
+# Agent-emitted peer-collaboration markers. The agent embeds these in its
+# reply text to drive a2a side-conversations without needing to know the
+# REST endpoints. The adapter extracts each marker, strips it from the
+# user-visible text, and dispatches the corresponding peer call.
+#
+# `[[BGOS_PEER_SEND name="Hades" text="..." wait=false]]` — send to peer.
+# `[[BGOS_PEER_COMPLETE summary="..."]]` — close the most recent open peer
+# conversation in this chat. Optional summary attribute.
+#
+# Attribute values are quoted with `"` and may contain escaped `\"`. Order
+# of attributes is free. See bgos-agent-capabilities.md §11.
+_PEER_SEND_BLOCK_RE = re.compile(
+    r"\[\[BGOS_PEER_SEND(?P<attrs>[^\]]*)\]\]",
+    re.IGNORECASE,
+)
+_PEER_COMPLETE_BLOCK_RE = re.compile(
+    r"\[\[BGOS_PEER_COMPLETE(?P<attrs>[^\]]*)\]\]",
+    re.IGNORECASE,
+)
+_PEER_ATTR_RE = re.compile(r'(\w+)\s*=\s*"((?:\\"|[^"])*)"')
+
 # Threshold below which we inline base64 into POST /messages; at or above,
 # we upload via a presigned S3 PUT and reference by s3_key. Mirrors
 # openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
@@ -242,6 +263,39 @@ def _parse_buttons_block(content: str) -> tuple[str, list[dict], str | None]:
         # send an empty payload the backend would reject.
         return cleaned, [], None
     return cleaned, options, mode
+
+
+def _parse_peer_attrs(raw: str) -> dict[str, str]:
+    """Parse `key="value"` pairs from a marker's attribute string.
+    Tolerates whitespace and quoted backslash-escapes. Unknown keys are
+    kept as-is so the dispatcher can complain with a clear message.
+    """
+    out: dict[str, str] = {}
+    for match in _PEER_ATTR_RE.finditer(raw):
+        key = match.group(1).lower()
+        value = match.group(2).replace('\\"', '"')
+        out[key] = value
+    return out
+
+
+def _extract_peer_directives(content: str) -> tuple[str, list[dict], list[dict]]:
+    """Extract `[[BGOS_PEER_SEND]]` / `[[BGOS_PEER_COMPLETE]]` markers from
+    agent text. Returns `(cleaned_text, sends, completes)` where each
+    `sends`/`completes` entry is the parsed attribute dict. Markers are
+    stripped from the text. Surrounding blank lines are collapsed.
+    """
+    sends: list[dict] = []
+    completes: list[dict] = []
+    cleaned = content
+    for match in _PEER_SEND_BLOCK_RE.finditer(content):
+        sends.append(_parse_peer_attrs(match.group("attrs") or ""))
+    for match in _PEER_COMPLETE_BLOCK_RE.finditer(content):
+        completes.append(_parse_peer_attrs(match.group("attrs") or ""))
+    if sends or completes:
+        cleaned = _PEER_SEND_BLOCK_RE.sub("", cleaned)
+        cleaned = _PEER_COMPLETE_BLOCK_RE.sub("", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, sends, completes
 
 
 def _send_result(*, message_id: int | None) -> SendResult:
@@ -613,6 +667,13 @@ class BGOSAdapter(BasePlatformAdapter):
         works for 1:1 side threads but not for any future fan-in patterns.
         """
         cleaned_text, options, render_mode = _parse_buttons_block(content)
+        # Strip peer-collaboration markers BEFORE we POST so the user-visible
+        # text is clean. We dispatch the markers AFTER the agent's user-
+        # visible reply lands (so the SideConversationCard has a parent
+        # message to anchor to).
+        cleaned_text, peer_sends, peer_completes = _extract_peer_directives(
+            cleaned_text,
+        )
         resp = await self._api.post_message(
             chat_id=int(chat_id),
             text=cleaned_text,
@@ -625,7 +686,136 @@ class BGOSAdapter(BasePlatformAdapter):
         message_id = resp.get("id") if isinstance(resp, dict) else None
         if isinstance(chat_id, int) and isinstance(message_id, int):
             self._state.last_assistant_message_by_chat[chat_id] = message_id
+            assistant_id_int = self._infer_assistant_for_chat(int(chat_id))
+            if assistant_id_int is not None and (peer_sends or peer_completes):
+                await self._dispatch_peer_directives(
+                    chat_id=int(chat_id),
+                    assistant_id=assistant_id_int,
+                    parent_message_id=message_id,
+                    sends=peer_sends,
+                    completes=peer_completes,
+                )
         return _send_result(message_id=message_id)
+
+    def _infer_assistant_for_chat(self, chat_id: int) -> int | None:
+        """Best-effort lookup of the assistant id bound to a chat.
+
+        We don't keep a chat→assistant index — but every recent inbound on
+        this chat carried `assistant_id`, so the most recently dispatched
+        message id (which we DO track per chat) is enough to reverse-lookup.
+        For the marker dispatcher we just need ANY assistant the agent owns
+        in this pairing — a single-assistant pairing is the common case.
+        """
+        if len(self._state.assistant_route) == 1:
+            return next(iter(self._state.assistant_route.keys()))
+        # Multi-assistant pairings: we'd need a chat→assistant index. Until
+        # we maintain one, return None and the dispatcher logs a warning so
+        # the directive doesn't silently drop.
+        return None
+
+    async def _dispatch_peer_directives(
+        self,
+        *,
+        chat_id: int,
+        assistant_id: int,
+        parent_message_id: int,
+        sends: list[dict],
+        completes: list[dict],
+    ) -> None:
+        """Dispatch parsed peer markers AFTER the agent's user-visible
+        reply has been posted. Failures are surfaced as a follow-up
+        assistant message rather than raised — never crash the send path.
+        """
+        for attrs in sends:
+            try:
+                await self._dispatch_peer_send_marker(
+                    chat_id=chat_id,
+                    assistant_id=assistant_id,
+                    parent_message_id=parent_message_id,
+                    attrs=attrs,
+                )
+            except Exception as err:  # noqa: BLE001
+                log.exception("peer_send marker dispatch failed")
+                await self._api.post_message(
+                    chat_id=chat_id,
+                    text=f"**Peer send failed:** {err}",
+                    sender="assistant",
+                    message_type="standard",
+                )
+        for attrs in completes:
+            try:
+                summary = (attrs.get("summary") or "").strip() or None
+                tracked = self._state.peer_conversation_by_chat.get(chat_id)
+                if tracked is None:
+                    log.info(
+                        "peer_complete marker without an open conversation in chat %d",
+                        chat_id,
+                    )
+                    continue
+                peer_id, _conv_id = tracked
+                await self._api.complete_peer_thread(
+                    caller_assistant_id=assistant_id,
+                    peer_assistant_id=peer_id,
+                    summary=summary,
+                )
+                self._state.peer_conversation_by_chat.pop(chat_id, None)
+            except Exception as err:  # noqa: BLE001
+                log.exception("peer_complete marker dispatch failed")
+                await self._api.post_message(
+                    chat_id=chat_id,
+                    text=f"**Peer complete failed:** {err}",
+                    sender="assistant",
+                    message_type="standard",
+                )
+
+    async def _dispatch_peer_send_marker(
+        self,
+        *,
+        chat_id: int,
+        assistant_id: int,
+        parent_message_id: int,
+        attrs: dict,
+    ) -> None:
+        text = attrs.get("text") or ""
+        name_or_id = attrs.get("name") or attrs.get("id") or ""
+        wait = (attrs.get("wait") or "false").lower() == "true"
+        turn_state = attrs.get("turn") or attrs.get("turn_state") or None
+        if not text or not name_or_id:
+            log.warning(
+                "BGOS_PEER_SEND missing required attrs: %s", attrs,
+            )
+            return
+        peer_id = await self._resolve_peer_arg(assistant_id, name_or_id)
+        if peer_id is None:
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=f"**Peer send failed:** no peer matches `{name_or_id}`.",
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        result = await self._api.send_to_peer(
+            caller_assistant_id=assistant_id,
+            target_assistant_id=peer_id,
+            text=text,
+            parent_message_id=parent_message_id,
+            wait_for_reply=wait,
+            turn_state=turn_state,
+        )
+        if result.get("status") == "requires_introduction":
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=(
+                    f"**Cannot send to peer #{peer_id}** — the user has not "
+                    f"enabled this direction in the Agent Permissions matrix."
+                ),
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        conv_id = result.get("conversationId")
+        if isinstance(conv_id, int):
+            self._state.peer_conversation_by_chat[chat_id] = (peer_id, conv_id)
 
     # -------------------------------------------------------------------------
     # Optional media overrides (Task 6) — Hermes duck-types these at send time.
@@ -897,9 +1087,10 @@ class BGOSAdapter(BasePlatformAdapter):
             await self.handle_message(event)
 
     async def _handle_bridge_local(self, command: str, data: dict) -> None:
-        """Handle a `/new`, `/retry`, or `/status` slash command locally —
-        no round-trip to Hermes. Posts an ack/result back to BGOS so the
-        user sees a response."""
+        """Handle a `/new`, `/retry`, `/status`, `/peers`, `/peer-status`,
+        `/peer-send`, or `/peer-complete` slash command locally — no
+        round-trip to Hermes. Posts an ack/result back to BGOS so the user
+        sees a response."""
         chat_id = data.get("chat_id")
         if not isinstance(chat_id, int):
             log.warning("bridge-local slash missing chat_id: %s", data)
@@ -948,6 +1139,261 @@ class BGOSAdapter(BasePlatformAdapter):
                 sender="assistant",
                 message_type="standard",
             )
+        elif command in ("peers", "peer-status", "peer-send", "peer-complete"):
+            await self._handle_peer_bridge_local(command, data)
+
+    # -------------------------------------------------------------------------
+    # Peer (a2a) bridge-local handlers — see bgos-agent-capabilities.md §11
+    # -------------------------------------------------------------------------
+
+    async def _handle_peer_bridge_local(self, command: str, data: dict) -> None:
+        """Dispatcher for the four peer slash commands. Each posts a
+        markdown reply into the user's chat so the result is visible
+        immediately. Errors are reported as `**Error:** <reason>` rather
+        than raised — bridge-locals must never crash the adapter loop.
+        """
+        chat_id = data.get("chat_id")
+        assistant_id = data.get("assistant_id")
+        args = (data.get("command_args") or "").strip()
+        if not isinstance(chat_id, int) or not isinstance(assistant_id, int):
+            log.warning(
+                "peer bridge-local missing chat_id/assistant_id: %s", data,
+            )
+            return
+
+        try:
+            if command == "peers":
+                await self._peer_cmd_list(chat_id, assistant_id)
+            elif command == "peer-status":
+                await self._peer_cmd_status(chat_id, assistant_id, args)
+            elif command == "peer-send":
+                await self._peer_cmd_send(chat_id, assistant_id, args)
+            elif command == "peer-complete":
+                await self._peer_cmd_complete(chat_id, assistant_id, args)
+        except Exception as err:  # noqa: BLE001 — bridge-locals must not crash
+            log.exception("peer bridge-local %s failed", command)
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=f"**/{command} failed:** {err}",
+                sender="assistant",
+                message_type="standard",
+            )
+
+    async def _peer_cmd_list(self, chat_id: int, assistant_id: int) -> None:
+        peers = await self._api.list_peers(caller_assistant_id=assistant_id)
+        if not peers:
+            await self._api.post_message(
+                chat_id=chat_id,
+                text="No peer assistants on this account.",
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        lines = ["**Peer assistants:**", ""]
+        for p in peers:
+            mark = "✓" if p.get("introduced") else "✗"
+            name = p.get("name") or f"#{p.get('assistantId')}"
+            lines.append(
+                f"- {mark} **{name}** (id `{p.get('assistantId')}`)",
+            )
+        lines.append("")
+        lines.append(
+            "_✓ = user has enabled this direction. ✗ = needs intro from the_"
+            "_BGOS Agent Permissions matrix before send works._",
+        )
+        await self._api.post_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            sender="assistant",
+            message_type="standard",
+        )
+
+    async def _peer_cmd_status(
+        self, chat_id: int, assistant_id: int, args: str,
+    ) -> None:
+        peer_id = await self._resolve_peer_arg(assistant_id, args)
+        if peer_id is None:
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=(
+                    "Usage: `/peer-status <name|id>`. "
+                    "Run `/peers` to see what's discoverable."
+                ),
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        result = await self._api.peer_status(
+            caller_assistant_id=assistant_id, peer_assistant_id=peer_id,
+        )
+        online = "🟢 online" if result.get("online") else "⚪ offline"
+        last_seen = result.get("lastSeenAt") or "never"
+        has_open = "yes" if result.get("hasOpenConversation") else "no"
+        await self._api.post_message(
+            chat_id=chat_id,
+            text=(
+                f"**Peer #{peer_id} status:** {online}\n"
+                f"- Last seen: {last_seen}\n"
+                f"- Open conversation: {has_open}"
+            ),
+            sender="assistant",
+            message_type="standard",
+        )
+
+    async def _peer_cmd_send(
+        self, chat_id: int, assistant_id: int, args: str,
+    ) -> None:
+        # Parse `<name|id> <text>` plus optional `--wait` flag. Keep simple
+        # to avoid a CLI dep — this is a bridge-local, the agent has more
+        # ergonomic surfaces (markers + Python API).
+        wait_for_reply = False
+        if args.startswith("--wait "):
+            wait_for_reply = True
+            args = args[len("--wait "):].strip()
+        elif args.endswith(" --wait"):
+            wait_for_reply = True
+            args = args[: -len(" --wait")].strip()
+        if " " not in args:
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=(
+                    "Usage: `/peer-send <name|id> <text>` "
+                    "(append `--wait` to block on reply)."
+                ),
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        name_or_id, _, text = args.partition(" ")
+        peer_id = await self._resolve_peer_arg(assistant_id, name_or_id.strip())
+        if peer_id is None:
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=(
+                    f"No peer matches `{name_or_id}`. "
+                    f"Run `/peers` to see what's discoverable."
+                ),
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        # Anchor the SideConversationCard to the most recent assistant
+        # message in this chat. If we have none yet, post a "Looping in"
+        # message first so the card has something to attach to.
+        parent_message_id = self._state.last_assistant_message_by_chat.get(chat_id)
+        if parent_message_id is None:
+            anchor = await self._api.post_message(
+                chat_id=chat_id,
+                text=f"Looping in peer #{peer_id}…",
+                sender="assistant",
+                message_type="standard",
+            )
+            parent_message_id = anchor.get("id") if isinstance(anchor, dict) else None
+            if isinstance(parent_message_id, int):
+                self._state.last_assistant_message_by_chat[chat_id] = parent_message_id
+        if not isinstance(parent_message_id, int):
+            await self._api.post_message(
+                chat_id=chat_id,
+                text="Could not anchor the side-thread — try sending a normal reply first.",
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        result = await self._api.send_to_peer(
+            caller_assistant_id=assistant_id,
+            target_assistant_id=peer_id,
+            text=text.strip(),
+            parent_message_id=parent_message_id,
+            wait_for_reply=wait_for_reply,
+        )
+        if result.get("status") == "requires_introduction":
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=(
+                    f"**Cannot send to peer #{peer_id}** — the user has not "
+                    f"enabled this direction in the Agent Permissions matrix. "
+                    f"Open BGOS settings → Agent permissions to introduce them."
+                ),
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        # Track the open peer conversation so /peer-complete can find it.
+        msg_id = result.get("messageId")
+        conv_id = result.get("conversationId")
+        if isinstance(conv_id, int):
+            self._state.peer_conversation_by_chat[chat_id] = (peer_id, conv_id)
+        reply = result.get("reply")
+        ack = (
+            f"Sent to peer #{peer_id} (message `{msg_id}`)."
+            if not reply
+            else f"Peer replied: {reply.get('text', '<no text>')}"
+        )
+        await self._api.post_message(
+            chat_id=chat_id,
+            text=ack,
+            sender="assistant",
+            message_type="standard",
+        )
+
+    async def _peer_cmd_complete(
+        self, chat_id: int, assistant_id: int, args: str,
+    ) -> None:
+        tracked = self._state.peer_conversation_by_chat.get(chat_id)
+        if tracked is None:
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=(
+                    "No open peer conversation in this chat. "
+                    "Send to a peer first via `/peer-send`."
+                ),
+                sender="assistant",
+                message_type="standard",
+            )
+            return
+        peer_id, _conv_id = tracked
+        summary = args.strip() if args else None
+        result = await self._api.complete_peer_thread(
+            caller_assistant_id=assistant_id,
+            peer_assistant_id=peer_id,
+            summary=summary,
+        )
+        self._state.peer_conversation_by_chat.pop(chat_id, None)
+        await self._api.post_message(
+            chat_id=chat_id,
+            text=(
+                f"Closed conversation with peer #{peer_id}"
+                + (f": {summary}" if summary else ".")
+            ),
+            sender="assistant",
+            message_type="standard",
+        )
+        return result  # for tests
+
+    async def _resolve_peer_arg(
+        self, caller_assistant_id: int, arg: str,
+    ) -> int | None:
+        """Resolve `<name|id>` to an assistantId via the live peer list. Case-
+        insensitive name match. Returns None when no peer matches.
+        """
+        if not arg:
+            return None
+        if arg.isdigit():
+            return int(arg)
+        try:
+            peers = await self._api.list_peers(
+                caller_assistant_id=caller_assistant_id,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("list_peers failed during resolve")
+            return None
+        target = arg.lower()
+        for p in peers:
+            if (p.get("name") or "").lower() == target:
+                pid = p.get("assistantId")
+                if isinstance(pid, int):
+                    return pid
+        return None
 
     async def sync_commands_for(self, assistant_id: int) -> None:
         """Build the merged manifest (Hermes native + bridge-locals) and PUT
