@@ -308,3 +308,52 @@ async def test_stale_slash_confirm_click_noops(monkeypatch):
         "chat_id": 1,
     })
     # Implicit: nothing raised, no resolve called
+
+
+# -----------------------------------------------------------------------------
+# Task 5.1 — send_update_prompt() yes/no inline UI. Mirrors
+# gateway/platforms/telegram.py:2006. Called by Hermes's gateway during
+# stash-restore / config-migration flows. No adapter-side resolution state
+# (unlike approvals / slash-confirms) — Hermes's gateway resolves callbacks
+# itself by waiting on a future or sending a follow-up message.
+# -----------------------------------------------------------------------------
+
+
+async def test_send_update_prompt_renders_yes_no(monkeypatch):
+    adapter = _make_adapter()
+    posts = []
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    result = await adapter.send_update_prompt(
+        chat_id=1, prompt="Restore stashed config?",
+    )
+    assert result.success is True
+    options = posts[0]["options"]
+    callbacks = [o["callbackData"] for o in options]
+    assert callbacks == ["update_prompt:y", "update_prompt:n"]
+    assert "Restore stashed config?" in posts[0]["text"]
+    assert "✓ Yes" in options[0]["text"]
+    assert "✗ No" in options[1]["text"]
+
+
+async def test_send_update_prompt_with_default_hint(monkeypatch):
+    adapter = _make_adapter()
+    posts = []
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter.send_update_prompt(
+        chat_id=1, prompt="Apply migration?", default_hint="no",
+    )
+    assert "default: no" in posts[0]["text"]
+
+
+async def test_send_update_prompt_overrides_base():
+    # Override-gate check used by Hermes's gateway: it probes
+    # `type(adapter).send_update_prompt is BasePlatformAdapter.send_update_prompt`
+    # to decide whether to render the yes/no UI or fall back to plain text.
+    from hermes_channel_bgos.bgos_adapter import BGOSAdapter, BasePlatformAdapter
+    assert BGOSAdapter.send_update_prompt is not BasePlatformAdapter.send_update_prompt

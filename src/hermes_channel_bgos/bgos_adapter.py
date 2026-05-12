@@ -1248,6 +1248,50 @@ class BGOSAdapter(BasePlatformAdapter):
         message_id = resp.get("id") if isinstance(resp, dict) else None
         return _send_result(message_id=message_id)
 
+    # -------------------------------------------------------------------------
+    # send_update_prompt (Task 5.1) — yes/no inline confirmation called by
+    # Hermes's gateway during stash-restore / config-migration flows. Mirrors
+    # gateway/platforms/telegram.py:2006. Callback shape `update_prompt:y` /
+    # `update_prompt:n`. Unlike send_exec_approval / send_slash_confirm, we
+    # keep no adapter-side resolution state here — Hermes's gateway already
+    # handles those callbacks (waits on a future or sends a follow-up).
+    # -------------------------------------------------------------------------
+
+    async def send_update_prompt(
+        self,
+        chat_id: int | str,
+        prompt: str,
+        default_hint: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Yes/No inline prompt for Hermes's update flow (stash restore,
+        config migration). Mirrors gateway/platforms/telegram.py:2006.
+
+        Two-button inline UI: Yes / No. Callbacks shape `update_prompt:y`
+        and `update_prompt:n` — Hermes's gateway already handles those by
+        waiting on a future or sending a follow-up message; we don't need
+        adapter-side resolution state for this one (unlike approvals and
+        slash-confirms).
+        """
+        text = f"⚕ **Update needs your input:**\n\n{prompt}"
+        if default_hint:
+            text += f"\n\n_default: {default_hint}_"
+        options = [
+            {"text": "✓ Yes", "callbackData": "update_prompt:y",
+             "style": "success", "row_index": 0},
+            {"text": "✗ No",  "callbackData": "update_prompt:n",
+             "style": "default", "row_index": 0},
+        ]
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=text,
+            sender="assistant",
+            message_type="standard",
+            options=options,
+        )
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        return _send_result(message_id=message_id)
+
     async def get_chat_info(self, chat_id: int | str) -> dict:
         """BGOS is DM-only — a chat is its own minimal context. If later
         tasks need real chat metadata (title, participants), we extend this

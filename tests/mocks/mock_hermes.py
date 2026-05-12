@@ -90,6 +90,18 @@ class BasePlatformAdapter:
         gateway/platforms/base.py line ~1711."""
         return SendResult(success=False, error="Not supported")
 
+    async def send_update_prompt(  # noqa: D401
+        self,
+        chat_id: Any,
+        prompt: str,
+        default_hint: str | None = None,
+        metadata: dict | None = None,
+    ) -> "SendResult":
+        """Base default — returns failure so the gateway falls back to plain
+        text. Concrete adapters override to render a proper yes/no UI.
+        Mirrors the real fork's `BasePlatformAdapter.send_update_prompt`."""
+        return SendResult(success=False, error="Not supported")
+
 
 @dataclass
 class SendResult:
