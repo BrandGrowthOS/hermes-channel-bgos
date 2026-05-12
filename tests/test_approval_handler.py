@@ -338,7 +338,7 @@ async def test_send_update_prompt_renders_yes_no(monkeypatch):
     assert "✗ No" in options[1]["text"]
 
 
-async def test_send_update_prompt_with_default_hint(monkeypatch):
+async def test_send_update_prompt_with_default(monkeypatch):
     adapter = _make_adapter()
     posts = []
     async def fake_post(**kw):
@@ -346,17 +346,44 @@ async def test_send_update_prompt_with_default_hint(monkeypatch):
         return {"id": 1}
     monkeypatch.setattr(adapter._api, "post_message", fake_post)
     await adapter.send_update_prompt(
-        chat_id=1, prompt="Apply migration?", default_hint="no",
+        chat_id=1, prompt="Apply migration?", default="no",
     )
     assert "default: no" in posts[0]["text"]
 
 
-async def test_send_update_prompt_overrides_base():
-    # Override-gate check used by Hermes's gateway: it probes
-    # `type(adapter).send_update_prompt is BasePlatformAdapter.send_update_prompt`
-    # to decide whether to render the yes/no UI or fall back to plain text.
-    from hermes_channel_bgos.bgos_adapter import BGOSAdapter, BasePlatformAdapter
-    assert BGOSAdapter.send_update_prompt is not BasePlatformAdapter.send_update_prompt
+async def test_send_update_prompt_accepts_session_key_kwarg(monkeypatch):
+    """The gateway calls send_update_prompt with chat_id, prompt, default,
+    session_key, metadata (gateway/run.py:12582). The signature must accept
+    all five positional/keyword args without TypeError, even if session_key
+    is unused by the adapter body."""
+    adapter = _make_adapter()
+    posts = []
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    result = await adapter.send_update_prompt(
+        chat_id=1,
+        prompt="Apply migration?",
+        default="no",
+        session_key="sess-abc",
+        metadata={"thread_id": 5},
+    )
+    assert result.success is True
+
+
+async def test_send_update_prompt_is_present():
+    """Hermes's gateway probes
+    `getattr(type(adapter), "send_update_prompt", None) is not None`
+    at gateway/run.py:12580 — there is NO base method to compare against
+    via identity. Just verify our adapter exposes it as a callable.
+
+    Caught live on kc's server 2026-05-12: an earlier identity-style
+    override-gate test only worked because the in-tree mock defined a base
+    default. On real Hermes the attribute was absent and the test raised
+    AttributeError."""
+    from hermes_channel_bgos.bgos_adapter import BGOSAdapter
+    assert callable(getattr(BGOSAdapter, "send_update_prompt", None))
 
 
 async def test_send_slash_confirm_overrides_base():
