@@ -685,6 +685,32 @@ class BGOSAdapter(BasePlatformAdapter):
             raise
         return _send_result(message_id=int(message_id))
 
+    async def delete_message(
+        self,
+        chat_id: int | str,
+        message_id: int | str,
+    ) -> bool:
+        """Delete a previously-sent message via DELETE /api/v1/messages/{id}.
+
+        Used by the gateway's stream consumer to clean up intermediate
+        streaming-preview messages once the final answer is delivered as
+        a fresh message (so the visible timestamp reflects completion
+        time rather than start-of-stream).
+
+        Returns False on any HTTP error (404 = already deleted; 501 =
+        backend doesn't implement DELETE yet) so the caller falls back to
+        leaving the message visible. Re-raises 5xx other than 501 so real
+        backend incidents surface.
+        """
+        try:
+            await self._api.delete_message(int(message_id))
+            return True
+        except BgosApiError as exc:
+            if 400 <= exc.status < 500 or exc.status == 501:
+                log.debug("delete_message message_id=%s failed: %s", message_id, exc)
+                return False
+            raise
+
     # -------------------------------------------------------------------------
     # Optional media overrides (Task 6) — Hermes duck-types these at send time.
     # The gateway's fallback is to call `send()` with a caption, so NOT

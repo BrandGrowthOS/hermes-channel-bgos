@@ -250,3 +250,59 @@ async def test_edit_message_overrides_base_unlocks_tool_progress():
     to decide whether to drive the tool-progress / streaming / typing UI.
     If this fails, the entire feature degrades to plain send()."""
     assert BGOSAdapter.edit_message is not BasePlatformAdapter.edit_message
+
+
+# -----------------------------------------------------------------------------
+# delete_message override (Task 1.4) — used by the gateway's stream consumer
+# to clean up intermediate streaming-preview messages.
+# -----------------------------------------------------------------------------
+
+
+async def test_delete_message_returns_true_on_success(monkeypatch):
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    async def fake_delete(message_id):
+        captured["message_id"] = message_id
+        return None
+
+    monkeypatch.setattr(adapter._api, "delete_message", fake_delete)
+
+    ok = await adapter.delete_message(chat_id=11, message_id=300)
+    assert ok is True
+    assert captured["message_id"] == 300
+
+
+async def test_delete_message_returns_false_on_404(monkeypatch):
+    """Already-deleted or never-existed message — swallow and return
+    False so the gateway just leaves things as-is."""
+    adapter = _make_adapter()
+
+    async def boom(message_id):
+        raise BgosApiError(404, "MESSAGE_NOT_FOUND", {})
+
+    monkeypatch.setattr(adapter._api, "delete_message", boom)
+
+    ok = await adapter.delete_message(chat_id=11, message_id=300)
+    assert ok is False
+
+
+async def test_delete_message_returns_false_on_501(monkeypatch):
+    """Backend doesn't implement DELETE yet — swallow 501 so we don't
+    fail loudly during the rollout window where servers may be older
+    than the adapter."""
+    adapter = _make_adapter()
+
+    async def boom(message_id):
+        raise BgosApiError(501, None, "Not Implemented")
+
+    monkeypatch.setattr(adapter._api, "delete_message", boom)
+
+    ok = await adapter.delete_message(chat_id=11, message_id=300)
+    assert ok is False
+
+
+async def test_delete_message_overrides_base():
+    """Sister check to the edit_message gate — gateway probes for this
+    too when deciding whether to clean up streaming previews."""
+    assert BGOSAdapter.delete_message is not BasePlatformAdapter.delete_message
