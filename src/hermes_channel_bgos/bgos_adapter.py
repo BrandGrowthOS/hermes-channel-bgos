@@ -315,6 +315,20 @@ class BGOSAdapter(BasePlatformAdapter):
         # _poll_loop for details). Started in connect(), cancelled in
         # disconnect().
         self._poll_task: asyncio.Task | None = None
+        # edit_message throttle — mirrors Telegram's
+        # _PROGRESS_EDIT_INTERVAL=1.5 (gateway/run.py:14382). Keeps the
+        # BGOS backend from drowning under tool-progress / streaming
+        # edits when the agent emits many small chunks. Per-chat so
+        # high-traffic chats don't starve quieter ones.
+        self._edit_throttle_seconds: float = 1.5
+        self._pending_edits: dict[int, asyncio.Task] = {}
+        self._last_edit_at: dict[int, float] = {}
+        # chat_id -> (message_id, cleaned_text, options, render_mode) —
+        # the latest content waiting for the deferred flush. Later
+        # writes inside the window supersede earlier ones (coalesce).
+        self._pending_edit_content: dict[
+            int, tuple[int, str, list[dict] | None, str | None],
+        ] = {}
 
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
@@ -664,14 +678,66 @@ class BGOSAdapter(BasePlatformAdapter):
         typical streaming pattern where the first send carried buttons
         and the streamed update is plain text.
 
+        Throttle: per-chat, _edit_throttle_seconds=1.5 by default
+        (mirrors Telegram's _PROGRESS_EDIT_INTERVAL). The first call in
+        a window fires immediately; subsequent calls within the window
+        stash their content and schedule a single deferred flush — later
+        writes supersede earlier ones, so only the latest text lands.
+        Without this the BGOS backend (and the user's chat list) drown
+        under tool-progress / streaming edits.
+
         Returns SendResult(success=False) on 4xx (message too old / not
         editable / deleted) so the gateway falls back to a fresh send().
+        Within-window calls return a `success=True` placeholder — real
+        failures from the deferred flush surface as warning logs only,
+        which matches Telegram's parity behavior (the gateway treats
+        progress edits as fire-and-forget).
         """
         cleaned_text, options, render_mode = _parse_buttons_block(content)
+        chat_key = int(chat_id)
+        mid_int = int(message_id)
+        now = asyncio.get_event_loop().time()
+        last = self._last_edit_at.get(chat_key, 0.0)
+        elapsed = now - last
+        if elapsed >= self._edit_throttle_seconds:
+            # Window expired (or first call) — fire immediately, cancel any
+            # stale pending flush since we just spoke for this chat.
+            pending = self._pending_edits.pop(chat_key, None)
+            if pending is not None and not pending.done():
+                pending.cancel()
+            self._pending_edit_content.pop(chat_key, None)
+            result = await self._do_patch(mid_int, cleaned_text, options, render_mode)
+            self._last_edit_at[chat_key] = now
+            return result
+
+        # Within throttle window — stash latest content (coalesces with
+        # any earlier-stashed write for the same chat), schedule deferred
+        # flush if one isn't already pending.
+        self._pending_edit_content[chat_key] = (
+            mid_int, cleaned_text, options, render_mode,
+        )
+        existing = self._pending_edits.get(chat_key)
+        if existing is None or existing.done():
+            wait_for = self._edit_throttle_seconds - elapsed
+            self._pending_edits[chat_key] = asyncio.create_task(
+                self._deferred_edit_flush(chat_key, wait_for)
+            )
+        return _send_result(message_id=mid_int)
+
+    async def _do_patch(
+        self,
+        mid_int: int,
+        text: str,
+        options: list[dict] | None,
+        render_mode: str | None,
+    ) -> SendResult:
+        """The actual PATCH call — extracted so the throttle path can share
+        it with the deferred flush path. Returns SendResult(success=False,
+        error=not_editable_*) on 4xx; re-raises 5xx."""
         try:
             await self._api.patch_message(
-                int(message_id),
-                text=cleaned_text,
+                mid_int,
+                text=text,
                 options=options if options else [],
                 render_mode=render_mode,
             )
@@ -679,11 +745,32 @@ class BGOSAdapter(BasePlatformAdapter):
             if 400 <= exc.status < 500:
                 return SendResult(  # type: ignore[call-arg]
                     success=False,
-                    message_id=str(message_id),
+                    message_id=str(mid_int),
                     error=f"not_editable_{exc.status}",
                 )
             raise
-        return _send_result(message_id=int(message_id))
+        return _send_result(message_id=mid_int)
+
+    async def _deferred_edit_flush(self, chat_key: int, wait_for: float) -> None:
+        """Sleep until the throttle window expires, then fire whatever
+        content is currently stashed for this chat. Cancellation is
+        expected on disconnect — return cleanly without flushing."""
+        try:
+            await asyncio.sleep(wait_for)
+        except asyncio.CancelledError:
+            return
+        pending = self._pending_edit_content.pop(chat_key, None)
+        if pending is None:
+            return
+        mid_int, text, options, render_mode = pending
+        try:
+            await self._do_patch(mid_int, text, options, render_mode)
+        except Exception:
+            log.warning(
+                "deferred edit flush failed chat=%d msg=%d",
+                chat_key, mid_int, exc_info=True,
+            )
+        self._last_edit_at[chat_key] = asyncio.get_event_loop().time()
 
     async def delete_message(
         self,

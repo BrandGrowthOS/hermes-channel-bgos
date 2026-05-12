@@ -6,6 +6,8 @@ covered in their respective test files.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter
@@ -365,3 +367,65 @@ async def test_send_typing_overrides_base():
     """Gateway probes for this when deciding whether to drive the typing
     indicator between tool-progress edits."""
     assert BGOSAdapter.send_typing is not BasePlatformAdapter.send_typing
+
+
+# -----------------------------------------------------------------------------
+# edit_message throttle (Task 1.6) — mirrors Telegram's
+# _PROGRESS_EDIT_INTERVAL = 1.5 pattern at gateway/run.py:14382. Keeps the
+# backend from drowning under tool-progress edits when the agent streams
+# many small chunks. Each chat gets its own throttle window so high-traffic
+# chats don't starve quieter ones.
+# -----------------------------------------------------------------------------
+
+
+async def test_edit_message_throttled_to_one_per_chat_per_interval(monkeypatch):
+    """First edit fires immediately; second within window is stashed and
+    superseded by the third; only the third's content lands after the
+    window expires."""
+    adapter = _make_adapter()
+    adapter._edit_throttle_seconds = 0.1
+    calls: list[dict] = []
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        approval_meta=None):
+        calls.append({"message_id": message_id, "text": text})
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+
+    await adapter.edit_message(chat_id=42, message_id=300, content="first")
+    await adapter.edit_message(chat_id=42, message_id=300, content="second")
+    await adapter.edit_message(chat_id=42, message_id=300, content="third")
+
+    # First lands immediately; second + third are coalesced.
+    assert len(calls) == 1
+    assert calls[0]["text"] == "first"
+
+    # Wait for the deferred flush window to fire.
+    await asyncio.sleep(0.25)
+
+    # Only the latest content (third) should have landed; second is dropped.
+    assert len(calls) == 2
+    assert calls[1]["text"] == "third"
+
+
+async def test_edits_to_different_chats_are_independent(monkeypatch):
+    """Throttle is per-chat — two chats should each get their first edit
+    immediately without throttling each other."""
+    adapter = _make_adapter()
+    adapter._edit_throttle_seconds = 5.0  # large window — verify no cross-chat throttle
+    calls: list[dict] = []
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        approval_meta=None):
+        calls.append({"message_id": message_id, "text": text})
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+
+    await adapter.edit_message(chat_id=42, message_id=300, content="chat_42")
+    await adapter.edit_message(chat_id=99, message_id=400, content="chat_99")
+
+    # Both first edits should fire immediately despite the large window.
+    assert len(calls) == 2
+    assert {c["text"] for c in calls} == {"chat_42", "chat_99"}
