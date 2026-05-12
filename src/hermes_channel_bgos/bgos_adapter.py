@@ -792,6 +792,12 @@ class BGOSAdapter(BasePlatformAdapter):
                 chat_key, mid_int, exc_info=True,
             )
         self._last_edit_at[chat_key] = asyncio.get_running_loop().time()
+        # Drop the now-completed task reference so _pending_edits doesn't
+        # accumulate one entry per chat for the lifetime of the adapter.
+        # disconnect()'s snapshot-then-cancel pattern handles in-flight
+        # tasks; this clears done ones so we don't leak memory in steady
+        # state when chats keep flowing.
+        self._pending_edits.pop(chat_key, None)
 
     async def delete_message(
         self,

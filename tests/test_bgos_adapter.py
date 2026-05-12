@@ -491,6 +491,27 @@ async def test_edits_to_different_chats_are_independent(monkeypatch):
     assert {c["text"] for c in calls} == {"chat_42", "chat_99"}
 
 
+async def test_deferred_flush_clears_pending_edit_entry(monkeypatch):
+    """After the deferred flush completes, _pending_edits must not retain
+    a reference to the completed task — otherwise we leak one entry per
+    chat for the lifetime of the adapter."""
+    adapter = _make_adapter()
+    adapter._edit_throttle_seconds = 0.05
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        approval_meta=None):
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+
+    await adapter.edit_message(chat_id=1, message_id=9, content="v1")  # immediate
+    await adapter.edit_message(chat_id=1, message_id=9, content="v2")  # pending
+    assert 1 in adapter._pending_edits
+    await asyncio.sleep(0.15)  # let the deferred flush run
+    assert 1 not in adapter._pending_edits
+    assert 1 not in adapter._pending_edit_content
+
+
 async def test_disconnect_cancels_pending_edit_flushes(monkeypatch):
     """A deferred edit flush waiting on its throttle window must be
     cancelled at disconnect — otherwise it would fire after the WS / API
