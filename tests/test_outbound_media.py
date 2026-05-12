@@ -166,6 +166,9 @@ async def test_send_multiple_images_single_post(monkeypatch):
 
 
 async def test_send_multiple_images_caps_at_10(monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING)
     adapter = _make_adapter()
     posts = []
 
@@ -177,6 +180,12 @@ async def test_send_multiple_images_caps_at_10(monkeypatch, caplog):
     images = [(b"x", f"img{i}.png", "image/png") for i in range(15)]
     await adapter.send_multiple_images(chat_id=1, images=images)
     assert len(posts[0]["files"]) == 10
+    # The warning must surface so operators can spot runaway agents that
+    # silently lose images past the carousel cap.
+    assert any(
+        "15" in record.message and "10" in record.message
+        for record in caplog.records
+    )
 
 
 async def test_send_multiple_images_empty_is_noop(monkeypatch):
