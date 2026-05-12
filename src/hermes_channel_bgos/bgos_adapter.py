@@ -56,9 +56,10 @@ try:  # pragma: no cover - exercised only when Hermes is installed
 except ImportError:
     def resolve_slash_confirm(session_key: str, confirm_id: str, choice: str) -> None:  # type: ignore[no-redef]
         raise RuntimeError(
-            "gateway.slash_confirm.resolve is not importable — "
-            "Hermes not installed. Tests should monkeypatch this at the "
-            "module level (hermes_channel_bgos.bgos_adapter)."
+            "gateway.slash_confirm.resolve is not importable — either Hermes "
+            "is not installed, or this Hermes build hasn't shipped the slash-"
+            "confirm helper yet (Phase 1 stub in hermes_channel_bgos.bgos_adapter). "
+            "Tests should monkeypatch this at the module level."
         )
 
 
