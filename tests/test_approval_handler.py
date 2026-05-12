@@ -21,6 +21,12 @@ async def _connected_adapter(server) -> BGOSAdapter:
     return adapter
 
 
+def _make_adapter() -> BGOSAdapter:
+    """Lightweight adapter for testing approval-callback paths without
+    spinning up the mock backend. Tests monkeypatch the api / ws fields."""
+    return BGOSAdapter(BgosConfig(base_url="http://x", pairing_token="pair_xyz"))
+
+
 async def test_send_exec_approval_posts_expected_payload(mock_bgos_server):
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 777})
 
@@ -124,3 +130,88 @@ async def test_approval_state_not_stashed_when_post_fails(mock_bgos_server):
         assert adapter._approval_state == {}
     finally:
         await adapter.disconnect()
+
+
+# -----------------------------------------------------------------------------
+# Task 2.1 — Approval callback edits the original bubble in place.
+# Matches Telegram's UX at gateway/platforms/telegram.py:2533-2537 — once the
+# user taps a button, the buttons vanish and the bubble shows the resolution
+# (e.g. "Approved once by user_42"). Bypasses the edit_message throttle since
+# the resolution is a one-shot per approval — no edit-storm risk.
+# -----------------------------------------------------------------------------
+
+
+async def test_approval_callback_edits_message_in_place(monkeypatch):
+    """After resolving an approval, the original bubble should be edited
+    to show the choice + user — matches Telegram's UX where buttons
+    disappear and the message shows the resolution."""
+    adapter = _make_adapter()
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_gateway_approval",
+        lambda sk, choice: None,
+    )
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")  # needed once Task 2.2 lands
+    captured_patches = []
+    async def fake_patch(mid, *, text=None, options=None, **kw):
+        captured_patches.append({"message_id": mid, "text": text, "options": options})
+        return {"id": mid}
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    adapter._approval_state[7] = "session-abc"
+    await adapter._handle_callback({
+        "callback_data": "ea:once:7",
+        "user_id": "user_42",
+        "message_id": 99,
+        "chat_id": 1,
+    })
+    assert captured_patches[0]["message_id"] == 99
+    assert "Approved once" in captured_patches[0]["text"]
+    assert "user_42" in captured_patches[0]["text"]
+    assert captured_patches[0]["options"] == []  # buttons removed
+
+
+async def test_approval_callback_edit_uses_camelcase_payload(monkeypatch):
+    """Backend sometimes emits callback events with camelCase keys
+    (messageId, chatId) — same surface as inbound_click. Honor both."""
+    adapter = _make_adapter()
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_gateway_approval",
+        lambda sk, choice: None,
+    )
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    seen = []
+    async def fake_patch(mid, *, text=None, **kw):
+        seen.append(mid)
+        return {"id": mid}
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    adapter._approval_state[8] = "sess-x"
+    await adapter._handle_callback({
+        "callback_data": "ea:always:8",
+        "userId": "user_42",
+        "messageId": 200,
+        "chatId": 1,
+    })
+    assert 200 in seen
+
+
+async def test_approval_callback_edit_swallows_patch_errors(monkeypatch, caplog):
+    """If the bubble can't be edited (e.g. deleted), still resolve the
+    approval — that already happened. Just log."""
+    adapter = _make_adapter()
+    resolved = []
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_gateway_approval",
+        lambda sk, choice: resolved.append((sk, choice)),
+    )
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    async def fake_patch(mid, **kw):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    adapter._approval_state[9] = "sess-y"
+    await adapter._handle_callback({
+        "callback_data": "ea:deny:9",
+        "user_id": "u",
+        "message_id": 50,
+        "chat_id": 1,
+    })
+    # The approval still resolved — that's the important contract
+    assert resolved == [("sess-y", "deny")]

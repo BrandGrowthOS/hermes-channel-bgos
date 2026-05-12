@@ -1208,7 +1208,11 @@ class BGOSAdapter(BasePlatformAdapter):
 
         `ea:{choice}:{approval_id}` → look up session_key in self._approval_state,
         call `resolve_gateway_approval(session_key, choice)` from tools.approval
-        (synchronous, thread-safe — safe from this async handler).
+        (synchronous, thread-safe — safe from this async handler). After
+        resolving, edit the original approval bubble in-place to show the
+        choice + user (matches Telegram's UX at
+        gateway/platforms/telegram.py:2533-2537 — buttons vanish, the
+        bubble shows the resolution).
 
         Anything else → defer to `self.handle_button_press(data)` so the
         Hermes agent sees the press naturally. If no such handler exists,
@@ -1235,6 +1239,36 @@ class BGOSAdapter(BasePlatformAdapter):
             # Route via the module-level binding so tests can monkeypatch it.
             import hermes_channel_bgos.bgos_adapter as _self_mod
             _self_mod.resolve_gateway_approval(session_key, choice)
+
+            # Edit the original bubble in-place to show the resolution.
+            # Mirrors gateway/platforms/telegram.py:2533-2537. We bypass
+            # the 1.5s edit throttle (calling self._api.patch_message
+            # directly rather than self.edit_message) since this is a
+            # one-shot event per approval — no edit-storm risk and the
+            # UX wants the resolution to land immediately. Backend
+            # callback payloads may use snake_case OR camelCase keys,
+            # same as inbound_click — honor both.
+            choice_labels = {
+                "once":    "✅ Approved once",
+                "session": "✅ Approved for session",
+                "always":  "🔒 Approved permanently",
+                "deny":    "❌ Denied",
+            }
+            user_id_label = data.get("user_id") or data.get("userId") or ""
+            text = choice_labels.get(choice, choice)
+            if user_id_label:
+                text += f" by {user_id_label}"
+            msg_id = data.get("message_id") or data.get("messageId")
+            if isinstance(msg_id, int):
+                try:
+                    await self._api.patch_message(msg_id, text=text, options=[])
+                except Exception:
+                    # Cosmetic — approval already resolved by the time we get
+                    # here. Swallow (e.g. message was deleted) and log.
+                    log.warning(
+                        "approval message edit failed message_id=%d",
+                        msg_id, exc_info=True,
+                    )
             return
 
         handler = getattr(self, "handle_button_press", None)
