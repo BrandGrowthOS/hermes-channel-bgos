@@ -198,6 +198,13 @@ class BgosApi:
             body["approvalMeta"] = approval_meta
         return await self._request("PATCH", f"/api/v1/messages/{message_id}", json=body)
 
+    async def delete_message(self, message_id: int) -> None:
+        """DELETE /api/v1/messages/{id}. Raises BgosApiError on 4xx/5xx
+        (including 404 — callers decide whether to swallow). The adapter's
+        delete_message override DOES swallow 404/501 and returns False so
+        the gateway can fall back to leaving the message in place."""
+        await self._request("DELETE", f"/api/v1/messages/{message_id}")
+
     # -------------------------------------------------------------------------
     # Inbound backfill (reconnect)
     # -------------------------------------------------------------------------

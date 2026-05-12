@@ -110,6 +110,37 @@ async def test_patch_message_sends_changes(mock_bgos_server):
     await api.close()
 
 
+async def test_delete_message_sends_delete_request(mock_bgos_server):
+    """DELETE /api/v1/messages/{id} carries the pairing header and uses
+    the DELETE verb. Backend may return 204 No Content — _request handles
+    empty bodies and returns None."""
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("DELETE", "/api/v1/messages/42").respond(204)
+
+    result = await api.delete_message(42)
+
+    assert result is None
+    req = mock_bgos_server.last_request("DELETE", "/api/v1/messages/42")
+    assert req.method == "DELETE"
+    assert req.headers["X-BGOS-Pairing"] == "pair_xyz"
+    await api.close()
+
+
+async def test_delete_message_raises_on_404(mock_bgos_server):
+    """A 404 (already-deleted or never-existed) bubbles up as BgosApiError
+    so callers can decide whether to swallow. Adapter-side delete_message
+    swallows 404; lower-level callers may not want to."""
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("DELETE", "/api/v1/messages/99").respond(
+        404, {"error": "MESSAGE_NOT_FOUND"},
+    )
+
+    with pytest.raises(BgosApiError) as excinfo:
+        await api.delete_message(99)
+    assert excinfo.value.status == 404
+    await api.close()
+
+
 async def test_fetch_inbound_since_passes_cursor(mock_bgos_server):
     api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     mock_bgos_server.on(
