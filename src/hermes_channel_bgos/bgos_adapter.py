@@ -1261,21 +1261,28 @@ class BGOSAdapter(BasePlatformAdapter):
         self,
         chat_id: int | str,
         prompt: str,
-        default_hint: str | None = None,
+        default: str = "",
+        session_key: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
         """Yes/No inline prompt for Hermes's update flow (stash restore,
         config migration). Mirrors gateway/platforms/telegram.py:2006.
 
-        Two-button inline UI: Yes / No. Callbacks shape `update_prompt:y`
-        and `update_prompt:n` — Hermes's gateway already handles those by
-        waiting on a future or sending a follow-up message; we don't need
-        adapter-side resolution state for this one (unlike approvals and
-        slash-confirms).
+        Hermes's gateway invokes this via duck-typing — `getattr(type(adapter),
+        "send_update_prompt", None) is not None` at gateway/run.py:12580 — so
+        there is NO `BasePlatformAdapter.send_update_prompt` to override. The
+        signature MUST match the gateway's call shape: `chat_id, prompt,
+        default, session_key, metadata` (positional/keyword), or the gateway's
+        call raises TypeError and silently falls back to plain text.
+
+        Two-button inline UI: Yes / No. Callback shape `update_prompt:y` /
+        `update_prompt:n`. The gateway resolves these callbacks itself
+        (waits on a future keyed by chat_id / session_key); we don't keep
+        adapter-side resolution state.
         """
         text = f"⚕ **Update needs your input:**\n\n{prompt}"
-        if default_hint:
-            text += f"\n\n_default: {default_hint}_"
+        if default:
+            text += f"\n\n_default: {default}_"
         options = [
             {"text": "✓ Yes", "callbackData": "update_prompt:y",
              "style": "success", "row_index": 0},

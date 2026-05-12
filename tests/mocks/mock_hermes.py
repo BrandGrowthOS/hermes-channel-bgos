@@ -90,17 +90,13 @@ class BasePlatformAdapter:
         gateway/platforms/base.py line ~1711."""
         return SendResult(success=False, error="Not supported")
 
-    async def send_update_prompt(  # noqa: D401
-        self,
-        chat_id: Any,
-        prompt: str,
-        default_hint: str | None = None,
-        metadata: dict | None = None,
-    ) -> "SendResult":
-        """Base default — returns failure so the gateway falls back to plain
-        text. Concrete adapters override to render a proper yes/no UI.
-        Mirrors the real fork's `BasePlatformAdapter.send_update_prompt`."""
-        return SendResult(success=False, error="Not supported")
+    # NOTE: NO `send_update_prompt` here. Real upstream Hermes does NOT
+    # define this method on BasePlatformAdapter — it's a Telegram-style
+    # duck-typed method the gateway probes via
+    # `getattr(type(adapter), "send_update_prompt", None) is not None`
+    # (gateway/run.py:12580). Defining it here would let the production-
+    # incompatible identity-style override-gate check pass in tests but
+    # fail on a real Hermes install — caught live on kc's server 2026-05-12.
 
 
 @dataclass
