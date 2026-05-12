@@ -306,3 +306,62 @@ async def test_delete_message_overrides_base():
     """Sister check to the edit_message gate — gateway probes for this
     too when deciding whether to clean up streaming previews."""
     assert BGOSAdapter.delete_message is not BasePlatformAdapter.delete_message
+
+
+# -----------------------------------------------------------------------------
+# send_typing override (Task 1.5) — emits the `typing` WS event between
+# tool-progress edits / during long-running tool calls so users see the
+# bot is alive. BGOS is DM-only, so we pick the single bound assistant.
+# -----------------------------------------------------------------------------
+
+
+class _StubWs:
+    """Minimal stand-in for BgosWs that captures emit_typing calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.raise_on_emit: Exception | None = None
+
+    async def emit_typing(self, *, chat_id: int, assistant_id: int) -> None:
+        if self.raise_on_emit is not None:
+            raise self.raise_on_emit
+        self.calls.append({"chat_id": chat_id, "assistant_id": assistant_id})
+
+
+async def test_send_typing_emits_via_ws():
+    """Pick the only assistant in the route map and forward to the WS."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "hades")
+    stub = _StubWs()
+    adapter._ws = stub  # type: ignore[assignment]
+
+    await adapter.send_typing(chat_id=42)
+
+    assert stub.calls == [{"chat_id": 42, "assistant_id": 7}]
+
+
+async def test_send_typing_is_noop_when_ws_absent():
+    """No WS attached (e.g. between disconnect / reconnect) — return
+    silently rather than crashing."""
+    adapter = _make_adapter()
+    adapter._ws = None
+    # Just confirms no exception bubbles up
+    await adapter.send_typing(chat_id=42)
+
+
+async def test_send_typing_swallows_exceptions():
+    """Typing is cosmetic — never propagate failures into the gateway."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "hades")
+    stub = _StubWs()
+    stub.raise_on_emit = RuntimeError("ws broke")
+    adapter._ws = stub  # type: ignore[assignment]
+
+    # Must not raise
+    await adapter.send_typing(chat_id=42)
+
+
+async def test_send_typing_overrides_base():
+    """Gateway probes for this when deciding whether to drive the typing
+    indicator between tool-progress edits."""
+    assert BGOSAdapter.send_typing is not BasePlatformAdapter.send_typing

@@ -711,6 +711,42 @@ class BGOSAdapter(BasePlatformAdapter):
                 return False
             raise
 
+    async def send_typing(
+        self,
+        chat_id: int | str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit a typing indicator over WS for this chat.
+
+        The gateway calls this between tool-progress edits and during
+        long-running tool calls so the user sees the bot is still alive.
+        BGOS is currently DM-only — one assistant per pairing — so we
+        pick the only assistant in the route map. If multi-assistant
+        pairings are added later, `metadata` could carry an explicit
+        assistant_id.
+
+        Cosmetic — never raises.
+        """
+        if self._ws is None:
+            return
+        assistant_id: int | None = None
+        if metadata and isinstance(metadata, dict):
+            candidate = metadata.get("assistant_id")
+            if isinstance(candidate, int):
+                assistant_id = candidate
+        if assistant_id is None:
+            for aid in self._state.assistant_route:
+                assistant_id = aid
+                break
+        if assistant_id is None:
+            return
+        try:
+            await self._ws.emit_typing(
+                chat_id=int(chat_id), assistant_id=assistant_id,
+            )
+        except Exception:
+            log.debug("send_typing failed (non-fatal)", exc_info=True)
+
     # -------------------------------------------------------------------------
     # Optional media overrides (Task 6) — Hermes duck-types these at send time.
     # The gateway's fallback is to call `send()` with a caption, so NOT
