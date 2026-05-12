@@ -95,6 +95,15 @@ _INLINE_OPTION_LIMIT = 6
 # openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
 S3_THRESHOLD = 500 * 1024
 
+# Strip Telegram MarkdownV2 punctuation escapes that some agents emit out
+# of habit. BGOS's mobile renderer is CommonMark; the backslashes show
+# through as ugly visible characters otherwise. Match only the
+# punctuation-class characters Telegram requires escaping; do NOT match
+# CommonMark-meaningful escapes (\\, \*, \_, \[, \], \(, \), \`).
+# Punctuation set per Telegram MarkdownV2 spec minus the CommonMark-shared
+# ones: , . ! ? : ; @ - + = | # < > { }
+_MDV2_LEAK_RE = re.compile(r"\\([,.!?:;@\-+=|#<>{}])")
+
 
 @dataclass
 class MessageEvent:
@@ -650,6 +659,19 @@ class BGOSAdapter(BasePlatformAdapter):
                 self._ws = None
         await self._api.close()
 
+    def format_message(self, content: str) -> str:
+        """Translate the agent's outbound text into BGOS-native form.
+
+        BGOS's mobile app renders CommonMark. Telegram-tuned prompts often
+        emit MarkdownV2 punctuation escapes (`\\,` `\\!` `\\.` etc.) that
+        survive as visible backslashes here. Strip those defensively; leave
+        real CommonMark escapes (\\\\, \\*, \\_, \\[, \\], \\(, \\), \\`)
+        alone since users may legitimately want them.
+
+        Idempotent — re-running has no effect after the first pass.
+        """
+        return _MDV2_LEAK_RE.sub(r"\1", content)
+
     async def send(
         self,
         chat_id: int | str,
@@ -673,7 +695,9 @@ class BGOSAdapter(BasePlatformAdapter):
         originator's pollForReply() falls back to positional matching, which
         works for 1:1 side threads but not for any future fan-in patterns.
         """
-        cleaned_text, options, render_mode = _parse_buttons_block(content)
+        cleaned_text, options, render_mode = _parse_buttons_block(
+            self.format_message(content)
+        )
         resp = await self._api.post_message(
             chat_id=int(chat_id),
             text=cleaned_text,
@@ -740,7 +764,9 @@ class BGOSAdapter(BasePlatformAdapter):
         which matches Telegram's parity behavior (the gateway treats
         progress edits as fire-and-forget).
         """
-        cleaned_text, options, render_mode = _parse_buttons_block(content)
+        cleaned_text, options, render_mode = _parse_buttons_block(
+            self.format_message(content)
+        )
         chat_key = int(chat_id)
         mid_int = int(message_id)
         now = asyncio.get_running_loop().time()

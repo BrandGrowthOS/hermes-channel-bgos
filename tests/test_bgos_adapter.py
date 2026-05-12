@@ -542,3 +542,54 @@ async def test_disconnect_cancels_pending_edit_flushes(monkeypatch):
     assert pending.done()
     assert adapter._pending_edits == {}
     assert adapter._pending_edit_content == {}
+
+
+# -----------------------------------------------------------------------------
+# format_message (Task 3.1) — strip Telegram MarkdownV2 punctuation escapes
+# (`\,` `\!` `\.` etc.) that some Telegram-tuned prompts emit out of habit.
+# BGOS renders CommonMark, so those backslashes would otherwise show through
+# as ugly visible characters. CommonMark-meaningful escapes (\\, \*, \_, \[,
+# \], \(, \), \`) MUST be preserved — users may legitimately want literal
+# asterisks, etc.
+# -----------------------------------------------------------------------------
+
+
+def test_format_message_strips_telegram_punctuation_escapes():
+    adapter = _make_adapter()
+    raw = r"Hello\, world\! See https\://example\.com\?q\=1"
+    assert adapter.format_message(raw) == "Hello, world! See https://example.com?q=1"
+
+
+def test_format_message_preserves_commonmark_escapes():
+    """Real CommonMark escapes (which Telegram MDv2 ALSO uses but for
+    common reasons) survive — users may legitimately want \\* to render
+    as a literal asterisk."""
+    adapter = _make_adapter()
+    raw = r"\*literal asterisk\* and \_literal underscore\_ and \[literal bracket\]"
+    out = adapter.format_message(raw)
+    # The CommonMark-meaningful escapes pass through unchanged
+    assert r"\*" in out
+    assert r"\_" in out
+    assert r"\[" in out
+
+
+def test_format_message_idempotent():
+    adapter = _make_adapter()
+    raw = r"Hello\, world"
+    once = adapter.format_message(raw)
+    twice = adapter.format_message(once)
+    assert once == twice == "Hello, world"
+
+
+async def test_send_applies_format_message(monkeypatch):
+    """send() runs content through format_message BEFORE button parsing."""
+    adapter = _make_adapter()
+    captured = []
+
+    async def fake_post(**kw):
+        captured.append(kw)
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter.send(chat_id=1, content=r"Hi\, there\!")
+    assert captured[0]["text"] == "Hi, there!"
