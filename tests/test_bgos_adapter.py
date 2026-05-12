@@ -598,6 +598,26 @@ async def test_send_applies_format_message(monkeypatch):
     assert captured[0]["text"] == "Hi, there!"
 
 
+async def test_edit_message_applies_format_message(monkeypatch):
+    """edit_message() runs content through format_message before button
+    parsing — parity with send()."""
+    adapter = _make_adapter()
+    captured = []
+
+    async def fake_patch(mid, *, text=None, **kw):
+        captured.append({"message_id": mid, "text": text})
+        return {"id": mid}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    await adapter.edit_message(
+        chat_id=1, message_id="9",
+        content=r"Hi\, there\! \. \? \(this stays\)",
+    )
+    # \, \! \. \? — all stripped (in _MDV2_LEAK_RE's char class).
+    # \( and \) — preserved as CommonMark link-syntax escapes.
+    assert captured[0]["text"] == r"Hi, there! . ? \(this stays\)"
+
+
 # -----------------------------------------------------------------------------
 # Long-message splitting (Task 3.2) — Telegram's pattern at
 # gateway/platforms/telegram.py:1457. Chunks longer than
