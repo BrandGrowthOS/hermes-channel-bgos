@@ -72,7 +72,9 @@ async def test_full_pair_then_message_round_trip(mock_bgos_server):
             {"chat_id": 11, "message_id": 200, "text": "hi",
              "user_id": "u1", "assistant_id": 7, "message_type": "standard"},
         )
-        await asyncio.sleep(0.2)
+        # Standard text gets adaptive-batched (≤0.24s flush for short text);
+        # wait past the window so the echo POST has time to land.
+        await asyncio.sleep(0.35)
     finally:
         await adapter.disconnect()
 
@@ -186,15 +188,18 @@ async def test_retry_replay_flows_to_agent(mock_bgos_server, monkeypatch):
         await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
         await asyncio.sleep(0.1)
 
-        # Real user message first
+        # Real user message first — standard text now flows through
+        # adaptive batching (≤0.24s flush for short text); wait past it.
         await mock_bgos_server.emit_to_room(
             "assistant:7", "inbound_message",
             {"chat_id": 11, "message_id": 100, "text": "what's the weather?",
              "user_id": "u", "assistant_id": 7, "message_type": "standard"},
         )
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.35)
 
-        # Then /retry
+        # Then /retry — bridge-local intercept replays the cached text
+        # through _handle_inbound(batchable=False), so it dispatches
+        # synchronously.
         await mock_bgos_server.emit_to_room(
             "assistant:7", "inbound_message",
             {"chat_id": 11, "message_id": 101, "text": "/retry",

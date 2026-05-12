@@ -8,6 +8,7 @@ through the same translation path.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,12 @@ from hermes_channel_bgos.config import BgosConfig
 
 
 pytestmark = pytest.mark.asyncio
+
+
+def _make_adapter() -> BGOSAdapter:
+    """Lightweight adapter for unit-testing inbound paths without spinning
+    up the mock backend. Tests monkeypatch handle_message / api / ws."""
+    return BGOSAdapter(BgosConfig(base_url="http://x", pairing_token="pair_xyz"))
 
 
 async def test_inbound_message_translates_and_handles(mock_bgos_server, monkeypatch):
@@ -44,7 +51,9 @@ async def test_inbound_message_translates_and_handles(mock_bgos_server, monkeypa
                 "user_id": "user_1", "assistant_id": 7, "message_type": "standard",
             },
         )
-        await asyncio.sleep(0.2)
+        # Standard text now flows through adaptive batching — short texts
+        # flush after ≤0.24s, so we wait past that window.
+        await asyncio.sleep(0.35)
 
         assert len(handled) == 1
         event = handled[0]
@@ -236,3 +245,180 @@ async def test_last_id_persists_across_connects(mock_bgos_server, monkeypatch, t
     # Older message ids don't regress the cursor
     adapter2._save_last_id(100)
     assert adapter2._load_last_id() == 9999
+
+
+# -----------------------------------------------------------------------------
+# Adaptive text batching (Chunk 4). Rapid successive plain-text fragments
+# from the same chat coalesce into one merged dispatch so the agent doesn't
+# emit N separate replies for a mobile-split message. Mirrors Telegram at
+# gateway/platforms/telegram.py:3803-3859.
+# -----------------------------------------------------------------------------
+
+
+async def test_rapid_text_messages_are_batched():
+    """Three rapid messages in the same chat → one merged dispatch."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter._text_batch_window = 0.05  # speed up tests
+    received: list[str] = []
+
+    async def capture(event):
+        # Both flat MessageEvent and gateway MessageEvent expose .text
+        received.append(event.text)
+
+    adapter.handle_message = capture
+    for i, piece in enumerate(("part one. ", "part two. ", "part three.")):
+        await adapter._handle_inbound({
+            "assistant_id": 7,
+            "chat_id": 42,
+            "message_id": 1000 + i,
+            "user_id": "u",
+            "text": piece,
+            "files": [],
+            "message_type": "standard",
+        })
+    # Wait past the adaptive flush window for short messages (~0.05s)
+    await asyncio.sleep(0.15)
+    assert len(received) == 1
+    assert received[0] == "part one. part two. part three."
+
+
+async def test_slash_command_flushes_immediately():
+    """Slash commands bypass batching so /new, /retry land in order."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter._text_batch_window = 5.0  # would otherwise block 5s
+    received: list[str] = []
+
+    async def capture(event):
+        received.append(event.text)
+
+    adapter.handle_message = capture
+    # Use a non-bridge-local slash command so the forwarding path runs
+    # (where slash commands flow to the agent rather than short-circuiting).
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "chat_id": 42,
+        "message_id": 1,
+        "user_id": "u",
+        "text": "/help",
+        "files": [],
+        "message_type": "slash_command",
+        "command_name": "help",
+        "command_args": "",
+    })
+    # No need to wait — slash commands flush synchronously
+    assert len(received) == 1
+
+
+async def test_messages_with_files_bypass_batching():
+    """Attachments must flush immediately so the user sees the image-
+    plus-caption interleaved correctly."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter._text_batch_window = 5.0
+    received: list[Any] = []
+
+    async def capture(event):
+        received.append(event)
+
+    adapter.handle_message = capture
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "chat_id": 42,
+        "message_id": 1,
+        "user_id": "u",
+        "text": "see this",
+        "files": [{"filename": "a.png", "mime": "image/png", "url": "https://x"}],
+        "message_type": "standard",
+    })
+    # No wait
+    assert len(received) == 1
+
+
+async def test_different_chats_batched_independently():
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter._text_batch_window = 0.05
+    received: list[tuple[int, str]] = []
+
+    async def capture(event):
+        # Pull chat_id from either source (gateway event) or flat event
+        chat_id = (
+            int(event.source.chat_id)
+            if hasattr(event, "source") and getattr(event.source, "chat_id", None)
+            else getattr(event, "chat_id", None)
+        )
+        received.append((chat_id, event.text))
+
+    adapter.handle_message = capture
+    # Two interleaved fragments per chat
+    for chat_id, mid in [(1, 100), (2, 200), (1, 101), (2, 201)]:
+        await adapter._handle_inbound({
+            "assistant_id": 7,
+            "chat_id": chat_id,
+            "message_id": mid,
+            "user_id": "u",
+            "text": "frag ",
+            "files": [],
+            "message_type": "standard",
+        })
+    await asyncio.sleep(0.15)
+    # 2 chats each get 1 dispatch with merged text
+    assert len(received) == 2
+    by_chat = dict(received)
+    assert by_chat[1] == "frag frag "
+    assert by_chat[2] == "frag frag "
+
+
+async def test_disconnect_cancels_pending_text_batches():
+    """Pending flush tasks must be cancelled cleanly on disconnect."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter._text_batch_window = 5.0  # long, so task definitely pending
+
+    async def capture(event):
+        pass
+
+    adapter.handle_message = capture
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "chat_id": 42,
+        "message_id": 1,
+        "user_id": "u",
+        "text": "queued",
+        "files": [],
+        "message_type": "standard",
+    })
+    assert 42 in adapter._pending_text_tasks
+    pending = adapter._pending_text_tasks[42]
+    assert not pending.done()
+    await adapter.disconnect()
+    assert pending.done()
+    assert adapter._pending_text_batches == {}
+    assert adapter._pending_text_tasks == {}
+
+
+async def test_retry_cache_uses_merged_text():
+    """After batching merges several fragments, /retry should replay
+    the merged text — not just the last fragment."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter._text_batch_window = 0.05
+
+    async def capture(event):
+        pass
+
+    adapter.handle_message = capture
+    for i, piece in enumerate(("alpha ", "bravo ", "charlie")):
+        await adapter._handle_inbound({
+            "assistant_id": 7,
+            "chat_id": 42,
+            "message_id": 1000 + i,
+            "user_id": "u",
+            "text": piece,
+            "files": [],
+            "message_type": "standard",
+        })
+    await asyncio.sleep(0.15)
+    assert adapter._state.last_user_text_by_chat[42] == "alpha bravo charlie"

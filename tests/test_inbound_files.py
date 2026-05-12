@@ -238,7 +238,9 @@ async def test_inbound_with_no_files_unchanged(mock_bgos_server, monkeypatch):
                 "message_type": "standard",
             },
         )
-        await asyncio.sleep(0.2)
+        # Text without files flows through adaptive batching (≤0.24s flush
+        # for short text); wait past the window before asserting.
+        await asyncio.sleep(0.35)
         assert len(handled) == 1
         assert handled[0].text == "just text"
         assert "Attachments" not in handled[0].text

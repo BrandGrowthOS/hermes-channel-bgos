@@ -370,6 +370,15 @@ class BGOSAdapter(BasePlatformAdapter):
         self._pending_edit_content: dict[
             int, tuple[int, str, list[dict] | None, str | None],
         ] = {}
+        # Adaptive text-batching for rapid inbound user messages. Mobile
+        # clients sometimes split a long transcription or paste into multiple
+        # sub-4KB messages — without batching, the agent gets N separate
+        # dispatches and writes N separate replies. See
+        # gateway/platforms/telegram.py:3803-3859 for the upstream pattern.
+        # Window adapts to the LAST chunk's length (see _enqueue_text_batch).
+        self._text_batch_window: float = 0.6
+        self._pending_text_batches: dict[int, dict[str, Any]] = {}
+        self._pending_text_tasks: dict[int, asyncio.Task] = {}
         # Hard cap for a single outbound message body. Messages longer
         # than this get split into multiple chunks with `(i/N)`
         # continuation suffixes (mirrors Telegram parity at
@@ -660,6 +669,19 @@ class BGOSAdapter(BasePlatformAdapter):
         # any teardown noise is expected here.
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
+        # Cancel any pending text-batch flushes too. Same snapshot-then-
+        # cancel pattern as the edit flushes above — protects against a
+        # flush task racing with disconnect() and trying to call
+        # handle_message after the adapter has torn down.
+        pending_text_tasks = [
+            t for t in self._pending_text_tasks.values() if not t.done()
+        ]
+        for task in pending_text_tasks:
+            task.cancel()
+        if pending_text_tasks:
+            await asyncio.gather(*pending_text_tasks, return_exceptions=True)
+        self._pending_text_tasks.clear()
+        self._pending_text_batches.clear()
         if self._poll_task is not None:
             self._poll_task.cancel()
             self._poll_task = None
@@ -1246,7 +1268,7 @@ class BGOSAdapter(BasePlatformAdapter):
     # WS event hooks — placeholders filled in by later tasks
     # -------------------------------------------------------------------------
 
-    async def _handle_inbound(self, data: dict) -> None:
+    async def _handle_inbound(self, data: dict, *, batchable: bool = True) -> None:
         """Translate a WS inbound_message payload into a Hermes MessageEvent
         and hand it to `self.handle_message`. Drops events for unknown
         assistants (e.g. a race where a pairing was just revoked but the WS
@@ -1255,6 +1277,10 @@ class BGOSAdapter(BasePlatformAdapter):
         Bridge-local slash commands (`/new`, `/retry`, `/status`) are
         intercepted here and handled adapter-side — they never reach the
         Hermes agent. Everything else flows through `handle_message`.
+
+        `batchable=False` disables the adaptive text-batching path — used by
+        backfill replay (history isn't "user typing fast", it's historical)
+        and `/retry` replay (already merged into a single canonical text).
         """
         assistant_id = data.get("assistant_id")
         if assistant_id is None:
@@ -1286,6 +1312,20 @@ class BGOSAdapter(BasePlatformAdapter):
         # Persist the last-seen message id BEFORE dispatch, so even if
         # handle_message crashes we don't infinite-loop on restart.
         self._save_last_id(event.message_id)
+
+        # Batching window: rapid successive plain-text messages from the
+        # same chat get coalesced into one agent dispatch. Files / slash
+        # commands go through immediately (no batching) since order with
+        # text matters for context. Place this BEFORE the live retry-cache
+        # save below so the deferred flush gets to set the merged text
+        # without the live save overwriting it with the last fragment.
+        # `batchable=False` opts out (backfill replay, /retry replay).
+        if batchable and self._should_batch_event(event):
+            self._enqueue_text_batch(
+                event=event, text=agent_visible_text, gateway_route=route,
+            )
+            return
+
         # Keep the retry cache populated so the /retry bridge-local can
         # resend the last user text in this chat. Use the agent-visible text
         # so attachment context replays on /retry.
@@ -1332,6 +1372,107 @@ class BGOSAdapter(BasePlatformAdapter):
             event.text = agent_visible_text
             await self.handle_message(event)
 
+    def _should_batch_event(self, event: "MessageEvent") -> bool:
+        """Eligible for batching: standard plain-text only (no slash
+        commands, no attachments). Slash commands must flush immediately
+        so order with /new and /retry is preserved; attachments must
+        interleave correctly with the text that contextualizes them."""
+        return (
+            event.message_type == "standard"
+            and bool(event.text)
+            and not event.files
+        )
+
+    def _enqueue_text_batch(
+        self,
+        *,
+        event: "MessageEvent",
+        text: str,
+        gateway_route: str,
+    ) -> None:
+        """Append `text` to the per-chat batch buffer and (re)schedule a
+        deferred flush. Window adapts to the LAST chunk's length:
+          ≤320 chars → ≤0.24s flush (user is still typing)
+          ≤1024 chars → ≤0.4s flush (mid-paragraph)
+          ≥4000 chars → 1.0s (split incoming from mobile client)
+          else → configured _text_batch_window (default 0.6s)
+        Mirrors gateway/platforms/telegram.py:3803-3859.
+        """
+        chat_key = event.chat_id
+        batch = self._pending_text_batches.get(chat_key)
+        if batch is None:
+            batch = {
+                "event": event,  # latest event metadata wins
+                "texts": [text],
+                "route": gateway_route,
+            }
+            self._pending_text_batches[chat_key] = batch
+        else:
+            batch["texts"].append(text)
+            batch["event"] = event  # latest message_id / user_id wins
+
+        # Cancel any pending flush — we'll schedule a fresh one with the
+        # adapted window.
+        existing = self._pending_text_tasks.get(chat_key)
+        if existing is not None and not existing.done():
+            existing.cancel()
+
+        last_chunk = batch["texts"][-1]
+        n = len(last_chunk)
+        if n >= 4000:
+            window = 1.0
+        elif n <= 320:
+            window = min(self._text_batch_window, 0.24)
+        elif n <= 1024:
+            window = min(self._text_batch_window, 0.4)
+        else:
+            window = self._text_batch_window
+
+        self._pending_text_tasks[chat_key] = asyncio.create_task(
+            self._flush_text_batch(chat_key, window)
+        )
+
+    async def _flush_text_batch(self, chat_key: int, window: float) -> None:
+        try:
+            await asyncio.sleep(window)
+        except asyncio.CancelledError:
+            return
+        batch = self._pending_text_batches.pop(chat_key, None)
+        if batch is None:
+            return
+        self._pending_text_tasks.pop(chat_key, None)
+        event = batch["event"]
+        merged = "".join(batch["texts"])
+        # Update the retry cache with the merged text so /retry replays
+        # the full message rather than just the last fragment.
+        self._state.last_user_text_by_chat[event.chat_id] = merged
+        # Now dispatch through the same gateway-event wrapping path as the
+        # synchronous case.
+        if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
+            try:
+                source = self.build_source(  # type: ignore[attr-defined]
+                    chat_id=str(event.chat_id),
+                    user_id=str(event.user_id) if event.user_id else None,
+                )
+            except AttributeError:
+                event.text = merged
+                await self.handle_message(event)
+                return
+            user_id = str(event.user_id) if event.user_id else None
+            is_backfill = user_id is None
+            gateway_event = _GatewayMessageEvent(
+                text=merged,
+                message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
+                source=source,
+                message_id=str(event.message_id),
+                raw_message=event,
+                internal=is_backfill,
+            )
+            await self.handle_message(gateway_event)
+        else:
+            event.text = merged
+            await self.handle_message(event)
+
     async def _handle_bridge_local(self, command: str, data: dict) -> None:
         """Handle a `/new`, `/retry`, or `/status` slash command locally —
         no round-trip to Hermes. Posts an ack/result back to BGOS so the
@@ -1361,7 +1502,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
             # Replay the last user text as a normal inbound, forwarded to the
             # agent this time (recurse with message_type=standard so the
-            # bridge-local check doesn't fire again).
+            # bridge-local check doesn't fire again). Bypass batching —
+            # the replay is already the canonical merged text, deferring it
+            # again would just confuse `/retry` semantics.
             replay = {
                 **data,
                 "text": last,
@@ -1369,7 +1512,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 "command_name": None,
                 "command_args": None,
             }
-            await self._handle_inbound(replay)
+            await self._handle_inbound(replay, batchable=False)
         elif command == "status":
             lines = [
                 "**BGOS adapter status**",
@@ -1669,6 +1812,9 @@ class BGOSAdapter(BasePlatformAdapter):
             if "message_id" not in msg and "id" in msg:
                 msg = {**msg, "message_id": msg["id"]}
             try:
-                await self._handle_inbound(msg)
+                # Backfill is historical replay, not "user typing fast" —
+                # bypass batching so each missed message lands as its own
+                # dispatch with its own message_id.
+                await self._handle_inbound(msg, batchable=False)
             except Exception:
                 log.exception("backfill replay failed for message=%s", msg)
