@@ -119,3 +119,93 @@ async def test_send_video_document_animation_all_work(mock_bgos_server):
         assert filenames == ["v.mp4", "d.pdf", "g.gif"]
     finally:
         await adapter.disconnect()
+
+
+# -----------------------------------------------------------------------------
+# send_multiple_images (Task 3.3) — multi-image carousel as a single
+# POST /messages with files[] holding multiple entries. Same UX as
+# Telegram's sendMediaGroup. Routes each entry through _upload_and_attach
+# so the same inline-vs-S3 policy applies per file.
+# -----------------------------------------------------------------------------
+
+
+def _make_adapter() -> BGOSAdapter:
+    """Lightweight adapter for unit-testing send_multiple_images without
+    spinning up the mock backend. Matches the helper in
+    tests/test_bgos_adapter.py."""
+    return BGOSAdapter(BgosConfig(base_url="http://x", pairing_token="pair_xyz"))
+
+
+async def test_send_multiple_images_single_post(monkeypatch):
+    """3 images → 1 POST with files[3]."""
+    adapter = _make_adapter()
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 50}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    images = [
+        (b"\x89PNG_a", "a.png", "image/png"),
+        (b"\x89PNG_b", "b.png", "image/png"),
+        (b"\x89PNG_c", "c.png", "image/png"),
+    ]
+    result = await adapter.send_multiple_images(
+        chat_id=42, images=images, caption="three pics",
+    )
+    assert len(posts) == 1
+    assert posts[0]["chat_id"] == 42
+    assert posts[0]["text"] == "three pics"
+    assert len(posts[0]["files"]) == 3
+    # All inline (small files), so fileData populated
+    for entry in posts[0]["files"]:
+        assert "fileData" in entry
+        assert entry["fileMimeType"] == "image/png"
+    assert result.message_id == "50"
+
+
+async def test_send_multiple_images_caps_at_10(monkeypatch, caplog):
+    adapter = _make_adapter()
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    images = [(b"x", f"img{i}.png", "image/png") for i in range(15)]
+    await adapter.send_multiple_images(chat_id=1, images=images)
+    assert len(posts[0]["files"]) == 10
+
+
+async def test_send_multiple_images_empty_is_noop(monkeypatch):
+    adapter = _make_adapter()
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    result = await adapter.send_multiple_images(chat_id=1, images=[])
+    assert posts == []
+    assert result.success is True
+    assert result.message_id is None
+
+
+async def test_send_multiple_images_with_reply_to(monkeypatch):
+    adapter = _make_adapter()
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter.send_multiple_images(
+        chat_id=1,
+        images=[(b"x", "a.png", "image/png")],
+        reply_to=99,
+    )
+    assert posts[0]["reply_to_id"] == 99

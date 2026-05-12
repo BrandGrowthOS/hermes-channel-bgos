@@ -1074,6 +1074,52 @@ class BGOSAdapter(BasePlatformAdapter):
             filename=filename, mime=mime, caption=caption,
         )
 
+    async def send_multiple_images(
+        self,
+        chat_id: int | str,
+        images: list[tuple[bytes, str, str]],
+        *,
+        caption: str | None = None,
+        reply_to: int | None = None,
+    ) -> SendResult:
+        """Send up to 10 images as a single carousel-rendered message.
+
+        `images` is a list of `(file_bytes, filename, mime)` tuples. Backend
+        renders 2+ images as a carousel; 1 image renders normally. Caps at
+        10 to match Telegram's sendMediaGroup limit — extras silently dropped
+        with a log warning so a runaway agent doesn't flood backends.
+
+        Each entry goes through the same _upload_and_attach pipeline as
+        send_image: inline base64 below S3_THRESHOLD, presigned S3 PUT above.
+        """
+        if not images:
+            return _send_result(message_id=None)
+        if len(images) > 10:
+            log.warning(
+                "send_multiple_images received %d images; sending first 10",
+                len(images),
+            )
+            images = images[:10]
+        attachments: list[dict] = []
+        for blob, filename, mime in images:
+            attachments.append(
+                await self._upload_and_attach(
+                    file_bytes=blob, filename=filename, mime=mime,
+                )
+            )
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=caption or "",
+            sender="assistant",
+            message_type="standard",
+            files=attachments,
+            reply_to_id=int(reply_to) if reply_to is not None else None,
+        )
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        if isinstance(chat_id, int) and isinstance(message_id, int):
+            self._state.last_assistant_message_by_chat[chat_id] = message_id
+        return _send_result(message_id=message_id)
+
     # -------------------------------------------------------------------------
     # send_exec_approval (Task 7) — optional duck-typed hook. Gateway calls
     # us with a 15s hard deadline when the agent requests a dangerous-command
