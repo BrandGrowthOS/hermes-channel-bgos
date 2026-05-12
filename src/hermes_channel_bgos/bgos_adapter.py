@@ -1457,6 +1457,12 @@ class BGOSAdapter(BasePlatformAdapter):
         else:
             batch["texts"].append(text)
             batch["event"] = event  # latest message_id / user_id wins
+        log.debug(
+            "bgos batch.enqueue chat=%d msg=%d fragments_now=%d "
+            "last_chunk_len=%d total_len=%d",
+            event.chat_id, event.message_id, len(batch["texts"]),
+            len(text), sum(len(t) for t in batch["texts"]),
+        )
 
         # Cancel any pending flush — we'll schedule a fresh one with the
         # adapted window.
@@ -1490,6 +1496,12 @@ class BGOSAdapter(BasePlatformAdapter):
         self._pending_text_tasks.pop(chat_key, None)
         event = batch["event"]
         merged = "".join(batch["texts"])
+        log.debug(
+            "bgos batch.flush chat=%d msg=%d fragments=%d merged_len=%d "
+            "window=%.3f",
+            event.chat_id, event.message_id, len(batch["texts"]),
+            len(merged), window,
+        )
         # Update the retry cache with the merged text so /retry replays
         # the full message rather than just the last fragment.
         self._state.last_user_text_by_chat[event.chat_id] = merged

@@ -161,6 +161,18 @@ class BgosWs:
         @self._sio.on("inbound_message")  # type: ignore[misc]
         async def _inbound(data: dict) -> None:
             mid = data.get("message_id")
+            # Visibility for diagnosing "messages I sent didn't reach the
+            # adapter" cases — enable with BGOS_DEBUG=1. One line per raw
+            # WS event so we can count what the transport actually received
+            # vs what the batcher merged downstream.
+            log.debug(
+                "bgos_ws.inbound_message message_id=%s chat_id=%s "
+                "assistant_id=%s message_type=%s text_len=%d files=%d",
+                mid, data.get("chat_id"), data.get("assistant_id"),
+                data.get("message_type"),
+                len(data.get("text") or ""),
+                len(data.get("files") or []),
+            )
             if isinstance(mid, int) and mid > self._last_message_id:
                 self._last_message_id = mid
             try:
