@@ -189,6 +189,46 @@ async def test_reconnect_fires_on_reconnect_callback(mock_bgos_server):
         await ws.stop()
 
 
+async def test_emit_typing_emits_to_server(mock_bgos_server):
+    """emit_typing publishes a `typing` Socket.IO event with chatId +
+    assistantId — backend will forward an ephemeral typing indicator to
+    clients viewing this chat."""
+    captured: list[dict] = []
+
+    @mock_bgos_server._sio.on("typing")  # type: ignore[misc]
+    async def _on_typing(sid: str, data: dict) -> None:
+        captured.append(data)
+
+    ws = BgosWs(
+        BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
+        on_inbound_message=_noop_cb,
+        on_callback_result=_noop_cb,
+    )
+    await ws.start()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+        await ws.emit_typing(chat_id=42, assistant_id=3)
+        await asyncio.sleep(0.2)
+        assert captured == [{"chatId": 42, "assistantId": 3}]
+    finally:
+        await ws.stop()
+
+
+async def test_emit_typing_is_noop_when_disconnected(mock_bgos_server):
+    """Best-effort semantics: if the socket isn't connected (never
+    started, or dropped), emit_typing returns silently rather than
+    raising — typing indicators are cosmetic."""
+    ws = BgosWs(
+        BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
+        on_inbound_message=_noop_cb,
+        on_callback_result=_noop_cb,
+    )
+    # Never called ws.start() — socket is not connected
+    await ws.emit_typing(chat_id=42, assistant_id=3)
+    # No assertion needed beyond "did not raise"
+
+
 async def test_async_callback_is_awaited(mock_bgos_server):
     """on_inbound_message may be sync OR an async coroutine function."""
     received: list[dict] = []
