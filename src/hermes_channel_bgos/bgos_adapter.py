@@ -717,7 +717,7 @@ class BGOSAdapter(BasePlatformAdapter):
         cleaned_text, options, render_mode = _parse_buttons_block(content)
         chat_key = int(chat_id)
         mid_int = int(message_id)
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         last = self._last_edit_at.get(chat_key, 0.0)
         elapsed = now - last
         if elapsed >= self._edit_throttle_seconds:
@@ -791,7 +791,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 "deferred edit flush failed chat=%d msg=%d",
                 chat_key, mid_int, exc_info=True,
             )
-        self._last_edit_at[chat_key] = asyncio.get_event_loop().time()
+        self._last_edit_at[chat_key] = asyncio.get_running_loop().time()
 
     async def delete_message(
         self,
