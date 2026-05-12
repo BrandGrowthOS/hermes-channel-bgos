@@ -1321,9 +1321,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # without the live save overwriting it with the last fragment.
         # `batchable=False` opts out (backfill replay, /retry replay).
         if batchable and self._should_batch_event(event):
-            self._enqueue_text_batch(
-                event=event, text=agent_visible_text, gateway_route=route,
-            )
+            self._enqueue_text_batch(event=event, text=agent_visible_text)
             return
 
         # Keep the retry cache populated so the /retry bridge-local can
@@ -1388,7 +1386,6 @@ class BGOSAdapter(BasePlatformAdapter):
         *,
         event: "MessageEvent",
         text: str,
-        gateway_route: str,
     ) -> None:
         """Append `text` to the per-chat batch buffer and (re)schedule a
         deferred flush. Window adapts to the LAST chunk's length:
@@ -1404,7 +1401,6 @@ class BGOSAdapter(BasePlatformAdapter):
             batch = {
                 "event": event,  # latest event metadata wins
                 "texts": [text],
-                "route": gateway_route,
             }
             self._pending_text_batches[chat_key] = batch
         else:
@@ -1447,31 +1443,39 @@ class BGOSAdapter(BasePlatformAdapter):
         # the full message rather than just the last fragment.
         self._state.last_user_text_by_chat[event.chat_id] = merged
         # Now dispatch through the same gateway-event wrapping path as the
-        # synchronous case.
-        if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
-            try:
-                source = self.build_source(  # type: ignore[attr-defined]
-                    chat_id=str(event.chat_id),
-                    user_id=str(event.user_id) if event.user_id else None,
+        # synchronous case. Wrap in try/except so a downstream handle_message
+        # failure doesn't leave an unretrieved-exception on the task — matches
+        # _deferred_edit_flush's pattern.
+        try:
+            if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
+                try:
+                    source = self.build_source(  # type: ignore[attr-defined]
+                        chat_id=str(event.chat_id),
+                        user_id=str(event.user_id) if event.user_id else None,
+                    )
+                except AttributeError:
+                    event.text = merged
+                    await self.handle_message(event)
+                    return
+                user_id = str(event.user_id) if event.user_id else None
+                is_backfill = user_id is None
+                gateway_event = _GatewayMessageEvent(
+                    text=merged,
+                    message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
+                    source=source,
+                    message_id=str(event.message_id),
+                    raw_message=event,
+                    internal=is_backfill,
                 )
-            except AttributeError:
+                await self.handle_message(gateway_event)
+            else:
                 event.text = merged
                 await self.handle_message(event)
-                return
-            user_id = str(event.user_id) if event.user_id else None
-            is_backfill = user_id is None
-            gateway_event = _GatewayMessageEvent(
-                text=merged,
-                message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
-                source=source,
-                message_id=str(event.message_id),
-                raw_message=event,
-                internal=is_backfill,
+        except Exception:
+            log.exception(
+                "deferred text-batch dispatch failed chat=%s msg=%s",
+                event.chat_id, event.message_id,
             )
-            await self.handle_message(gateway_event)
-        else:
-            event.text = merged
-            await self.handle_message(event)
 
     async def _handle_bridge_local(self, command: str, data: dict) -> None:
         """Handle a `/new`, `/retry`, or `/status` slash command locally —
