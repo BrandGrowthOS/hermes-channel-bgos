@@ -397,6 +397,32 @@ async def test_send_typing_swallows_exceptions():
     await adapter.send_typing(chat_id=42)
 
 
+async def test_send_typing_honors_metadata_assistant_id():
+    """When metadata carries an explicit assistant_id, use it instead of
+    falling back to the first one in the route map. Forward-compat for
+    multi-assistant pairings."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "hades")
+    stub = _StubWs()
+    adapter._ws = stub  # type: ignore[assignment]
+
+    await adapter.send_typing(chat_id=42, metadata={"assistant_id": 99})
+
+    assert stub.calls == [{"chat_id": 42, "assistant_id": 99}]
+
+
+async def test_send_typing_noop_when_no_assistants():
+    """If the route map is empty (e.g. pairing was just revoked), don't
+    crash — typing is cosmetic, never block the gateway."""
+    adapter = _make_adapter()  # empty route map by default
+    stub = _StubWs()
+    adapter._ws = stub  # type: ignore[assignment]
+
+    await adapter.send_typing(chat_id=42)
+
+    assert stub.calls == []
+
+
 async def test_send_typing_overrides_base():
     """Gateway probes for this when deciding whether to drive the typing
     indicator between tool-progress edits."""
