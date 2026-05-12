@@ -29,9 +29,18 @@ async def _connected_adapter(server) -> BGOSAdapter:
     return adapter
 
 
+def _make_adapter() -> BGOSAdapter:
+    """Lightweight adapter for callback authz tests — no mock backend needed."""
+    return BGOSAdapter(BgosConfig(base_url="http://x", pairing_token="pair_xyz"))
+
+
 async def test_approval_callback_resolves_via_tools_approval(
     mock_bgos_server, monkeypatch,
 ):
+    # The per-user authz gate (Task 2.2) is fail-closed; these existing
+    # tests target the dispatch path itself, not the gate, so we
+    # explicitly enable the bypass.
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 777})
 
     resolved: list[tuple[str, str]] = []
@@ -59,6 +68,7 @@ async def test_approval_callback_resolves_via_tools_approval(
 
 
 async def test_approval_callback_all_four_verdicts(mock_bgos_server, monkeypatch):
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 800})
 
     resolved: list[tuple[str, str]] = []
@@ -87,6 +97,7 @@ async def test_approval_callback_all_four_verdicts(mock_bgos_server, monkeypatch
 async def test_stale_approval_click_is_noop(mock_bgos_server, monkeypatch):
     """approval_id not in _approval_state (already resolved, timed out, or
     arrived after a restart) — log and return, don't call resolver."""
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
     resolved: list[tuple[str, str]] = []
 
     def fake_resolve(sk: str, c: str) -> None:
@@ -108,6 +119,7 @@ async def test_stale_approval_click_is_noop(mock_bgos_server, monkeypatch):
 async def test_non_approval_callback_routes_to_button_handler(
     mock_bgos_server, monkeypatch,
 ):
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
     adapter = await _connected_adapter(mock_bgos_server)
 
     pressed: list[dict] = []
@@ -128,10 +140,11 @@ async def test_non_approval_callback_routes_to_button_handler(
 
 
 async def test_non_approval_callback_without_button_handler_drops(
-    mock_bgos_server, caplog,
+    mock_bgos_server, caplog, monkeypatch,
 ):
     """Base class doesn't guarantee handle_button_press exists on the mock.
     Drop silently with a debug log rather than crashing."""
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
     adapter = await _connected_adapter(mock_bgos_server)
     # Ensure handle_button_press is NOT available — delete attribute set by mock
     if hasattr(adapter, "handle_button_press"):
@@ -154,6 +167,7 @@ async def test_non_approval_callback_without_button_handler_drops(
 async def test_callback_router_integration_via_ws(mock_bgos_server, monkeypatch):
     """Full round-trip: server emits callback_result over Socket.IO →
     _handle_callback dispatches to resolve_gateway_approval."""
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 555})
 
     resolved: list[tuple[str, str]] = []
@@ -182,3 +196,76 @@ async def test_callback_router_integration_via_ws(mock_bgos_server, monkeypatch)
         assert resolved == [("DANGER", "deny")]
     finally:
         await adapter.disconnect()
+
+
+# -----------------------------------------------------------------------------
+# Task 2.2 — Per-user authz on callbacks. Mirrors the inbound auth gate
+# (BGOS_ALLOW_ALL_USERS / BGOS_ALLOWED_USERS) so a leaked Clerk ID can't
+# resolve approvals targeted at another user. Fail-closed by default.
+# -----------------------------------------------------------------------------
+
+
+async def test_approval_callback_rejects_unauthorized_user(monkeypatch):
+    """When BGOS_ALLOWED_USERS is set, callbacks from users NOT in that
+    set should be silently dropped — same model as inbound message auth."""
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "false")
+    monkeypatch.setenv("BGOS_ALLOWED_USERS", "user_authorized")
+    adapter = _make_adapter()
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_gateway_approval",
+        lambda sk, choice: pytest.fail("should not resolve when unauthorized"),
+    )
+    adapter._approval_state[1] = "session-x"
+    await adapter._handle_callback({
+        "callback_data": "ea:once:1",
+        "user_id": "user_intruder",
+        "message_id": 99,
+        "chat_id": 1,
+    })
+    # Approval still pending — state not cleared
+    assert 1 in adapter._approval_state
+
+
+async def test_approval_callback_allows_authorized_user(monkeypatch):
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "false")
+    monkeypatch.setenv("BGOS_ALLOWED_USERS", "user_42,user_99")
+    adapter = _make_adapter()
+    resolved = []
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_gateway_approval",
+        lambda sk, choice: resolved.append((sk, choice)),
+    )
+    async def fake_patch(mid, **kw):
+        return {"id": mid}
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    adapter._approval_state[1] = "session-x"
+    await adapter._handle_callback({
+        "callback_data": "ea:once:1",
+        "user_id": "user_42",
+        "message_id": 99,
+        "chat_id": 1,
+    })
+    assert resolved == [("session-x", "once")]
+    assert 1 not in adapter._approval_state
+
+
+async def test_callback_authz_allow_all_users_bypass(monkeypatch):
+    """BGOS_ALLOW_ALL_USERS=true unconditionally permits."""
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    monkeypatch.delenv("BGOS_ALLOWED_USERS", raising=False)
+    adapter = _make_adapter()
+    resolved = []
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_gateway_approval",
+        lambda sk, choice: resolved.append((sk, choice)),
+    )
+    async def fake_patch(mid, **kw):
+        return {"id": mid}
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    adapter._approval_state[1] = "s"
+    await adapter._handle_callback({
+        "callback_data": "ea:once:1",
+        "user_id": "anyone",
+        "message_id": 1, "chat_id": 1,
+    })
+    assert resolved == [("s", "once")]

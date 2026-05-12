@@ -86,6 +86,9 @@ async def test_full_pair_then_message_round_trip(mock_bgos_server):
 async def test_approval_round_trip_via_ws(mock_bgos_server, monkeypatch):
     """send_exec_approval posts bubble → WS callback_result arrives →
     _handle_callback routes to resolve_gateway_approval with session_key."""
+    # Per-user authz gate (Task 2.2) is fail-closed; the WS callback
+    # payload below carries no user_id, so we explicitly bypass.
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
     _seed_whoami(mock_bgos_server)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 555})
 

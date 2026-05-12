@@ -1203,6 +1203,21 @@ class BGOSAdapter(BasePlatformAdapter):
                 assistant_id, route,
             )
 
+    def _is_callback_user_authorized(self, user_id: str | None) -> bool:
+        """Mirrors the inbound auth gate (BGOS_ALLOW_ALL_USERS /
+        BGOS_ALLOWED_USERS) for callback events. Without this check, a
+        malicious user who could trigger backend callback_result delivery
+        could resolve approvals targeted at someone else.
+
+        Fail-closed by default (same posture as Hermes-side inbound)."""
+        if os.environ.get("BGOS_ALLOW_ALL_USERS", "false").lower() == "true":
+            return True
+        allowed = os.environ.get("BGOS_ALLOWED_USERS", "").strip()
+        if not allowed:
+            return False
+        allowed_set = {u.strip() for u in allowed.split(",") if u.strip()}
+        return user_id is not None and str(user_id) in allowed_set
+
     async def _handle_callback(self, data: dict) -> None:
         """Route a callback_result WS event.
 
@@ -1223,8 +1238,22 @@ class BGOSAdapter(BasePlatformAdapter):
         no-op. Telegram answers these via `"already resolved"`; BGOS's
         equivalent would need a separate API call and isn't worth the
         complexity for Phase 1.
+
+        Authz: per-user gate (Task 2.2) — mirrors inbound message auth at
+        gateway/platforms/telegram.py:405. A leaked Clerk user ID
+        shouldn't be enough to resolve someone else's approval, so we
+        drop callback events from users not in BGOS_ALLOWED_USERS unless
+        BGOS_ALLOW_ALL_USERS=true. Dropped events leave _approval_state
+        intact so the authorized user can still resolve.
         """
         cb = data.get("callback_data", "")
+        user_id_for_authz = data.get("user_id") or data.get("userId")
+        if not self._is_callback_user_authorized(user_id_for_authz):
+            log.info(
+                "dropping unauthorized callback from user_id=%s callback_data=%s",
+                user_id_for_authz, cb,
+            )
+            return
         m = _APPROVAL_CALLBACK_RE.match(cb)
         if m is not None:
             choice = m.group(1)
