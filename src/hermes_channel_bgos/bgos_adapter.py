@@ -745,7 +745,7 @@ class BGOSAdapter(BasePlatformAdapter):
     def _chunk_text(self, text: str) -> list[str]:
         """Split text into ≤_max_message_length chunks.
 
-        Reserves 8 chars per chunk for the "(99/99)\\n" suffix so the final
+        Reserves 10 chars per chunk for the "\\n(NNN/NNN)" suffix so the final
         chunk doesn't push back over the cap. Prefers newline-aligned splits
         when one exists near the cap; falls back to a hard cut otherwise.
         """
@@ -753,7 +753,10 @@ class BGOSAdapter(BasePlatformAdapter):
             return [text]
         chunks: list[str] = []
         remaining = text
-        cap = self._max_message_length - 8  # reserve for "\n(99/99)" suffix
+        # Reserve 10 chars for the "\n(NNN/NNN)" suffix. 8 would be enough
+        # for N<100, but 10 covers up to N=999 which is the practical
+        # ceiling for any reasonable single send.
+        cap = self._max_message_length - 10
         while len(remaining) > cap:
             split_at = remaining.rfind("\n", 0, cap)
             if split_at < cap // 2:
