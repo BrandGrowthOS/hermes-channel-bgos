@@ -190,13 +190,31 @@ class BgosApi:
         *,
         text: str | None = None,
         approval_meta: dict | None = None,
+        options: list[dict] | None = None,
+        render_mode: str | None = None,
     ) -> dict:
+        """PATCH /api/v1/messages/{id}. Mutates only the fields the caller
+        supplies — backend's UpdateMessageDto whitelists each. Sending
+        `options=[]` is meaningful (clears any prior keyboard) and is
+        distinct from omitting the field; the adapter's edit_message uses
+        that semantic for streaming edits that drop the inline chips."""
         body: dict[str, Any] = {}
         if text is not None:
             body["text"] = text
         if approval_meta is not None:
             body["approvalMeta"] = approval_meta
+        if options is not None:
+            body["options"] = options
+        if render_mode is not None:
+            body["renderMode"] = render_mode
         return await self._request("PATCH", f"/api/v1/messages/{message_id}", json=body)
+
+    async def delete_message(self, message_id: int) -> None:
+        """DELETE /api/v1/messages/{id}. Raises BgosApiError on 4xx/5xx
+        (including 404 — callers decide whether to swallow). The adapter's
+        delete_message override DOES swallow 404/501 and returns False so
+        the gateway can fall back to leaving the message in place."""
+        await self._request("DELETE", f"/api/v1/messages/{message_id}")
 
     # -------------------------------------------------------------------------
     # Inbound backfill (reconnect)

@@ -105,6 +105,24 @@ class BgosWs:
         if self._sio.connected:
             await self._sio.disconnect()
 
+    async def emit_typing(self, *, chat_id: int, assistant_id: int) -> None:
+        """Emit a `typing` Socket.IO event so the backend can forward an
+        ephemeral typing indicator to clients viewing this chat.
+
+        Best-effort: if the WS isn't connected, returns silently. The
+        backend may not handle this event yet — Socket.IO drops unknown
+        events server-side, so this is forward-safe.
+        """
+        if not self._sio.connected:
+            return
+        try:
+            await self._sio.emit("typing", {
+                "chatId": chat_id,
+                "assistantId": assistant_id,
+            })
+        except Exception:
+            log.debug("emit_typing failed (non-fatal)", exc_info=True)
+
     # -------------------------------------------------------------------------
     # Internals
     # -------------------------------------------------------------------------

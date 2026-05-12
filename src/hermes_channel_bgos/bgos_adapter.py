@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from .bgos_api import BgosApi
+from .bgos_api import BgosApi, BgosApiError
 from .bgos_ws import BgosWs
 from .commands_sync import (
     BRIDGE_LOCAL_COMMANDS,
@@ -47,10 +47,31 @@ except ImportError:
         )
 
 
+try:  # pragma: no cover - exercised only when Hermes is installed
+    # Phase 1 stub; replace import target when Hermes ships its slash_confirm
+    # helper. Telegram has its own override at gateway/platforms/telegram.py:2119
+    # but the fork hasn't surfaced a shared resolver path yet — tests monkeypatch
+    # this at the module level (hermes_channel_bgos.bgos_adapter.resolve_slash_confirm).
+    from gateway.slash_confirm import resolve as resolve_slash_confirm  # type: ignore
+except ImportError:
+    def resolve_slash_confirm(session_key: str, confirm_id: str, choice: str) -> None:  # type: ignore[no-redef]
+        raise RuntimeError(
+            "gateway.slash_confirm.resolve is not importable — either Hermes "
+            "is not installed, or this Hermes build hasn't shipped the slash-"
+            "confirm helper yet (Phase 1 stub in hermes_channel_bgos.bgos_adapter). "
+            "Tests should monkeypatch this at the module level."
+        )
+
+
 # Matches Telegram's callback_data format at gateway/platforms/telegram.py:1275.
 # Four choice values: once, session, always, deny — mapped 1:1 from Hermes's
 # approval vocabulary.
 _APPROVAL_CALLBACK_RE = re.compile(r"^ea:(once|session|always|deny):(\d+)$")
+
+# Slash-confirm callback shape — three choices (once / always / cancel) for
+# the 3-button UX rendered by send_slash_confirm. confirm_id is opaque to the
+# adapter (Hermes mints it); we treat it as an arbitrary string.
+_SLASH_CONFIRM_CALLBACK_RE = re.compile(r"^sc:(once|always|cancel):(.+)$")
 
 # Agent-emitted inline-button marker block. See PLATFORM_HINTS["bgos"] in the
 # Hermes fork patch — the agent writes its choices between these tags and the
@@ -73,6 +94,21 @@ _INLINE_OPTION_LIMIT = 6
 # we upload via a presigned S3 PUT and reference by s3_key. Mirrors
 # openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
 S3_THRESHOLD = 500 * 1024
+
+# Strip Telegram MarkdownV2 punctuation escapes that some agents emit out
+# of habit. BGOS's mobile renderer is CommonMark; the backslashes show
+# through as ugly visible characters otherwise. Match only the
+# punctuation-class characters Telegram requires escaping; do NOT match
+# CommonMark-meaningful escapes (\\, \*, \_, \[, \], \(, \), \`).
+# Punctuation set per Telegram MarkdownV2 spec minus the CommonMark-shared
+# ones: , . ! ? : ; @ - + = | # < > { }
+_MDV2_LEAK_RE = re.compile(r"\\([,.!?:;@\-+=|#<>{}])")
+
+# Hard length cap for a single message body. The backend's exact limit
+# is in flux; this is the comfortable zone for mobile rendering. Longer
+# messages get split into (1/N) chunks. Tests can override via
+# adapter._max_message_length on the instance.
+_DEFAULT_MAX_MESSAGE_LENGTH = 10_000
 
 
 @dataclass
@@ -311,10 +347,43 @@ class BGOSAdapter(BasePlatformAdapter):
         # send_exec_approval, drained by Task 8's callback router.
         self._approval_state: dict[int, str] = {}
         self._approval_id_counter = itertools.count(1)
+        # Slash-confirm bookkeeping — confirm_id → session_key. Populated
+        # by send_slash_confirm; drained by the sc:* branch of
+        # _handle_callback. Telegram-parity 3-button UX for non-destructive
+        # but expensive commands (current caller: /reload-mcp).
+        self._slash_confirm_state: dict[str, str] = {}
         # REST poll loop — fallback for server-side WS push gap (see
         # _poll_loop for details). Started in connect(), cancelled in
         # disconnect().
         self._poll_task: asyncio.Task | None = None
+        # edit_message throttle — mirrors Telegram's
+        # _PROGRESS_EDIT_INTERVAL=1.5 (gateway/run.py:14382). Keeps the
+        # BGOS backend from drowning under tool-progress / streaming
+        # edits when the agent emits many small chunks. Per-chat so
+        # high-traffic chats don't starve quieter ones.
+        self._edit_throttle_seconds: float = 1.5
+        self._pending_edits: dict[int, asyncio.Task] = {}
+        self._last_edit_at: dict[int, float] = {}
+        # chat_id -> (message_id, cleaned_text, options, render_mode) —
+        # the latest content waiting for the deferred flush. Later
+        # writes inside the window supersede earlier ones (coalesce).
+        self._pending_edit_content: dict[
+            int, tuple[int, str, list[dict] | None, str | None],
+        ] = {}
+        # Adaptive text-batching for rapid inbound user messages. Mobile
+        # clients sometimes split a long transcription or paste into multiple
+        # sub-4KB messages — without batching, the agent gets N separate
+        # dispatches and writes N separate replies. See
+        # gateway/platforms/telegram.py:3803-3859 for the upstream pattern.
+        # Window adapts to the LAST chunk's length (see _enqueue_text_batch).
+        self._text_batch_window: float = 0.6
+        self._pending_text_batches: dict[int, dict[str, Any]] = {}
+        self._pending_text_tasks: dict[int, asyncio.Task] = {}
+        # Hard cap for a single outbound message body. Messages longer
+        # than this get split into multiple chunks with `(i/N)`
+        # continuation suffixes (mirrors Telegram parity at
+        # gateway/platforms/telegram.py:1457).
+        self._max_message_length: int = _DEFAULT_MAX_MESSAGE_LENGTH
 
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
@@ -578,7 +647,41 @@ class BGOSAdapter(BasePlatformAdapter):
             log.exception("poll_loop crashed unexpectedly")
 
     async def disconnect(self) -> None:
-        """Idempotent — safe to call multiple times (e.g. from a signal handler)."""
+        """Idempotent — safe to call multiple times (e.g. from a signal handler).
+
+        Cancels any pending edit-throttle flushes and awaits their
+        completion BEFORE closing the api client, so cancelled tasks
+        don't get a chance to hit a closed httpx client (which would
+        raise `RuntimeError: Cannot send a request...` deep in httpx).
+        """
+        # Snapshot + cancel pending edit flushes before clearing the dict
+        # so iteration doesn't race with a flush mutating it.
+        pending_tasks = [
+            t for t in self._pending_edits.values() if not t.done()
+        ]
+        for task in pending_tasks:
+            task.cancel()
+        self._pending_edits.clear()
+        self._pending_edit_content.clear()
+        # Await cancelled tasks so they fully unwind before we close the
+        # underlying api client. Exceptions are intentionally swallowed —
+        # we already initiated the cancellation, and CancelledError /
+        # any teardown noise is expected here.
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+        # Cancel any pending text-batch flushes too. Same snapshot-then-
+        # cancel pattern as the edit flushes above — protects against a
+        # flush task racing with disconnect() and trying to call
+        # handle_message after the adapter has torn down.
+        pending_text_tasks = [
+            t for t in self._pending_text_tasks.values() if not t.done()
+        ]
+        for task in pending_text_tasks:
+            task.cancel()
+        if pending_text_tasks:
+            await asyncio.gather(*pending_text_tasks, return_exceptions=True)
+        self._pending_text_tasks.clear()
+        self._pending_text_batches.clear()
         if self._poll_task is not None:
             self._poll_task.cancel()
             self._poll_task = None
@@ -588,6 +691,19 @@ class BGOSAdapter(BasePlatformAdapter):
             finally:
                 self._ws = None
         await self._api.close()
+
+    def format_message(self, content: str) -> str:
+        """Translate the agent's outbound text into BGOS-native form.
+
+        BGOS's mobile app renders CommonMark. Telegram-tuned prompts often
+        emit MarkdownV2 punctuation escapes (`\\,` `\\!` `\\.` etc.) that
+        survive as visible backslashes here. Strip those defensively; leave
+        real CommonMark escapes (\\\\, \\*, \\_, \\[, \\], \\(, \\), \\`)
+        alone since users may legitimately want them.
+
+        Idempotent — re-running has no effect after the first pass.
+        """
+        return _MDV2_LEAK_RE.sub(r"\1", content)
 
     async def send(
         self,
@@ -603,6 +719,13 @@ class BGOSAdapter(BasePlatformAdapter):
         the user sees inline chips instead of raw marker text. Block syntax
         lives in PLATFORM_HINTS["bgos"] (fork patch `agent/prompt_builder.py`).
 
+        Splits messages longer than `_max_message_length` into multiple
+        chunks with `(i/N)` continuation suffixes (mirrors Telegram parity
+        at gateway/platforms/telegram.py:1457). The first chunk carries
+        inline buttons (extracted from `[[BGOS_BUTTONS]]` block) and
+        reply_to; continuation chunks are plain text. Return value's
+        message_id targets the LAST chunk so streaming edits land there.
+
         Media variants (`send_image`, `send_voice`, …) are optional
         class-level overrides the gateway duck-types. `metadata` is accepted
         for Hermes interface compatibility but not currently plumbed through.
@@ -612,20 +735,260 @@ class BGOSAdapter(BasePlatformAdapter):
         originator's pollForReply() falls back to positional matching, which
         works for 1:1 side threads but not for any future fan-in patterns.
         """
-        cleaned_text, options, render_mode = _parse_buttons_block(content)
-        resp = await self._api.post_message(
-            chat_id=int(chat_id),
-            text=cleaned_text,
-            sender="assistant",
-            message_type="standard",
-            options=options or None,
-            render_mode=render_mode,
-            reply_to_id=int(reply_to) if reply_to is not None else None,
+        cleaned_text, options, render_mode = _parse_buttons_block(
+            self.format_message(content)
         )
-        message_id = resp.get("id") if isinstance(resp, dict) else None
-        if isinstance(chat_id, int) and isinstance(message_id, int):
-            self._state.last_assistant_message_by_chat[chat_id] = message_id
-        return _send_result(message_id=message_id)
+        chunks = self._chunk_text(cleaned_text)
+        last_result: SendResult | None = None
+        last_message_id: int | None = None
+        total = len(chunks)
+        for i, chunk in enumerate(chunks, start=1):
+            suffix = f"\n({i}/{total})" if total > 1 else ""
+            is_first = (i == 1)
+            resp = await self._api.post_message(
+                chat_id=int(chat_id),
+                text=chunk + suffix,
+                sender="assistant",
+                message_type="standard",
+                options=(options or None) if is_first else None,
+                render_mode=render_mode if is_first else None,
+                reply_to_id=(
+                    int(reply_to) if reply_to is not None and is_first else None
+                ),
+            )
+            message_id = resp.get("id") if isinstance(resp, dict) else None
+            if isinstance(message_id, int):
+                last_message_id = message_id
+            last_result = _send_result(message_id=message_id)
+        if isinstance(chat_id, int) and last_message_id is not None:
+            self._state.last_assistant_message_by_chat[chat_id] = last_message_id
+        return last_result or _send_result(message_id=None)
+
+    def _chunk_text(self, text: str) -> list[str]:
+        """Split text into ≤_max_message_length chunks.
+
+        Reserves 10 chars per chunk for the "\\n(NNN/NNN)" suffix so the final
+        chunk doesn't push back over the cap. Prefers newline-aligned splits
+        when one exists near the cap; falls back to a hard cut otherwise.
+        """
+        if len(text) <= self._max_message_length:
+            return [text]
+        chunks: list[str] = []
+        remaining = text
+        # Reserve 10 chars for the "\n(NNN/NNN)" suffix. 8 would be enough
+        # for N<100, but 10 covers up to N=999 which is the practical
+        # ceiling for any reasonable single send.
+        cap = self._max_message_length - 10
+        while len(remaining) > cap:
+            split_at = remaining.rfind("\n", 0, cap)
+            if split_at < cap // 2:
+                split_at = cap
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:].lstrip("\n")
+        if remaining:
+            chunks.append(remaining)
+        return chunks
+
+    # -------------------------------------------------------------------------
+    # edit_message / delete_message / send_typing (Task 1.3–1.5) —
+    # OVERRIDING these unlocks the gateway-driven tool-progress / streaming /
+    # typing UX. Hermes's gateway probes
+    # `type(adapter).edit_message is BasePlatformAdapter.edit_message` at
+    # gateway/run.py:14370 to decide whether to drive the entire feature —
+    # if we inherit the base defaults, every animated tool-bubble, every
+    # streamed chunk, and every typing indicator silently no-ops.
+    # -------------------------------------------------------------------------
+
+    async def edit_message(
+        self,
+        chat_id: int | str,
+        message_id: int | str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        """Edit a previously-sent message via PATCH /api/v1/messages/{id}.
+
+        The gateway's stream consumer and tool-progress loop call this
+        repeatedly to animate streaming responses and edit-in-place tool
+        bubbles (see upstream gateway/run.py:14370 — having edit_message
+        overridden is what UNLOCKS the entire tool-progress UI; the
+        gateway short-circuits the whole code path when the adapter
+        inherits the base-class default).
+
+        `finalize` is a no-op for BGOS (the backend has no draft/finalize
+        state machine — every edit is just an edit). Accepted for
+        interface compatibility with Hermes's BasePlatformAdapter.
+
+        Buttons: respects the same [[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]
+        marker block as send(). When the block is absent we send options=[]
+        so the backend CLEARS any prior keyboard — necessary for the
+        typical streaming pattern where the first send carried buttons
+        and the streamed update is plain text.
+
+        Throttle: per-chat, _edit_throttle_seconds=1.5 by default
+        (mirrors Telegram's _PROGRESS_EDIT_INTERVAL). The first call in
+        a window fires immediately; subsequent calls within the window
+        stash their content and schedule a single deferred flush — later
+        writes supersede earlier ones, so only the latest text lands.
+        Without this the BGOS backend (and the user's chat list) drown
+        under tool-progress / streaming edits.
+
+        Returns SendResult(success=False) on 4xx (message too old / not
+        editable / deleted) so the gateway falls back to a fresh send().
+        Within-window calls return a `success=True` placeholder — real
+        failures from the deferred flush surface as warning logs only,
+        which matches Telegram's parity behavior (the gateway treats
+        progress edits as fire-and-forget).
+        """
+        cleaned_text, options, render_mode = _parse_buttons_block(
+            self.format_message(content)
+        )
+        chat_key = int(chat_id)
+        mid_int = int(message_id)
+        now = asyncio.get_running_loop().time()
+        last = self._last_edit_at.get(chat_key, 0.0)
+        elapsed = now - last
+        if elapsed >= self._edit_throttle_seconds:
+            # Window expired (or first call) — fire immediately, cancel any
+            # stale pending flush since we just spoke for this chat.
+            pending = self._pending_edits.pop(chat_key, None)
+            if pending is not None and not pending.done():
+                pending.cancel()
+            self._pending_edit_content.pop(chat_key, None)
+            result = await self._do_patch(mid_int, cleaned_text, options, render_mode)
+            self._last_edit_at[chat_key] = now
+            return result
+
+        # Within throttle window — stash latest content (coalesces with
+        # any earlier-stashed write for the same chat), schedule deferred
+        # flush if one isn't already pending.
+        self._pending_edit_content[chat_key] = (
+            mid_int, cleaned_text, options, render_mode,
+        )
+        existing = self._pending_edits.get(chat_key)
+        if existing is None or existing.done():
+            wait_for = self._edit_throttle_seconds - elapsed
+            self._pending_edits[chat_key] = asyncio.create_task(
+                self._deferred_edit_flush(chat_key, wait_for)
+            )
+        return _send_result(message_id=mid_int)
+
+    async def _do_patch(
+        self,
+        mid_int: int,
+        text: str,
+        options: list[dict] | None,
+        render_mode: str | None,
+    ) -> SendResult:
+        """The actual PATCH call — extracted so the throttle path can share
+        it with the deferred flush path. Returns SendResult(success=False,
+        error=not_editable_*) on 4xx; re-raises 5xx."""
+        try:
+            await self._api.patch_message(
+                mid_int,
+                text=text,
+                options=options if options else [],
+                render_mode=render_mode,
+            )
+        except BgosApiError as exc:
+            if 400 <= exc.status < 500:
+                return SendResult(  # type: ignore[call-arg]
+                    success=False,
+                    message_id=str(mid_int),
+                    error=f"not_editable_{exc.status}",
+                )
+            raise
+        return _send_result(message_id=mid_int)
+
+    async def _deferred_edit_flush(self, chat_key: int, wait_for: float) -> None:
+        """Sleep until the throttle window expires, then fire whatever
+        content is currently stashed for this chat. Cancellation is
+        expected on disconnect — return cleanly without flushing."""
+        try:
+            await asyncio.sleep(wait_for)
+        except asyncio.CancelledError:
+            return
+        pending = self._pending_edit_content.pop(chat_key, None)
+        if pending is None:
+            return
+        mid_int, text, options, render_mode = pending
+        try:
+            await self._do_patch(mid_int, text, options, render_mode)
+        except Exception:
+            log.warning(
+                "deferred edit flush failed chat=%d msg=%d",
+                chat_key, mid_int, exc_info=True,
+            )
+        self._last_edit_at[chat_key] = asyncio.get_running_loop().time()
+        # Drop the now-completed task reference so _pending_edits doesn't
+        # accumulate one entry per chat for the lifetime of the adapter.
+        # disconnect()'s snapshot-then-cancel pattern handles in-flight
+        # tasks; this clears done ones so we don't leak memory in steady
+        # state when chats keep flowing.
+        self._pending_edits.pop(chat_key, None)
+
+    async def delete_message(
+        self,
+        chat_id: int | str,
+        message_id: int | str,
+    ) -> bool:
+        """Delete a previously-sent message via DELETE /api/v1/messages/{id}.
+
+        Used by the gateway's stream consumer to clean up intermediate
+        streaming-preview messages once the final answer is delivered as
+        a fresh message (so the visible timestamp reflects completion
+        time rather than start-of-stream).
+
+        Returns False on any HTTP error (404 = already deleted; 501 =
+        backend doesn't implement DELETE yet) so the caller falls back to
+        leaving the message visible. Re-raises 5xx other than 501 so real
+        backend incidents surface.
+        """
+        try:
+            await self._api.delete_message(int(message_id))
+            return True
+        except BgosApiError as exc:
+            if 400 <= exc.status < 500 or exc.status == 501:
+                log.debug("delete_message message_id=%s failed: %s", message_id, exc)
+                return False
+            raise
+
+    async def send_typing(
+        self,
+        chat_id: int | str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit a typing indicator over WS for this chat.
+
+        The gateway calls this between tool-progress edits and during
+        long-running tool calls so the user sees the bot is still alive.
+        BGOS is currently DM-only — one assistant per pairing — so we
+        pick the only assistant in the route map. If multi-assistant
+        pairings are added later, `metadata` could carry an explicit
+        assistant_id.
+
+        Cosmetic — never raises.
+        """
+        if self._ws is None:
+            return
+        assistant_id: int | None = None
+        if metadata and isinstance(metadata, dict):
+            candidate = metadata.get("assistant_id")
+            if isinstance(candidate, int):
+                assistant_id = candidate
+        if assistant_id is None:
+            for aid in self._state.assistant_route:
+                assistant_id = aid
+                break
+        if assistant_id is None:
+            return
+        try:
+            await self._ws.emit_typing(
+                chat_id=int(chat_id), assistant_id=assistant_id,
+            )
+        except Exception:
+            log.debug("send_typing failed (non-fatal)", exc_info=True)
 
     # -------------------------------------------------------------------------
     # Optional media overrides (Task 6) — Hermes duck-types these at send time.
@@ -736,6 +1099,52 @@ class BGOSAdapter(BasePlatformAdapter):
             filename=filename, mime=mime, caption=caption,
         )
 
+    async def send_multiple_images(
+        self,
+        chat_id: int | str,
+        images: list[tuple[bytes, str, str]],
+        *,
+        caption: str | None = None,
+        reply_to: int | None = None,
+    ) -> SendResult:
+        """Send up to 10 images as a single carousel-rendered message.
+
+        `images` is a list of `(file_bytes, filename, mime)` tuples. Backend
+        renders 2+ images as a carousel; 1 image renders normally. Caps at
+        10 to match Telegram's sendMediaGroup limit — extras silently dropped
+        with a log warning so a runaway agent doesn't flood backends.
+
+        Each entry goes through the same _upload_and_attach pipeline as
+        send_image: inline base64 below S3_THRESHOLD, presigned S3 PUT above.
+        """
+        if not images:
+            return _send_result(message_id=None)
+        if len(images) > 10:
+            log.warning(
+                "send_multiple_images received %d images; sending first 10",
+                len(images),
+            )
+            images = images[:10]
+        attachments: list[dict] = []
+        for blob, filename, mime in images:
+            attachments.append(
+                await self._upload_and_attach(
+                    file_bytes=blob, filename=filename, mime=mime,
+                )
+            )
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=caption or "",
+            sender="assistant",
+            message_type="standard",
+            files=attachments,
+            reply_to_id=int(reply_to) if reply_to is not None else None,
+        )
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        if isinstance(chat_id, int) and isinstance(message_id, int):
+            self._state.last_assistant_message_by_chat[chat_id] = message_id
+        return _send_result(message_id=message_id)
+
     # -------------------------------------------------------------------------
     # send_exec_approval (Task 7) — optional duck-typed hook. Gateway calls
     # us with a 15s hard deadline when the agent requests a dangerous-command
@@ -790,6 +1199,99 @@ class BGOSAdapter(BasePlatformAdapter):
         message_id = resp.get("id") if isinstance(resp, dict) else None
         return _send_result(message_id=message_id)
 
+    # -------------------------------------------------------------------------
+    # send_slash_confirm (Task 2.3) — three-button slash-command confirmation
+    # prompt. Mirrors gateway/platforms/telegram.py:2119. Used by Hermes's
+    # generic slash-confirm primitive for commands with non-destructive but
+    # expensive side effects (current caller: /reload-mcp which invalidates
+    # the provider prompt cache).
+    # -------------------------------------------------------------------------
+
+    async def send_slash_confirm(
+        self,
+        chat_id: int | str,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Three-option slash-command confirmation prompt (mirrors
+        `gateway/platforms/telegram.py:2119`). Used by Hermes's generic
+        slash-confirm primitive for commands with non-destructive but
+        expensive side effects (current caller: /reload-mcp).
+
+        Buttons: Approve Once / Always Approve / Cancel.
+        Callback shape: sc:<choice>:<confirm_id>
+
+        The backend may not recognize messageType=slash_confirm yet — in
+        that case it'll likely render as plain text plus the inline option
+        chips, which is acceptable graceful degradation.
+        """
+        options = [
+            {"text": "✅ Approve Once",     "callbackData": f"sc:once:{confirm_id}",
+             "style": "success", "row_index": 0},
+            {"text": "🔒 Always Approve",  "callbackData": f"sc:always:{confirm_id}",
+             "style": "success", "row_index": 0},
+            {"text": "❌ Cancel",           "callbackData": f"sc:cancel:{confirm_id}",
+             "style": "danger",  "row_index": 1},
+        ]
+        body_text = f"**{title}**\n\n{message}" if title else message
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=body_text,
+            sender="assistant",
+            message_type="slash_confirm",
+            options=options,
+        )
+        self._slash_confirm_state[confirm_id] = session_key
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        return _send_result(message_id=message_id)
+
+    # -------------------------------------------------------------------------
+    # send_update_prompt (Task 5.1) — yes/no inline confirmation called by
+    # Hermes's gateway during stash-restore / config-migration flows. Mirrors
+    # gateway/platforms/telegram.py:2006. Callback shape `update_prompt:y` /
+    # `update_prompt:n`. Unlike send_exec_approval / send_slash_confirm, we
+    # keep no adapter-side resolution state here — Hermes's gateway already
+    # handles those callbacks (waits on a future or sends a follow-up).
+    # -------------------------------------------------------------------------
+
+    async def send_update_prompt(
+        self,
+        chat_id: int | str,
+        prompt: str,
+        default_hint: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Yes/No inline prompt for Hermes's update flow (stash restore,
+        config migration). Mirrors gateway/platforms/telegram.py:2006.
+
+        Two-button inline UI: Yes / No. Callbacks shape `update_prompt:y`
+        and `update_prompt:n` — Hermes's gateway already handles those by
+        waiting on a future or sending a follow-up message; we don't need
+        adapter-side resolution state for this one (unlike approvals and
+        slash-confirms).
+        """
+        text = f"⚕ **Update needs your input:**\n\n{prompt}"
+        if default_hint:
+            text += f"\n\n_default: {default_hint}_"
+        options = [
+            {"text": "✓ Yes", "callbackData": "update_prompt:y",
+             "style": "success", "row_index": 0},
+            {"text": "✗ No",  "callbackData": "update_prompt:n",
+             "style": "default", "row_index": 0},
+        ]
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=text,
+            sender="assistant",
+            message_type="standard",
+            options=options,
+        )
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        return _send_result(message_id=message_id)
+
     async def get_chat_info(self, chat_id: int | str) -> dict:
         """BGOS is DM-only — a chat is its own minimal context. If later
         tasks need real chat metadata (title, participants), we extend this
@@ -810,7 +1312,7 @@ class BGOSAdapter(BasePlatformAdapter):
     # WS event hooks — placeholders filled in by later tasks
     # -------------------------------------------------------------------------
 
-    async def _handle_inbound(self, data: dict) -> None:
+    async def _handle_inbound(self, data: dict, *, batchable: bool = True) -> None:
         """Translate a WS inbound_message payload into a Hermes MessageEvent
         and hand it to `self.handle_message`. Drops events for unknown
         assistants (e.g. a race where a pairing was just revoked but the WS
@@ -819,6 +1321,10 @@ class BGOSAdapter(BasePlatformAdapter):
         Bridge-local slash commands (`/new`, `/retry`, `/status`) are
         intercepted here and handled adapter-side — they never reach the
         Hermes agent. Everything else flows through `handle_message`.
+
+        `batchable=False` disables the adaptive text-batching path — used by
+        backfill replay (history isn't "user typing fast", it's historical)
+        and `/retry` replay (already merged into a single canonical text).
         """
         assistant_id = data.get("assistant_id")
         if assistant_id is None:
@@ -850,6 +1356,18 @@ class BGOSAdapter(BasePlatformAdapter):
         # Persist the last-seen message id BEFORE dispatch, so even if
         # handle_message crashes we don't infinite-loop on restart.
         self._save_last_id(event.message_id)
+
+        # Batching window: rapid successive plain-text messages from the
+        # same chat get coalesced into one agent dispatch. Files / slash
+        # commands go through immediately (no batching) since order with
+        # text matters for context. Place this BEFORE the live retry-cache
+        # save below so the deferred flush gets to set the merged text
+        # without the live save overwriting it with the last fragment.
+        # `batchable=False` opts out (backfill replay, /retry replay).
+        if batchable and self._should_batch_event(event):
+            self._enqueue_text_batch(event=event, text=agent_visible_text)
+            return
+
         # Keep the retry cache populated so the /retry bridge-local can
         # resend the last user text in this chat. Use the agent-visible text
         # so attachment context replays on /retry.
@@ -896,6 +1414,113 @@ class BGOSAdapter(BasePlatformAdapter):
             event.text = agent_visible_text
             await self.handle_message(event)
 
+    def _should_batch_event(self, event: "MessageEvent") -> bool:
+        """Eligible for batching: standard plain-text only (no slash
+        commands, no attachments). Slash commands must flush immediately
+        so order with /new and /retry is preserved; attachments must
+        interleave correctly with the text that contextualizes them."""
+        return (
+            event.message_type == "standard"
+            and bool(event.text)
+            and not event.files
+        )
+
+    def _enqueue_text_batch(
+        self,
+        *,
+        event: "MessageEvent",
+        text: str,
+    ) -> None:
+        """Append `text` to the per-chat batch buffer and (re)schedule a
+        deferred flush. Window adapts to the LAST chunk's length:
+          ≤320 chars → ≤0.24s flush (user is still typing)
+          ≤1024 chars → ≤0.4s flush (mid-paragraph)
+          ≥4000 chars → 1.0s (split incoming from mobile client)
+          else → configured _text_batch_window (default 0.6s)
+        Mirrors gateway/platforms/telegram.py:3803-3859.
+        """
+        chat_key = event.chat_id
+        batch = self._pending_text_batches.get(chat_key)
+        if batch is None:
+            batch = {
+                "event": event,  # latest event metadata wins
+                "texts": [text],
+            }
+            self._pending_text_batches[chat_key] = batch
+        else:
+            batch["texts"].append(text)
+            batch["event"] = event  # latest message_id / user_id wins
+
+        # Cancel any pending flush — we'll schedule a fresh one with the
+        # adapted window.
+        existing = self._pending_text_tasks.get(chat_key)
+        if existing is not None and not existing.done():
+            existing.cancel()
+
+        last_chunk = batch["texts"][-1]
+        n = len(last_chunk)
+        if n >= 4000:
+            window = 1.0
+        elif n <= 320:
+            window = min(self._text_batch_window, 0.24)
+        elif n <= 1024:
+            window = min(self._text_batch_window, 0.4)
+        else:
+            window = self._text_batch_window
+
+        self._pending_text_tasks[chat_key] = asyncio.create_task(
+            self._flush_text_batch(chat_key, window)
+        )
+
+    async def _flush_text_batch(self, chat_key: int, window: float) -> None:
+        try:
+            await asyncio.sleep(window)
+        except asyncio.CancelledError:
+            return
+        batch = self._pending_text_batches.pop(chat_key, None)
+        if batch is None:
+            return
+        self._pending_text_tasks.pop(chat_key, None)
+        event = batch["event"]
+        merged = "".join(batch["texts"])
+        # Update the retry cache with the merged text so /retry replays
+        # the full message rather than just the last fragment.
+        self._state.last_user_text_by_chat[event.chat_id] = merged
+        # Now dispatch through the same gateway-event wrapping path as the
+        # synchronous case. Wrap in try/except so a downstream handle_message
+        # failure doesn't leave an unretrieved-exception on the task — matches
+        # _deferred_edit_flush's pattern.
+        try:
+            if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
+                try:
+                    source = self.build_source(  # type: ignore[attr-defined]
+                        chat_id=str(event.chat_id),
+                        user_id=str(event.user_id) if event.user_id else None,
+                    )
+                except AttributeError:
+                    event.text = merged
+                    await self.handle_message(event)
+                    return
+                user_id = str(event.user_id) if event.user_id else None
+                is_backfill = user_id is None
+                gateway_event = _GatewayMessageEvent(
+                    text=merged,
+                    message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
+                    source=source,
+                    message_id=str(event.message_id),
+                    raw_message=event,
+                    internal=is_backfill,
+                )
+                await self.handle_message(gateway_event)
+            else:
+                event.text = merged
+                await self.handle_message(event)
+        except Exception:
+            log.exception(
+                "deferred text-batch dispatch failed chat=%s msg=%s",
+                event.chat_id, event.message_id,
+            )
+
     async def _handle_bridge_local(self, command: str, data: dict) -> None:
         """Handle a `/new`, `/retry`, or `/status` slash command locally —
         no round-trip to Hermes. Posts an ack/result back to BGOS so the
@@ -925,7 +1550,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
             # Replay the last user text as a normal inbound, forwarded to the
             # agent this time (recurse with message_type=standard so the
-            # bridge-local check doesn't fire again).
+            # bridge-local check doesn't fire again). Bypass batching —
+            # the replay is already the canonical merged text, deferring it
+            # again would just confuse `/retry` semantics.
             replay = {
                 **data,
                 "text": last,
@@ -933,7 +1560,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 "command_name": None,
                 "command_args": None,
             }
-            await self._handle_inbound(replay)
+            await self._handle_inbound(replay, batchable=False)
         elif command == "status":
             lines = [
                 "**BGOS adapter status**",
@@ -969,12 +1596,31 @@ class BGOSAdapter(BasePlatformAdapter):
                 assistant_id, route,
             )
 
+    def _is_callback_user_authorized(self, user_id: str | None) -> bool:
+        """Mirrors the inbound auth gate (BGOS_ALLOW_ALL_USERS /
+        BGOS_ALLOWED_USERS) for callback events. Without this check, a
+        malicious user who could trigger backend callback_result delivery
+        could resolve approvals targeted at someone else.
+
+        Fail-closed by default (same posture as Hermes-side inbound)."""
+        if os.environ.get("BGOS_ALLOW_ALL_USERS", "false").lower() == "true":
+            return True
+        allowed = os.environ.get("BGOS_ALLOWED_USERS", "").strip()
+        if not allowed:
+            return False
+        allowed_set = {u.strip() for u in allowed.split(",") if u.strip()}
+        return user_id is not None and str(user_id) in allowed_set
+
     async def _handle_callback(self, data: dict) -> None:
         """Route a callback_result WS event.
 
         `ea:{choice}:{approval_id}` → look up session_key in self._approval_state,
         call `resolve_gateway_approval(session_key, choice)` from tools.approval
-        (synchronous, thread-safe — safe from this async handler).
+        (synchronous, thread-safe — safe from this async handler). After
+        resolving, edit the original approval bubble in-place to show the
+        choice + user (matches Telegram's UX at
+        gateway/platforms/telegram.py:2533-2537 — buttons vanish, the
+        bubble shows the resolution).
 
         Anything else → defer to `self.handle_button_press(data)` so the
         Hermes agent sees the press naturally. If no such handler exists,
@@ -985,8 +1631,60 @@ class BGOSAdapter(BasePlatformAdapter):
         no-op. Telegram answers these via `"already resolved"`; BGOS's
         equivalent would need a separate API call and isn't worth the
         complexity for Phase 1.
+
+        Authz: per-user gate (Task 2.2) — mirrors inbound message auth at
+        gateway/platforms/telegram.py:405. A leaked Clerk user ID
+        shouldn't be enough to resolve someone else's approval, so we
+        drop callback events from users not in BGOS_ALLOWED_USERS unless
+        BGOS_ALLOW_ALL_USERS=true. Dropped events leave _approval_state
+        intact so the authorized user can still resolve.
         """
         cb = data.get("callback_data", "")
+        user_id_for_authz = data.get("user_id") or data.get("userId")
+        if not self._is_callback_user_authorized(user_id_for_authz):
+            log.info(
+                "dropping unauthorized callback from user_id=%s callback_data=%s",
+                user_id_for_authz, cb,
+            )
+            return
+
+        # Slash-confirm dispatch — must come BEFORE the approval branch
+        # to keep prefix routing order-stable. `sc:*` callbacks are
+        # always dispatched through resolve_slash_confirm and never fall
+        # through to handle_button_press.
+        m_sc = _SLASH_CONFIRM_CALLBACK_RE.match(cb)
+        if m_sc is not None:
+            choice = m_sc.group(1)
+            confirm_id = m_sc.group(2)
+            session_key = self._slash_confirm_state.pop(confirm_id, None)
+            if session_key is None:
+                log.info("stale slash-confirm click confirm_id=%s", confirm_id)
+                return
+            import hermes_channel_bgos.bgos_adapter as _self_mod
+            _self_mod.resolve_slash_confirm(session_key, confirm_id, choice)
+            # Edit the bubble in place to show the resolution.
+            choice_labels = {
+                "once":   "✅ Approved once",
+                "always": "🔒 Always approve",
+                "cancel": "❌ Cancelled",
+            }
+            user_id_label = data.get("user_id") or data.get("userId") or ""
+            text = choice_labels.get(choice, choice)
+            if user_id_label:
+                text += f" by {user_id_label}"
+            msg_id = data.get("message_id") or data.get("messageId")
+            chat_id = data.get("chat_id") or data.get("chatId")
+            if isinstance(msg_id, int):
+                try:
+                    await self._api.patch_message(msg_id, text=text, options=[])
+                except Exception:
+                    log.warning("slash-confirm message edit failed", exc_info=True)
+                # Tell the edit throttle we just spoke for this chat so a
+                # subsequent edit_message() doesn't double-fire within window.
+                if isinstance(chat_id, int):
+                    self._last_edit_at[chat_id] = asyncio.get_running_loop().time()
+            return
+
         m = _APPROVAL_CALLBACK_RE.match(cb)
         if m is not None:
             choice = m.group(1)
@@ -1001,6 +1699,41 @@ class BGOSAdapter(BasePlatformAdapter):
             # Route via the module-level binding so tests can monkeypatch it.
             import hermes_channel_bgos.bgos_adapter as _self_mod
             _self_mod.resolve_gateway_approval(session_key, choice)
+
+            # Edit the original bubble in-place to show the resolution.
+            # Mirrors gateway/platforms/telegram.py:2533-2537. We bypass
+            # the 1.5s edit throttle (calling self._api.patch_message
+            # directly rather than self.edit_message) since this is a
+            # one-shot event per approval — no edit-storm risk and the
+            # UX wants the resolution to land immediately. Backend
+            # callback payloads may use snake_case OR camelCase keys,
+            # same as inbound_click — honor both.
+            choice_labels = {
+                "once":    "✅ Approved once",
+                "session": "✅ Approved for session",
+                "always":  "🔒 Approved permanently",
+                "deny":    "❌ Denied",
+            }
+            user_id_label = data.get("user_id") or data.get("userId") or ""
+            text = choice_labels.get(choice, choice)
+            if user_id_label:
+                text += f" by {user_id_label}"
+            msg_id = data.get("message_id") or data.get("messageId")
+            chat_id = data.get("chat_id") or data.get("chatId")
+            if isinstance(msg_id, int):
+                try:
+                    await self._api.patch_message(msg_id, text=text, options=[])
+                except Exception:
+                    # Cosmetic — approval already resolved by the time we get
+                    # here. Swallow (e.g. message was deleted) and log.
+                    log.warning(
+                        "approval message edit failed message_id=%d",
+                        msg_id, exc_info=True,
+                    )
+                # Tell the edit throttle we just spoke for this chat so a
+                # subsequent edit_message() doesn't double-fire within window.
+                if isinstance(chat_id, int):
+                    self._last_edit_at[chat_id] = asyncio.get_running_loop().time()
             return
 
         handler = getattr(self, "handle_button_press", None)
@@ -1137,6 +1870,9 @@ class BGOSAdapter(BasePlatformAdapter):
             if "message_id" not in msg and "id" in msg:
                 msg = {**msg, "message_id": msg["id"]}
             try:
-                await self._handle_inbound(msg)
+                # Backfill is historical replay, not "user typing fast" —
+                # bypass batching so each missed message lands as its own
+                # dispatch with its own message_id.
+                await self._handle_inbound(msg, batchable=False)
             except Exception:
                 log.exception("backfill replay failed for message=%s", msg)

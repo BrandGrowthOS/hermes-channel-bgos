@@ -6,4 +6,4 @@ fork's gateway/platforms/ADDING_A_PLATFORM.md). All adapter logic, REST
 client, Socket.IO client, and CLI tooling lives in this package.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

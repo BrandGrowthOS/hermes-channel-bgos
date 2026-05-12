@@ -201,6 +201,28 @@ Hermes agents learn about BGOS via a `PLATFORM_HINTS` entry in `agent/prompt_bui
 - **Slash commands from agent to user** — push via `PUT /integrations/assistants/:id/commands` (adapter's `sync_commands_for` method).
 - **Home-channel cron** — set `BGOS_HOME_CHANNEL` env var on the Hermes server. Crons scheduled with `deliver="bgos"` route to that chat id.
 
+**Phase 1 Telegram-parity UX (shipped in `hermes-channel-bgos` v0.5.0, 2026-05-12):**
+- **Tool-progress bubbles** — agents using long-running tools get emoji-prefixed status bubbles that animate in place: 🔍 search, 🧠 memory, 🔧 patch, 💻 shell, 📖 read, 🌐 navigate, 📋 plan, ⚡ default. Driven entirely by the upstream Hermes gateway; no agent-side syntax needed.
+- **Streaming responses** — token-by-token responses stream into a single bubble that edits in place. Throttled to 1 edit per 1.5s per chat.
+- **Typing indicator** — ephemeral "typing…" affordance during long tool calls / between progress edits. Emitted over the `typing` Socket.IO event.
+- **Intermediate-preview cleanup** — when streaming completes, the gateway deletes the in-progress preview and posts a fresh final message so the user-visible timestamp reflects completion time.
+- **In-place approval bubble edits** — clicking an approval button replaces the buttons with `✅ Approved once by <user>` (or `🔒 Approved permanently` / `❌ Denied` etc.). Bypasses the 1.5s edit throttle so the resolution lands immediately.
+- **Per-user callback authorization** — same gate as inbound text. Fail-closed; operators set `BGOS_ALLOW_ALL_USERS=true` or `BGOS_ALLOWED_USERS=<csv>`.
+- **`send_slash_confirm` 3-button UI** — Approve Once / Always 🔒 / Cancel for slash commands that need explicit ack (current caller: `/reload-mcp`). Callback `sc:<choice>:<confirm_id>`.
+- **`send_update_prompt`** — yes/no inline buttons for Hermes's gateway update flow.
+- **Long-message splitting** — auto-chunked at ~10K chars with `(i/N)` continuation suffixes; buttons + reply-to attach to chunk 1 only.
+- **`format_message` MDv2 escape stripping** — Telegram-tuned prompt-emitted escapes (`\,` `\!` `\.` etc.) cleaned; CommonMark escapes (`\*` `\_` `\[` `\(`) preserved.
+- **`send_multiple_images`** — up to 10 images into a single multi-file POST.
+- **Adaptive inbound text batching** — rapid plain-text messages coalesce; adaptive flush window (≤0.24s short / ≤0.4s mid / 1.0s for ≥4KB chunks / 0.6s default). Slash commands and file-bearing messages bypass. `last_user_text_by_chat` gets the merged text so `/retry` replays the full input.
+
+All these unlock because the adapter overrides the relevant `BasePlatformAdapter` methods (`edit_message`, `delete_message`, `send_typing`, `send_slash_confirm`, `send_update_prompt`) — the gates Hermes's gateway probes. No fork-patch changes required.
+
+**Backend dependencies still in flight (graceful degradation if missing):**
+- `DELETE /api/v1/messages/{id}` — needed for streaming-preview cleanup; without it, preview stays visible (cosmetic).
+- WS `typing` event handler — without it, no typing indicator (cosmetic).
+- `messageType="slash_confirm"` whitelist — without it, renders as `standard` with chips intact (buttons still work).
+- Approval `style` / `row_index` on options — without it, buttons render flat (already documented in v0.4 troubleshooting).
+
 **When you update this canonical, also update:** `hermes-channel-bgos/hermes-fork-patch/` — regenerate `0001-bgos-integration.patch` with the new `PLATFORM_HINTS` entry. Have users `git pull` + re-apply the patch on their fork, then restart Hermes.
 
 ### OpenClaw (`openclaw-channel-bgos`, BGOS monorepo)
