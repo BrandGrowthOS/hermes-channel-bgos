@@ -563,14 +563,17 @@ def test_format_message_strips_telegram_punctuation_escapes():
 def test_format_message_preserves_commonmark_escapes():
     """Real CommonMark escapes (which Telegram MDv2 ALSO uses but for
     common reasons) survive — users may legitimately want \\* to render
-    as a literal asterisk."""
+    as a literal asterisk. Link-syntax escapes (\\(, \\)) likewise must
+    pass through so e.g. `\\[label\\]\\(url\\)` renders as literal text."""
     adapter = _make_adapter()
-    raw = r"\*literal asterisk\* and \_literal underscore\_ and \[literal bracket\]"
+    raw = r"\*literal asterisk\* and \_literal underscore\_ and \[literal bracket\] and \(literal paren\)"
     out = adapter.format_message(raw)
     # The CommonMark-meaningful escapes pass through unchanged
     assert r"\*" in out
     assert r"\_" in out
     assert r"\[" in out
+    assert r"\(" in out
+    assert r"\)" in out
 
 
 def test_format_message_idempotent():
