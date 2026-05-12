@@ -592,7 +592,28 @@ class BGOSAdapter(BasePlatformAdapter):
             log.exception("poll_loop crashed unexpectedly")
 
     async def disconnect(self) -> None:
-        """Idempotent — safe to call multiple times (e.g. from a signal handler)."""
+        """Idempotent — safe to call multiple times (e.g. from a signal handler).
+
+        Cancels any pending edit-throttle flushes and awaits their
+        completion BEFORE closing the api client, so cancelled tasks
+        don't get a chance to hit a closed httpx client (which would
+        raise `RuntimeError: Cannot send a request...` deep in httpx).
+        """
+        # Snapshot + cancel pending edit flushes before clearing the dict
+        # so iteration doesn't race with a flush mutating it.
+        pending_tasks = [
+            t for t in self._pending_edits.values() if not t.done()
+        ]
+        for task in pending_tasks:
+            task.cancel()
+        self._pending_edits.clear()
+        self._pending_edit_content.clear()
+        # Await cancelled tasks so they fully unwind before we close the
+        # underlying api client. Exceptions are intentionally swallowed —
+        # we already initiated the cancellation, and CancelledError /
+        # any teardown noise is expected here.
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
         if self._poll_task is not None:
             self._poll_task.cancel()
             self._poll_task = None

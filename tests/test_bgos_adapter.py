@@ -429,3 +429,35 @@ async def test_edits_to_different_chats_are_independent(monkeypatch):
     # Both first edits should fire immediately despite the large window.
     assert len(calls) == 2
     assert {c["text"] for c in calls} == {"chat_42", "chat_99"}
+
+
+async def test_disconnect_cancels_pending_edit_flushes(monkeypatch):
+    """A deferred edit flush waiting on its throttle window must be
+    cancelled at disconnect — otherwise it would fire after the WS / API
+    client are torn down and raise during shutdown."""
+    adapter = _make_adapter()
+    adapter._edit_throttle_seconds = 60.0  # long window — guarantees a pending task
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        approval_meta=None):
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+
+    # First edit fires immediately; second stashes a pending flush task.
+    await adapter.edit_message(chat_id=42, message_id=300, content="first")
+    await adapter.edit_message(chat_id=42, message_id=300, content="second")
+
+    # Pending flush exists and is unfinished.
+    assert 42 in adapter._pending_edits
+    pending = adapter._pending_edits[42]
+    assert not pending.done()
+
+    await adapter.disconnect()
+
+    # After disconnect, the pending task is done (cancelled), and the
+    # adapter's internal pending-edit bookkeeping has been cleared so we
+    # don't carry stale state into a subsequent reconnect.
+    assert pending.done()
+    assert adapter._pending_edits == {}
+    assert adapter._pending_edit_content == {}
