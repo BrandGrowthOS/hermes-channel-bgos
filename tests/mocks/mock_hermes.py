@@ -75,6 +75,21 @@ class BasePlatformAdapter:
         typing indicator during long-running operations."""
         return None
 
+    async def send_slash_confirm(  # noqa: D401
+        self,
+        chat_id: Any,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: dict | None = None,
+    ) -> "SendResult":
+        """Base default — returns failure so the gateway falls back to plain
+        text. Concrete adapters override to render a proper 3-button UI.
+        Mirrors the real fork's `BasePlatformAdapter.send_slash_confirm` at
+        gateway/platforms/base.py line ~1711."""
+        return SendResult(success=False, error="Not supported")
+
 
 @dataclass
 class SendResult:

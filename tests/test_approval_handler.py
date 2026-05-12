@@ -215,3 +215,96 @@ async def test_approval_callback_edit_swallows_patch_errors(monkeypatch, caplog)
     })
     # The approval still resolved — that's the important contract
     assert resolved == [("sess-y", "deny")]
+
+
+# -----------------------------------------------------------------------------
+# Task 2.3 — send_slash_confirm() three-button UI + sc:* callback routing.
+# Mirrors gateway/platforms/telegram.py:2119. Used by Hermes's generic
+# slash-confirm primitive for commands with non-destructive but expensive
+# side effects (current caller: /reload-mcp). Buttons are Approve Once /
+# Always Approve / Cancel; callback shape sc:<choice>:<confirm_id>.
+# -----------------------------------------------------------------------------
+
+
+async def test_send_slash_confirm_renders_three_buttons(monkeypatch):
+    adapter = _make_adapter()
+    captured = []
+    async def fake_post(**kw):
+        captured.append(kw)
+        return {"id": 50}
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    result = await adapter.send_slash_confirm(
+        chat_id=1, title="Reload MCP?",
+        message="This invalidates the provider prompt cache.",
+        session_key="sess-1", confirm_id="conf-abc",
+    )
+    assert result.success is True
+    options = captured[0]["options"]
+    callbacks = [o["callbackData"] for o in options]
+    assert callbacks == [
+        "sc:once:conf-abc",
+        "sc:always:conf-abc",
+        "sc:cancel:conf-abc",
+    ]
+    assert captured[0]["message_type"] == "slash_confirm"
+    assert "Reload MCP?" in captured[0]["text"]
+    assert adapter._slash_confirm_state["conf-abc"] == "sess-1"
+
+
+async def test_send_slash_confirm_without_title(monkeypatch):
+    adapter = _make_adapter()
+    captured = []
+    async def fake_post(**kw):
+        captured.append(kw)
+        return {"id": 1}
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter.send_slash_confirm(
+        chat_id=1, title="", message="just the body",
+        session_key="s", confirm_id="c",
+    )
+    assert captured[0]["text"] == "just the body"
+
+
+async def test_slash_confirm_callback_resolves(monkeypatch):
+    adapter = _make_adapter()
+    resolved = []
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm",
+        lambda sk, cid, choice: resolved.append((sk, cid, choice)),
+    )
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    captured_patches = []
+    async def fake_patch(mid, *, text=None, options=None, **kw):
+        captured_patches.append({"message_id": mid, "text": text, "options": options})
+        return {"id": mid}
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    adapter._slash_confirm_state["conf-1"] = "sess-99"
+    await adapter._handle_callback({
+        "callback_data": "sc:once:conf-1",
+        "user_id": "u_1",
+        "message_id": 50,
+        "chat_id": 1,
+    })
+    assert resolved == [("sess-99", "conf-1", "once")]
+    assert "conf-1" not in adapter._slash_confirm_state
+    # Bubble edited
+    assert captured_patches[0]["text"].startswith("✅ Approved once")
+    assert "u_1" in captured_patches[0]["text"]
+    assert captured_patches[0]["options"] == []
+
+
+async def test_stale_slash_confirm_click_noops(monkeypatch):
+    adapter = _make_adapter()
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm",
+        lambda sk, cid, choice: pytest.fail("should not resolve stale click"),
+    )
+    # _slash_confirm_state is empty (stale or already-resolved click)
+    await adapter._handle_callback({
+        "callback_data": "sc:once:stale-id",
+        "user_id": "u_1",
+        "message_id": 50,
+        "chat_id": 1,
+    })
+    # Implicit: nothing raised, no resolve called

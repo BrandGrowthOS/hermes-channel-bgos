@@ -47,10 +47,30 @@ except ImportError:
         )
 
 
+try:  # pragma: no cover - exercised only when Hermes is installed
+    # Phase 1 stub; replace import target when Hermes ships its slash_confirm
+    # helper. Telegram has its own override at gateway/platforms/telegram.py:2119
+    # but the fork hasn't surfaced a shared resolver path yet — tests monkeypatch
+    # this at the module level (hermes_channel_bgos.bgos_adapter.resolve_slash_confirm).
+    from gateway.slash_confirm import resolve as resolve_slash_confirm  # type: ignore
+except ImportError:
+    def resolve_slash_confirm(session_key: str, confirm_id: str, choice: str) -> None:  # type: ignore[no-redef]
+        raise RuntimeError(
+            "gateway.slash_confirm.resolve is not importable — "
+            "Hermes not installed. Tests should monkeypatch this at the "
+            "module level (hermes_channel_bgos.bgos_adapter)."
+        )
+
+
 # Matches Telegram's callback_data format at gateway/platforms/telegram.py:1275.
 # Four choice values: once, session, always, deny — mapped 1:1 from Hermes's
 # approval vocabulary.
 _APPROVAL_CALLBACK_RE = re.compile(r"^ea:(once|session|always|deny):(\d+)$")
+
+# Slash-confirm callback shape — three choices (once / always / cancel) for
+# the 3-button UX rendered by send_slash_confirm. confirm_id is opaque to the
+# adapter (Hermes mints it); we treat it as an arbitrary string.
+_SLASH_CONFIRM_CALLBACK_RE = re.compile(r"^sc:(once|always|cancel):(.+)$")
 
 # Agent-emitted inline-button marker block. See PLATFORM_HINTS["bgos"] in the
 # Hermes fork patch — the agent writes its choices between these tags and the
@@ -311,6 +331,11 @@ class BGOSAdapter(BasePlatformAdapter):
         # send_exec_approval, drained by Task 8's callback router.
         self._approval_state: dict[int, str] = {}
         self._approval_id_counter = itertools.count(1)
+        # Slash-confirm bookkeeping — confirm_id → session_key. Populated
+        # by send_slash_confirm; drained by the sc:* branch of
+        # _handle_callback. Telegram-parity 3-button UX for non-destructive
+        # but expensive commands (current caller: /reload-mcp).
+        self._slash_confirm_state: dict[str, str] = {}
         # REST poll loop — fallback for server-side WS push gap (see
         # _poll_loop for details). Started in connect(), cancelled in
         # disconnect().
@@ -1024,6 +1049,55 @@ class BGOSAdapter(BasePlatformAdapter):
         message_id = resp.get("id") if isinstance(resp, dict) else None
         return _send_result(message_id=message_id)
 
+    # -------------------------------------------------------------------------
+    # send_slash_confirm (Task 2.3) — three-button slash-command confirmation
+    # prompt. Mirrors gateway/platforms/telegram.py:2119. Used by Hermes's
+    # generic slash-confirm primitive for commands with non-destructive but
+    # expensive side effects (current caller: /reload-mcp which invalidates
+    # the provider prompt cache).
+    # -------------------------------------------------------------------------
+
+    async def send_slash_confirm(
+        self,
+        chat_id: int | str,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Three-option slash-command confirmation prompt (mirrors
+        `gateway/platforms/telegram.py:2119`). Used by Hermes's generic
+        slash-confirm primitive for commands with non-destructive but
+        expensive side effects (current caller: /reload-mcp).
+
+        Buttons: Approve Once / Always Approve / Cancel.
+        Callback shape: sc:<choice>:<confirm_id>
+
+        The backend may not recognize messageType=slash_confirm yet — in
+        that case it'll likely render as plain text plus the inline option
+        chips, which is acceptable graceful degradation.
+        """
+        options = [
+            {"text": "✅ Approve Once",     "callbackData": f"sc:once:{confirm_id}",
+             "style": "success", "row_index": 0},
+            {"text": "🔒 Always Approve",  "callbackData": f"sc:always:{confirm_id}",
+             "style": "success", "row_index": 0},
+            {"text": "❌ Cancel",           "callbackData": f"sc:cancel:{confirm_id}",
+             "style": "danger",  "row_index": 1},
+        ]
+        body_text = f"**{title}**\n\n{message}" if title else message
+        resp = await self._api.post_message(
+            chat_id=int(chat_id),
+            text=body_text,
+            sender="assistant",
+            message_type="slash_confirm",
+            options=options,
+        )
+        self._slash_confirm_state[confirm_id] = session_key
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        return _send_result(message_id=message_id)
+
     async def get_chat_info(self, chat_id: int | str) -> dict:
         """BGOS is DM-only — a chat is its own minimal context. If later
         tasks need real chat metadata (title, participants), we extend this
@@ -1254,6 +1328,39 @@ class BGOSAdapter(BasePlatformAdapter):
                 user_id_for_authz, cb,
             )
             return
+
+        # Slash-confirm dispatch — must come BEFORE the approval branch
+        # to keep prefix routing order-stable. `sc:*` callbacks are
+        # always dispatched through resolve_slash_confirm and never fall
+        # through to handle_button_press.
+        m_sc = _SLASH_CONFIRM_CALLBACK_RE.match(cb)
+        if m_sc is not None:
+            choice = m_sc.group(1)
+            confirm_id = m_sc.group(2)
+            session_key = self._slash_confirm_state.pop(confirm_id, None)
+            if session_key is None:
+                log.info("stale slash-confirm click confirm_id=%s", confirm_id)
+                return
+            import hermes_channel_bgos.bgos_adapter as _self_mod
+            _self_mod.resolve_slash_confirm(session_key, confirm_id, choice)
+            # Edit the bubble in place to show the resolution.
+            choice_labels = {
+                "once":   "✅ Approved once",
+                "always": "🔒 Always approve",
+                "cancel": "❌ Cancelled",
+            }
+            user_id_label = data.get("user_id") or data.get("userId") or ""
+            text = choice_labels.get(choice, choice)
+            if user_id_label:
+                text += f" by {user_id_label}"
+            msg_id = data.get("message_id") or data.get("messageId")
+            if isinstance(msg_id, int):
+                try:
+                    await self._api.patch_message(msg_id, text=text, options=[])
+                except Exception:
+                    log.warning("slash-confirm message edit failed", exc_info=True)
+            return
+
         m = _APPROVAL_CALLBACK_RE.match(cb)
         if m is not None:
             choice = m.group(1)
