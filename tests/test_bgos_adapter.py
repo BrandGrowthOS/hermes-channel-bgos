@@ -198,6 +198,23 @@ async def test_edit_message_returns_failure_on_404(monkeypatch):
     assert result.error == "not_editable_404"
 
 
+async def test_edit_message_reraises_5xx_in_immediate_path(monkeypatch):
+    """5xx during the immediate-fire path must propagate so callers learn
+    the backend is sick. The deferred-flush path swallows the same error
+    on purpose (it's fire-and-forget) — that asymmetry is documented in
+    _deferred_edit_flush and verified separately."""
+    adapter = _make_adapter()
+
+    async def boom(message_id, **_kwargs):
+        raise BgosApiError(503, None, "service unavailable")
+
+    monkeypatch.setattr(adapter._api, "patch_message", boom)
+
+    with pytest.raises(BgosApiError) as excinfo:
+        await adapter.edit_message(chat_id=11, message_id=300, content="x")
+    assert excinfo.value.status == 503
+
+
 async def test_edit_message_parses_buttons_block(monkeypatch):
     """Same [[BGOS_BUTTONS]] marker block as send() — text is stripped,
     options become the keyboard payload on the PATCH."""
@@ -302,6 +319,23 @@ async def test_delete_message_returns_false_on_501(monkeypatch):
 
     ok = await adapter.delete_message(chat_id=11, message_id=300)
     assert ok is False
+
+
+async def test_delete_message_reraises_5xx_other_than_501(monkeypatch):
+    """5xx that isn't 501 means the backend is sick, not missing the
+    endpoint — re-raise so real incidents surface instead of getting
+    silently swallowed. Docstring on delete_message promises this; this
+    test pins the behavior."""
+    adapter = _make_adapter()
+
+    async def boom(mid):
+        raise BgosApiError(503, None, "service unavailable")
+
+    monkeypatch.setattr(adapter._api, "delete_message", boom)
+
+    with pytest.raises(BgosApiError) as excinfo:
+        await adapter.delete_message(chat_id=1, message_id=42)
+    assert excinfo.value.status == 503
 
 
 async def test_delete_message_overrides_base():
