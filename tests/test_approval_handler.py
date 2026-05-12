@@ -357,3 +357,11 @@ async def test_send_update_prompt_overrides_base():
     # to decide whether to render the yes/no UI or fall back to plain text.
     from hermes_channel_bgos.bgos_adapter import BGOSAdapter, BasePlatformAdapter
     assert BGOSAdapter.send_update_prompt is not BasePlatformAdapter.send_update_prompt
+
+
+async def test_send_slash_confirm_overrides_base():
+    # Same override-gate as send_update_prompt — verifies Hermes's gateway
+    # will route slash-confirm requests to our 3-button override instead of
+    # the base-class no-op that returns SendResult(success=False).
+    from hermes_channel_bgos.bgos_adapter import BGOSAdapter, BasePlatformAdapter
+    assert BGOSAdapter.send_slash_confirm is not BasePlatformAdapter.send_slash_confirm

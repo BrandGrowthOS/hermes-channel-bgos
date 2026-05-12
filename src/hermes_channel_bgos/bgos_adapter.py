@@ -1673,11 +1673,16 @@ class BGOSAdapter(BasePlatformAdapter):
             if user_id_label:
                 text += f" by {user_id_label}"
             msg_id = data.get("message_id") or data.get("messageId")
+            chat_id = data.get("chat_id") or data.get("chatId")
             if isinstance(msg_id, int):
                 try:
                     await self._api.patch_message(msg_id, text=text, options=[])
                 except Exception:
                     log.warning("slash-confirm message edit failed", exc_info=True)
+                # Tell the edit throttle we just spoke for this chat so a
+                # subsequent edit_message() doesn't double-fire within window.
+                if isinstance(chat_id, int):
+                    self._last_edit_at[chat_id] = asyncio.get_running_loop().time()
             return
 
         m = _APPROVAL_CALLBACK_RE.match(cb)
@@ -1714,6 +1719,7 @@ class BGOSAdapter(BasePlatformAdapter):
             if user_id_label:
                 text += f" by {user_id_label}"
             msg_id = data.get("message_id") or data.get("messageId")
+            chat_id = data.get("chat_id") or data.get("chatId")
             if isinstance(msg_id, int):
                 try:
                     await self._api.patch_message(msg_id, text=text, options=[])
@@ -1724,6 +1730,10 @@ class BGOSAdapter(BasePlatformAdapter):
                         "approval message edit failed message_id=%d",
                         msg_id, exc_info=True,
                     )
+                # Tell the edit throttle we just spoke for this chat so a
+                # subsequent edit_message() doesn't double-fire within window.
+                if isinstance(chat_id, int):
+                    self._last_edit_at[chat_id] = asyncio.get_running_loop().time()
             return
 
         handler = getattr(self, "handle_button_press", None)

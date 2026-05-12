@@ -4,7 +4,19 @@ BGOS channel adapter for [Nous Research's Hermes agent](https://github.com/NousR
 
 **Status:** Phase 1 — running in production. Message round-trips work end-to-end. Approvals render as 4-button inline bubbles. A handful of gotchas documented below.
 
-**v0.5.0 (2026-05-12):** unlocks the gateway-driven tool-progress UI for BGOS — emoji-prefixed tool bubbles, edit-in-place streaming, typing indicators between long tool calls, and intermediate-streaming-preview cleanup all flow automatically through the standard Hermes gateway. No fork-patch changes required: the new adapter overrides three optional `BasePlatformAdapter` methods (`edit_message`, `delete_message`, `send_typing`), which is what Hermes's gateway probes to decide whether to drive those features.
+**v0.5.0 (2026-05-12) — Telegram-parity round.** This release closes most of the UX gap between BGOS and the Telegram channel. No fork-patch changes required.
+
+- **Gateway-driven tool-progress UI** — emoji-prefixed tool bubbles (🔍 search, 🧠 memory, 🔧 patch, 💻 shell, ⚡…), edit-in-place streaming responses, typing indicators between long tool calls, and intermediate-streaming-preview cleanup all flow automatically because the adapter now overrides three optional `BasePlatformAdapter` methods (`edit_message`, `delete_message`, `send_typing`) — the gates Hermes's gateway probes to decide whether to drive these features. Edit calls are throttled to 1 per 1.5s per chat to mirror the Telegram pattern.
+- **In-place approval bubble edits** — when a user taps an approval button, the bubble mutates in place to show the resolution (`✅ Approved once by user_42`) with the buttons removed.
+- **Per-user callback authorization** — same gate as inbound text (`BGOS_ALLOW_ALL_USERS` or `BGOS_ALLOWED_USERS`). Fail-closed.
+- **`send_slash_confirm` 3-button UI** — `/reload-mcp`-style slash commands that need explicit acknowledgment render with Approve Once / Always 🔒 / Cancel buttons (callback shape `sc:<choice>:<id>`).
+- **`send_update_prompt`** — yes/no inline UI for Hermes's gateway update flow (stash restore, config migration).
+- **Long-message splitting** — replies exceeding ~10K characters are auto-chunked with `(i/N)` continuations. Buttons + reply-to attach to chunk 1 only.
+- **`format_message` MDv2-escape stripping** — Telegram-tuned prompts that emit `\,` `\!` `\.` etc. no longer leak visible backslashes through BGOS's CommonMark renderer. Real CommonMark escapes (`\*` `\_` `\[` `\(`) survive.
+- **`send_multiple_images`** — bundles up to 10 images into a single multi-file POST (carousel-rendered).
+- **Adaptive inbound text batching** — rapid plain-text messages from the same chat (e.g. mobile-client-split voice-memo transcripts) coalesce into one agent dispatch with an adaptive flush window (≤0.24s for short messages, up to 1.0s for the first chunk of a multi-part paste). Slash commands and file-bearing messages bypass.
+
+Backend dependencies still in flight: `DELETE /api/v1/messages/{id}` (for streaming-preview cleanup; missing → preview stays visible, cosmetic only) and a WS `typing` event handler (missing → no typing indicator, cosmetic only). Both degrade gracefully; no exceptions.
 
 ## Contents
 - [Quick start with Claude Code (recommended)](#quick-start-with-claude-code-recommended)
@@ -371,4 +383,4 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Expected: **72 passed, 2 skipped**. The reconnect test needs a real BGOS backend; the mode-0600 permission check is POSIX-only.
+Expected on v0.5.0: **153 passed, 1 skipped**. The reconnect test needs a real BGOS backend.
