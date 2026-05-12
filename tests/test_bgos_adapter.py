@@ -656,6 +656,9 @@ async def test_send_first_chunk_carries_buttons_only(monkeypatch):
         + "\n[[BGOS_BUTTONS]]\nYes | yes\nNo | no\n[[/BGOS_BUTTONS]]"
     )
     await adapter.send(chat_id=1, content=content)
+    # Guard against a future config shrinking the body below the split
+    # threshold and silently bypassing the continuation-chunk assertion.
+    assert len(posts) > 1
     # Buttons extracted from anywhere in the input — they attach to chunk 1
     assert posts[0]["options"] is not None
     for chunk in posts[1:]:
@@ -673,6 +676,9 @@ async def test_send_first_chunk_carries_reply_to_only(monkeypatch):
 
     monkeypatch.setattr(adapter._api, "post_message", fake_post)
     await adapter.send(chat_id=1, content="x" * 250, reply_to=42)
+    # Guard against a future config shrinking the body below the split
+    # threshold and silently bypassing the continuation-chunk assertion.
+    assert len(posts) > 1
     assert posts[0]["reply_to_id"] == 42
     for chunk in posts[1:]:
         assert chunk["reply_to_id"] is None
