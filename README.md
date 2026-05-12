@@ -4,6 +4,8 @@ BGOS channel adapter for [Nous Research's Hermes agent](https://github.com/NousR
 
 **Status:** Phase 1 — running in production. Message round-trips work end-to-end. Approvals render as 4-button inline bubbles. A handful of gotchas documented below.
 
+**v0.5.0 (2026-05-12):** unlocks the gateway-driven tool-progress UI for BGOS — emoji-prefixed tool bubbles, edit-in-place streaming, typing indicators between long tool calls, and intermediate-streaming-preview cleanup all flow automatically through the standard Hermes gateway. No fork-patch changes required: the new adapter overrides three optional `BasePlatformAdapter` methods (`edit_message`, `delete_message`, `send_typing`), which is what Hermes's gateway probes to decide whether to drive those features.
+
 ## Contents
 - [Quick start with Claude Code (recommended)](#quick-start-with-claude-code-recommended)
 - [Prerequisites](#prerequisites)

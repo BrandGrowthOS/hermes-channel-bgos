@@ -201,6 +201,14 @@ Hermes agents learn about BGOS via a `PLATFORM_HINTS` entry in `agent/prompt_bui
 - **Slash commands from agent to user** — push via `PUT /integrations/assistants/:id/commands` (adapter's `sync_commands_for` method).
 - **Home-channel cron** — set `BGOS_HOME_CHANNEL` env var on the Hermes server. Crons scheduled with `deliver="bgos"` route to that chat id.
 
+**Phase 1 Telegram-parity UX (shipped in `hermes-channel-bgos` v0.5.0, 2026-05-12):**
+- **Tool-progress bubbles** — agents using long-running tools (file edits, shell commands, web fetches) get emoji-prefixed status bubbles that animate in place: 🔧 → 🛠️ → ✅ / ❌. Driven entirely by the upstream Hermes gateway; no agent-side syntax needed. Triggered by overriding `edit_message` on the adapter.
+- **Streaming responses** — token-by-token responses from the LLM stream into a single message bubble that edits in place (instead of one bubble per chunk). Throttled to 1 edit per 1.5s per chat. No agent-side syntax — uses the same `edit_message` override.
+- **Typing indicator** — during long tool calls or between progress edits the user sees an ephemeral "typing…" affordance in the chat. Emitted over the `typing` Socket.IO event to the BGOS backend.
+- **Intermediate-preview cleanup** — when streaming completes, the gateway deletes the in-progress preview and posts a fresh final message so the user-visible timestamp reflects completion time. Triggered by overriding `delete_message`.
+
+These all unlock because the adapter overrides the three optional methods Hermes's gateway probes (`edit_message`, `delete_message`, `send_typing`) — no fork-patch changes required.
+
 **When you update this canonical, also update:** `hermes-channel-bgos/hermes-fork-patch/` — regenerate `0001-bgos-integration.patch` with the new `PLATFORM_HINTS` entry. Have users `git pull` + re-apply the patch on their fork, then restart Hermes.
 
 ### OpenClaw (`openclaw-channel-bgos`, BGOS monorepo)
