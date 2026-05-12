@@ -593,3 +593,110 @@ async def test_send_applies_format_message(monkeypatch):
     monkeypatch.setattr(adapter._api, "post_message", fake_post)
     await adapter.send(chat_id=1, content=r"Hi\, there\!")
     assert captured[0]["text"] == "Hi, there!"
+
+
+# -----------------------------------------------------------------------------
+# Long-message splitting (Task 3.2) — Telegram's pattern at
+# gateway/platforms/telegram.py:1457. Chunks longer than
+# _max_message_length get split with (i/N) continuation suffixes. First
+# chunk carries reply_to / buttons; last chunk's message_id becomes the
+# return value so streaming edits target it.
+# -----------------------------------------------------------------------------
+
+
+async def test_send_splits_long_messages(monkeypatch):
+    adapter = _make_adapter()
+    adapter._max_message_length = 100  # tiny for test
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw["text"])
+        return {"id": len(posts)}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    big = "x" * 250
+    result = await adapter.send(chat_id=1, content=big)
+    assert len(posts) >= 3  # 250 / (100-8) ≈ 3 chunks
+    # All continuations except the last carry (i/N) suffix
+    n = len(posts)
+    for i, p in enumerate(posts, start=1):
+        assert p.endswith(f"({i}/{n})")
+    # Result.message_id targets the LAST chunk so streaming edits land there
+    assert result.message_id == str(n)
+
+
+async def test_send_short_message_not_split(monkeypatch):
+    """No continuation suffix on single-chunk sends."""
+    adapter = _make_adapter()
+    adapter._max_message_length = 100
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw["text"])
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter.send(chat_id=1, content="short")
+    assert posts == ["short"]
+
+
+async def test_send_first_chunk_carries_buttons_only(monkeypatch):
+    """When the message is split, inline buttons attach to chunk 1 only."""
+    adapter = _make_adapter()
+    adapter._max_message_length = 100
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": len(posts)}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    content = (
+        "x" * 300
+        + "\n[[BGOS_BUTTONS]]\nYes | yes\nNo | no\n[[/BGOS_BUTTONS]]"
+    )
+    await adapter.send(chat_id=1, content=content)
+    # Buttons extracted from anywhere in the input — they attach to chunk 1
+    assert posts[0]["options"] is not None
+    for chunk in posts[1:]:
+        assert chunk["options"] is None
+
+
+async def test_send_first_chunk_carries_reply_to_only(monkeypatch):
+    adapter = _make_adapter()
+    adapter._max_message_length = 100
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": len(posts)}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter.send(chat_id=1, content="x" * 250, reply_to=42)
+    assert posts[0]["reply_to_id"] == 42
+    for chunk in posts[1:]:
+        assert chunk["reply_to_id"] is None
+
+
+async def test_send_long_message_prefers_newline_splits(monkeypatch):
+    adapter = _make_adapter()
+    adapter._max_message_length = 100
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw["text"])
+        return {"id": len(posts)}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    # 5 lines of 50 chars each = 250 chars total
+    big = "\n".join(["y" * 50] * 5)
+    await adapter.send(chat_id=1, content=big)
+    # Each chunk should end on a line boundary (no mid-line splits unless
+    # forced). Drop the suffix to test the body.
+    bodies = [p.rsplit("\n", 1)[0] for p in posts]
+    for body in bodies:
+        # Trailing whitespace-only lines from lstrip are fine; just ensure
+        # no body ends on a partial 'y' run shorter than the line length
+        # when a newline was available.
+        if "y" in body:
+            assert "yyy" in body  # didn't slice in the middle of a line

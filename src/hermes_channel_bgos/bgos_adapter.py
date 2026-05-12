@@ -104,6 +104,12 @@ S3_THRESHOLD = 500 * 1024
 # ones: , . ! ? : ; @ - + = | # < > { }
 _MDV2_LEAK_RE = re.compile(r"\\([,.!?:;@\-+=|#<>{}])")
 
+# Hard length cap for a single message body. The backend's exact limit
+# is in flux; this is the comfortable zone for mobile rendering. Longer
+# messages get split into (1/N) chunks. Tests can override via
+# adapter._max_message_length on the instance.
+_DEFAULT_MAX_MESSAGE_LENGTH = 10_000
+
 
 @dataclass
 class MessageEvent:
@@ -364,6 +370,11 @@ class BGOSAdapter(BasePlatformAdapter):
         self._pending_edit_content: dict[
             int, tuple[int, str, list[dict] | None, str | None],
         ] = {}
+        # Hard cap for a single outbound message body. Messages longer
+        # than this get split into multiple chunks with `(i/N)`
+        # continuation suffixes (mirrors Telegram parity at
+        # gateway/platforms/telegram.py:1457).
+        self._max_message_length: int = _DEFAULT_MAX_MESSAGE_LENGTH
 
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
@@ -686,6 +697,13 @@ class BGOSAdapter(BasePlatformAdapter):
         the user sees inline chips instead of raw marker text. Block syntax
         lives in PLATFORM_HINTS["bgos"] (fork patch `agent/prompt_builder.py`).
 
+        Splits messages longer than `_max_message_length` into multiple
+        chunks with `(i/N)` continuation suffixes (mirrors Telegram parity
+        at gateway/platforms/telegram.py:1457). The first chunk carries
+        inline buttons (extracted from `[[BGOS_BUTTONS]]` block) and
+        reply_to; continuation chunks are plain text. Return value's
+        message_id targets the LAST chunk so streaming edits land there.
+
         Media variants (`send_image`, `send_voice`, …) are optional
         class-level overrides the gateway duck-types. `metadata` is accepted
         for Hermes interface compatibility but not currently plumbed through.
@@ -698,19 +716,53 @@ class BGOSAdapter(BasePlatformAdapter):
         cleaned_text, options, render_mode = _parse_buttons_block(
             self.format_message(content)
         )
-        resp = await self._api.post_message(
-            chat_id=int(chat_id),
-            text=cleaned_text,
-            sender="assistant",
-            message_type="standard",
-            options=options or None,
-            render_mode=render_mode,
-            reply_to_id=int(reply_to) if reply_to is not None else None,
-        )
-        message_id = resp.get("id") if isinstance(resp, dict) else None
-        if isinstance(chat_id, int) and isinstance(message_id, int):
-            self._state.last_assistant_message_by_chat[chat_id] = message_id
-        return _send_result(message_id=message_id)
+        chunks = self._chunk_text(cleaned_text)
+        last_result: SendResult | None = None
+        last_message_id: int | None = None
+        total = len(chunks)
+        for i, chunk in enumerate(chunks, start=1):
+            suffix = f"\n({i}/{total})" if total > 1 else ""
+            is_first = (i == 1)
+            resp = await self._api.post_message(
+                chat_id=int(chat_id),
+                text=chunk + suffix,
+                sender="assistant",
+                message_type="standard",
+                options=(options or None) if is_first else None,
+                render_mode=render_mode if is_first else None,
+                reply_to_id=(
+                    int(reply_to) if reply_to is not None and is_first else None
+                ),
+            )
+            message_id = resp.get("id") if isinstance(resp, dict) else None
+            if isinstance(message_id, int):
+                last_message_id = message_id
+            last_result = _send_result(message_id=message_id)
+        if isinstance(chat_id, int) and last_message_id is not None:
+            self._state.last_assistant_message_by_chat[chat_id] = last_message_id
+        return last_result or _send_result(message_id=None)
+
+    def _chunk_text(self, text: str) -> list[str]:
+        """Split text into ≤_max_message_length chunks.
+
+        Reserves 8 chars per chunk for the "(99/99)\\n" suffix so the final
+        chunk doesn't push back over the cap. Prefers newline-aligned splits
+        when one exists near the cap; falls back to a hard cut otherwise.
+        """
+        if len(text) <= self._max_message_length:
+            return [text]
+        chunks: list[str] = []
+        remaining = text
+        cap = self._max_message_length - 8  # reserve for "\n(99/99)" suffix
+        while len(remaining) > cap:
+            split_at = remaining.rfind("\n", 0, cap)
+            if split_at < cap // 2:
+                split_at = cap
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:].lstrip("\n")
+        if remaining:
+            chunks.append(remaining)
+        return chunks
 
     # -------------------------------------------------------------------------
     # edit_message / delete_message / send_typing (Task 1.3–1.5) —
