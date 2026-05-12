@@ -554,13 +554,13 @@ async def test_disconnect_cancels_pending_edit_flushes(monkeypatch):
 # -----------------------------------------------------------------------------
 
 
-def test_format_message_strips_telegram_punctuation_escapes():
+async def test_format_message_strips_telegram_punctuation_escapes():
     adapter = _make_adapter()
     raw = r"Hello\, world\! See https\://example\.com\?q\=1"
     assert adapter.format_message(raw) == "Hello, world! See https://example.com?q=1"
 
 
-def test_format_message_preserves_commonmark_escapes():
+async def test_format_message_preserves_commonmark_escapes():
     """Real CommonMark escapes (which Telegram MDv2 ALSO uses but for
     common reasons) survive — users may legitimately want \\* to render
     as a literal asterisk. Link-syntax escapes (\\(, \\)) likewise must
@@ -576,7 +576,7 @@ def test_format_message_preserves_commonmark_escapes():
     assert r"\)" in out
 
 
-def test_format_message_idempotent():
+async def test_format_message_idempotent():
     adapter = _make_adapter()
     raw = r"Hello\, world"
     once = adapter.format_message(raw)
