@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from .bgos_api import BgosApi
+from .bgos_api import BgosApi, BgosApiError
 from .bgos_ws import BgosWs
 from .commands_sync import (
     BRIDGE_LOCAL_COMMANDS,
@@ -626,6 +626,64 @@ class BGOSAdapter(BasePlatformAdapter):
         if isinstance(chat_id, int) and isinstance(message_id, int):
             self._state.last_assistant_message_by_chat[chat_id] = message_id
         return _send_result(message_id=message_id)
+
+    # -------------------------------------------------------------------------
+    # edit_message / delete_message / send_typing (Task 1.3–1.5) —
+    # OVERRIDING these unlocks the gateway-driven tool-progress / streaming /
+    # typing UX. Hermes's gateway probes
+    # `type(adapter).edit_message is BasePlatformAdapter.edit_message` at
+    # gateway/run.py:14370 to decide whether to drive the entire feature —
+    # if we inherit the base defaults, every animated tool-bubble, every
+    # streamed chunk, and every typing indicator silently no-ops.
+    # -------------------------------------------------------------------------
+
+    async def edit_message(
+        self,
+        chat_id: int | str,
+        message_id: int | str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        """Edit a previously-sent message via PATCH /api/v1/messages/{id}.
+
+        The gateway's stream consumer and tool-progress loop call this
+        repeatedly to animate streaming responses and edit-in-place tool
+        bubbles (see upstream gateway/run.py:14370 — having edit_message
+        overridden is what UNLOCKS the entire tool-progress UI; the
+        gateway short-circuits the whole code path when the adapter
+        inherits the base-class default).
+
+        `finalize` is a no-op for BGOS (the backend has no draft/finalize
+        state machine — every edit is just an edit). Accepted for
+        interface compatibility with Hermes's BasePlatformAdapter.
+
+        Buttons: respects the same [[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]
+        marker block as send(). When the block is absent we send options=[]
+        so the backend CLEARS any prior keyboard — necessary for the
+        typical streaming pattern where the first send carried buttons
+        and the streamed update is plain text.
+
+        Returns SendResult(success=False) on 4xx (message too old / not
+        editable / deleted) so the gateway falls back to a fresh send().
+        """
+        cleaned_text, options, render_mode = _parse_buttons_block(content)
+        try:
+            await self._api.patch_message(
+                int(message_id),
+                text=cleaned_text,
+                options=options if options else [],
+                render_mode=render_mode,
+            )
+        except BgosApiError as exc:
+            if 400 <= exc.status < 500:
+                return SendResult(  # type: ignore[call-arg]
+                    success=False,
+                    message_id=str(message_id),
+                    error=f"not_editable_{exc.status}",
+                )
+            raise
+        return _send_result(message_id=int(message_id))
 
     # -------------------------------------------------------------------------
     # Optional media overrides (Task 6) — Hermes duck-types these at send time.

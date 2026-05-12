@@ -11,6 +11,7 @@ import pytest
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter
 from hermes_channel_bgos.bgos_api import BgosApiError
 from hermes_channel_bgos.config import BgosConfig
+from tests.mocks.mock_hermes import BasePlatformAdapter
 
 
 pytestmark = pytest.mark.asyncio
@@ -140,3 +141,112 @@ async def test_assistant_route_map_is_defensive_copy(mock_bgos_server):
         assert 99 not in adapter.assistant_route_map
     finally:
         await adapter.disconnect()
+
+
+# -----------------------------------------------------------------------------
+# edit_message override (Task 1.3) — what UNLOCKS Hermes's gateway-driven
+# tool-progress / streaming / typing UX (the gateway probes
+# `type(adapter).edit_message is BasePlatformAdapter.edit_message` and
+# short-circuits everything when the adapter inherits the base default).
+# -----------------------------------------------------------------------------
+
+
+def _make_adapter() -> BGOSAdapter:
+    """Lightweight adapter for unit-testing edit/delete/typing without
+    spinning up the mock backend. Tests monkeypatch the api / ws fields."""
+    return BGOSAdapter(BgosConfig(base_url="http://x", pairing_token="pair_xyz"))
+
+
+async def test_edit_message_calls_patch_message(monkeypatch):
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        approval_meta=None):
+        captured["message_id"] = message_id
+        captured["text"] = text
+        captured["options"] = options
+        captured["render_mode"] = render_mode
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+
+    result = await adapter.edit_message(chat_id=11, message_id=300, content="updated")
+
+    assert result.success is True
+    assert result.message_id == "300"
+    assert captured["message_id"] == 300
+    assert captured["text"] == "updated"
+
+
+async def test_edit_message_returns_failure_on_404(monkeypatch):
+    """404 / 410 / 4xx means the message is too old or has been deleted —
+    return SendResult(success=False) so the gateway falls back to a
+    fresh send() instead of crashing."""
+    adapter = _make_adapter()
+
+    async def boom(message_id, **_kwargs):
+        raise BgosApiError(404, "MESSAGE_NOT_FOUND", {"error": "MESSAGE_NOT_FOUND"})
+
+    monkeypatch.setattr(adapter._api, "patch_message", boom)
+
+    result = await adapter.edit_message(chat_id=11, message_id=300, content="updated")
+
+    assert result.success is False
+    assert result.error == "not_editable_404"
+
+
+async def test_edit_message_parses_buttons_block(monkeypatch):
+    """Same [[BGOS_BUTTONS]] marker block as send() — text is stripped,
+    options become the keyboard payload on the PATCH."""
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        approval_meta=None):
+        captured["text"] = text
+        captured["options"] = options
+        captured["render_mode"] = render_mode
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+
+    content = "Please pick one:\n[[BGOS_BUTTONS]]\nYes | yes\nNo | no\n[[/BGOS_BUTTONS]]"
+    await adapter.edit_message(chat_id=11, message_id=300, content=content)
+
+    assert captured["text"] == "Please pick one:"
+    assert captured["options"] == [
+        {"text": "Yes", "callbackData": "yes"},
+        {"text": "No",  "callbackData": "no"},
+    ]
+    assert captured["render_mode"] == "inline"
+
+
+async def test_edit_message_drops_options_when_block_absent(monkeypatch):
+    """No buttons marker → patch with options=[] so the backend CLEARS
+    any prior keyboard. Necessary for the streaming pattern where the
+    first send carried buttons and subsequent edits are plain text."""
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        approval_meta=None):
+        captured["text"] = text
+        captured["options"] = options
+        captured["render_mode"] = render_mode
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+
+    await adapter.edit_message(chat_id=11, message_id=300, content="plain text")
+
+    assert captured["text"] == "plain text"
+    assert captured["options"] == []
+    assert captured["render_mode"] is None
+
+
+async def test_edit_message_overrides_base_unlocks_tool_progress():
+    """This is THE check the Hermes gateway makes at gateway/run.py:14370
+    to decide whether to drive the tool-progress / streaming / typing UI.
+    If this fails, the entire feature degrades to plain send()."""
+    assert BGOSAdapter.edit_message is not BasePlatformAdapter.edit_message
