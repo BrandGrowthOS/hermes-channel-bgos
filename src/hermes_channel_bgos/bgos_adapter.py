@@ -887,6 +887,12 @@ class BGOSAdapter(BasePlatformAdapter):
         )
         chat_key = int(chat_id)
         mid_int = int(message_id)
+        # Backend's UpdateMessageDto requires userId on PATCH (caught live
+        # 2026-05-13: missing userId → 400 "userId should not be empty"
+        # → adapter falls back to fresh POST → duplicate visible on BGOS).
+        # The most-recent inbound from this chat is the right value: that
+        # user prompted the assistant reply we're editing.
+        user_id = self._state.last_user_id_by_chat.get(chat_key)
         now = asyncio.get_running_loop().time()
         last = self._last_edit_at.get(chat_key, 0.0)
         elapsed = now - last
@@ -897,7 +903,9 @@ class BGOSAdapter(BasePlatformAdapter):
             if pending is not None and not pending.done():
                 pending.cancel()
             self._pending_edit_content.pop(chat_key, None)
-            result = await self._do_patch(mid_int, cleaned_text, options, render_mode)
+            result = await self._do_patch(
+                mid_int, cleaned_text, options, render_mode, user_id,
+            )
             self._last_edit_at[chat_key] = now
             return result
 
@@ -905,7 +913,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # any earlier-stashed write for the same chat), schedule deferred
         # flush if one isn't already pending.
         self._pending_edit_content[chat_key] = (
-            mid_int, cleaned_text, options, render_mode,
+            mid_int, cleaned_text, options, render_mode, user_id,
         )
         existing = self._pending_edits.get(chat_key)
         if existing is None or existing.done():
@@ -921,6 +929,7 @@ class BGOSAdapter(BasePlatformAdapter):
         text: str,
         options: list[dict] | None,
         render_mode: str | None,
+        user_id: str | None,
     ) -> SendResult:
         """The actual PATCH call — extracted so the throttle path can share
         it with the deferred flush path. Returns SendResult(success=False,
@@ -931,6 +940,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 text=text,
                 options=options if options else [],
                 render_mode=render_mode,
+                user_id=user_id,
             )
         except BgosApiError as exc:
             if 400 <= exc.status < 500:
@@ -953,9 +963,9 @@ class BGOSAdapter(BasePlatformAdapter):
         pending = self._pending_edit_content.pop(chat_key, None)
         if pending is None:
             return
-        mid_int, text, options, render_mode = pending
+        mid_int, text, options, render_mode, user_id = pending
         try:
-            await self._do_patch(mid_int, text, options, render_mode)
+            await self._do_patch(mid_int, text, options, render_mode, user_id)
         except Exception:
             log.warning(
                 "deferred edit flush failed chat=%d msg=%d",
@@ -1411,6 +1421,15 @@ class BGOSAdapter(BasePlatformAdapter):
         # handle_message crashes we don't infinite-loop on restart.
         self._save_last_id(event.message_id)
 
+        # Track the most-recent inbound user_id per chat. The PATCH
+        # /api/v1/messages/{id} endpoint requires `userId` (backend's
+        # DTO validation; caught 2026-05-13) and the right value for
+        # editing the assistant's reply is the user who prompted it.
+        # Stash BEFORE the batching short-circuit so the user_id lands
+        # even on the first fragment of a soon-to-merge burst.
+        if event.user_id:
+            self._state.last_user_id_by_chat[event.chat_id] = str(event.user_id)
+
         # Batching window: rapid successive plain-text messages from the
         # same chat get coalesced into one agent dispatch. Files / slash
         # commands go through immediately (no batching) since order with
@@ -1742,7 +1761,12 @@ class BGOSAdapter(BasePlatformAdapter):
             chat_id = data.get("chat_id") or data.get("chatId")
             if isinstance(msg_id, int):
                 try:
-                    await self._api.patch_message(msg_id, text=text, options=[])
+                    # PATCH requires userId per backend DTO validation.
+                    # The clicker IS the user attribution we want here.
+                    await self._api.patch_message(
+                        msg_id, text=text, options=[],
+                        user_id=str(user_id_label) if user_id_label else None,
+                    )
                 except Exception:
                     log.warning("slash-confirm message edit failed", exc_info=True)
                 # Tell the edit throttle we just spoke for this chat so a
@@ -1788,7 +1812,12 @@ class BGOSAdapter(BasePlatformAdapter):
             chat_id = data.get("chat_id") or data.get("chatId")
             if isinstance(msg_id, int):
                 try:
-                    await self._api.patch_message(msg_id, text=text, options=[])
+                    # PATCH requires userId per backend DTO validation.
+                    # The clicker IS the user attribution we want here.
+                    await self._api.patch_message(
+                        msg_id, text=text, options=[],
+                        user_id=str(user_id_label) if user_id_label else None,
+                    )
                 except Exception:
                     # Cosmetic — approval already resolved by the time we get
                     # here. Swallow (e.g. message was deleted) and log.

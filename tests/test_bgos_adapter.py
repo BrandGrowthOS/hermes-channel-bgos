@@ -163,7 +163,7 @@ async def test_edit_message_calls_patch_message(monkeypatch):
     adapter = _make_adapter()
     captured: dict = {}
 
-    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None, user_id=None,
                         approval_meta=None):
         captured["message_id"] = message_id
         captured["text"] = text
@@ -221,7 +221,7 @@ async def test_edit_message_parses_buttons_block(monkeypatch):
     adapter = _make_adapter()
     captured: dict = {}
 
-    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None, user_id=None,
                         approval_meta=None):
         captured["text"] = text
         captured["options"] = options
@@ -248,7 +248,7 @@ async def test_edit_message_drops_options_when_block_absent(monkeypatch):
     adapter = _make_adapter()
     captured: dict = {}
 
-    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None, user_id=None,
                         approval_meta=None):
         captured["text"] = text
         captured["options"] = options
@@ -262,6 +262,47 @@ async def test_edit_message_drops_options_when_block_absent(monkeypatch):
     assert captured["text"] == "plain text"
     assert captured["options"] == []
     assert captured["render_mode"] is None
+
+
+async def test_edit_message_passes_user_id_from_state(monkeypatch):
+    """Backend's UpdateMessageDto requires userId on PATCH (caught live
+    2026-05-13). The right value is the user who prompted the assistant
+    reply being edited — tracked per-chat in _state.last_user_id_by_chat
+    from inbound messages."""
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        user_id=None, approval_meta=None):
+        captured["user_id"] = user_id
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    # Seed the per-chat user_id as if an inbound landed first
+    adapter._state.last_user_id_by_chat[11] = "user_42"
+
+    await adapter.edit_message(chat_id=11, message_id=300, content="streaming chunk")
+    assert captured["user_id"] == "user_42"
+
+
+async def test_edit_message_user_id_omitted_when_chat_unknown(monkeypatch):
+    """No prior inbound for this chat → no user_id to pass; we send None
+    and the backend will 400, which surfaces via SendResult(success=False)
+    and the gateway falls back to fresh send. This is acceptable
+    degraded-mode (rare in practice — streaming is always preceded by an
+    inbound)."""
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+                        user_id=None, approval_meta=None):
+        captured["user_id"] = user_id
+        return {"id": message_id}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    # NO seed in last_user_id_by_chat
+    await adapter.edit_message(chat_id=99, message_id=300, content="x")
+    assert captured["user_id"] is None
 
 
 async def test_edit_message_overrides_base_unlocks_tool_progress():
@@ -446,7 +487,7 @@ async def test_edit_message_throttled_to_one_per_chat_per_interval(monkeypatch):
     adapter._edit_throttle_seconds = 0.1
     calls: list[dict] = []
 
-    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None, user_id=None,
                         approval_meta=None):
         calls.append({"message_id": message_id, "text": text})
         return {"id": message_id}
@@ -476,7 +517,7 @@ async def test_edits_to_different_chats_are_independent(monkeypatch):
     adapter._edit_throttle_seconds = 5.0  # large window — verify no cross-chat throttle
     calls: list[dict] = []
 
-    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None, user_id=None,
                         approval_meta=None):
         calls.append({"message_id": message_id, "text": text})
         return {"id": message_id}
@@ -498,7 +539,7 @@ async def test_deferred_flush_clears_pending_edit_entry(monkeypatch):
     adapter = _make_adapter()
     adapter._edit_throttle_seconds = 0.05
 
-    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None, user_id=None,
                         approval_meta=None):
         return {"id": message_id}
 
@@ -519,7 +560,7 @@ async def test_disconnect_cancels_pending_edit_flushes(monkeypatch):
     adapter = _make_adapter()
     adapter._edit_throttle_seconds = 60.0  # long window — guarantees a pending task
 
-    async def fake_patch(message_id, *, text=None, options=None, render_mode=None,
+    async def fake_patch(message_id, *, text=None, options=None, render_mode=None, user_id=None,
                         approval_meta=None):
         return {"id": message_id}
 

@@ -235,12 +235,26 @@ class BgosApi:
         approval_meta: dict | None = None,
         options: list[dict] | None = None,
         render_mode: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
         """PATCH /api/v1/messages/{id}. Mutates only the fields the caller
         supplies — backend's UpdateMessageDto whitelists each. Sending
         `options=[]` is meaningful (clears any prior keyboard) and is
         distinct from omitting the field; the adapter's edit_message uses
-        that semantic for streaming edits that drop the inline chips."""
+        that semantic for streaming edits that drop the inline chips.
+
+        `user_id` is REQUIRED by the backend's DTO validation (caught
+        live 2026-05-13: PATCH without it returns 400 with messages
+        ['userId should not be empty', 'userId must be a string']).
+        Callers should pass the Clerk user id this edit is attributed
+        to — for streaming/tool-progress that's the user who sent the
+        original prompt (tracked per-chat via
+        StateStore.last_user_id_by_chat); for callback in-place edits
+        it's the user who clicked the button (from the callback
+        payload). Omitting it will fail the PATCH and the adapter's
+        edit_message override will return SendResult(success=False)
+        so the gateway falls back to a fresh send.
+        """
         body: dict[str, Any] = {}
         if text is not None:
             body["text"] = text
@@ -250,6 +264,8 @@ class BgosApi:
             body["options"] = options
         if render_mode is not None:
             body["renderMode"] = render_mode
+        if user_id is not None:
+            body["userId"] = user_id
         return await self._request("PATCH", f"/api/v1/messages/{message_id}", json=body)
 
     async def delete_message(self, message_id: int) -> None:

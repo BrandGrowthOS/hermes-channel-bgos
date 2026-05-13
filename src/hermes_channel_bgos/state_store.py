@@ -2,8 +2,10 @@
 
 Tracks assistant→route mapping, retry cache (last user text per chat),
 conversation bindings per chat (used by /new slash command in Task 9),
-and the last assistant-message id per chat (used by streaming edits in
-Phase 3, if we get there).
+the last assistant-message id per chat (used by streaming edits), and
+the last user_id seen per chat (passed on PATCH /api/v1/messages so
+the backend's DTO validation that requires userId on edits is happy —
+caught live 2026-05-13).
 
 Not persisted. On adapter restart, state is rebuilt from `whoami()` +
 REST inbound backfill. Losing the retry cache is acceptable.
@@ -19,6 +21,7 @@ class StateStore:
     last_user_text_by_chat: dict[int, str] = field(default_factory=dict)
     conversation_by_chat: dict[int, str] = field(default_factory=dict)
     last_assistant_message_by_chat: dict[int, int] = field(default_factory=dict)
+    last_user_id_by_chat: dict[int, str] = field(default_factory=dict)
 
     def set_route(self, assistant_id: int, route: str) -> None:
         self.assistant_route[assistant_id] = route
