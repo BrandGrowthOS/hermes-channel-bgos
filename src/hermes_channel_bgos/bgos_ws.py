@@ -160,16 +160,21 @@ class BgosWs:
 
         @self._sio.on("inbound_message")  # type: ignore[misc]
         async def _inbound(data: dict) -> None:
-            mid = data.get("message_id")
-            # Visibility for diagnosing "messages I sent didn't reach the
-            # adapter" cases — enable with BGOS_DEBUG=1. One line per raw
-            # WS event so we can count what the transport actually received
-            # vs what the batcher merged downstream.
+            # Backend may send snake_case (REST backfill path) or camelCase
+            # (live WS — see _INBOUND_CAMEL_ALIASES in bgos_adapter.py).
+            # Read both so the DEBUG line is informative and the cursor
+            # advances no matter which shape the transport delivered.
+            # Without the camelCase fallback this log printed None even
+            # though the downstream adapter saw real values — caught live
+            # on kc's server 2026-05-13.
+            mid = data.get("message_id") or data.get("messageId")
             log.debug(
                 "bgos_ws.inbound_message message_id=%s chat_id=%s "
                 "assistant_id=%s message_type=%s text_len=%d files=%d",
-                mid, data.get("chat_id"), data.get("assistant_id"),
-                data.get("message_type"),
+                mid,
+                data.get("chat_id") or data.get("chatId"),
+                data.get("assistant_id") or data.get("assistantId"),
+                data.get("message_type") or data.get("messageType"),
                 len(data.get("text") or ""),
                 len(data.get("files") or []),
             )
