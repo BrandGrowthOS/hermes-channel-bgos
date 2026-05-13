@@ -120,6 +120,22 @@ class BgosApi:
                         code = body.get("error")
             else:
                 body = resp.text
+            # Diagnostic visibility for the 4xx path specifically — caught
+            # live 2026-05-13 when streaming PATCH returned 400 and we had
+            # no idea what payload field the backend was rejecting. Logs
+            # the backend's error body (truncated 500 chars) and the
+            # request body's top-level KEYS only (values omitted so user-
+            # visible content stays out of logs).
+            if log.isEnabledFor(logging.DEBUG):
+                req_keys = (
+                    sorted(json.keys()) if isinstance(json, dict) else None
+                )
+                log.debug(
+                    "bgos_api.error method=%s path=%s status=%d "
+                    "code=%s req_keys=%s body=%s",
+                    method, path, resp.status_code, code, req_keys,
+                    str(body)[:500],
+                )
             raise BgosApiError(resp.status_code, code, body)
         if not resp.content:
             return None
