@@ -95,6 +95,47 @@ _INLINE_OPTION_LIMIT = 6
 # openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
 S3_THRESHOLD = 500 * 1024
 
+
+# camelCase → snake_case aliases for inbound payloads. The BGOS backend's
+# WS `inbound_message` event has migrated to camelCase keys (matching the
+# rest of the BGOS DTO fleet — assistantId, chatId, messageId,
+# messageType, userId), while the REST `/api/v1/integrations/inbound`
+# endpoint still returns Python-native snake_case. The adapter was
+# originally written for snake_case, so without this shim WS events were
+# silently dropped at the `assistant_id is None` check and only the REST
+# poll loop's 5-second fallback was actually delivering messages.
+# Caught live on kc's server 2026-05-13 — see diag output showing
+# `assistantId=885 ... messageId=6041` reaching the adapter while
+# data.get("assistant_id") returned None.
+_INBOUND_CAMEL_ALIASES: dict[str, str] = {
+    "assistantId": "assistant_id",
+    "chatId": "chat_id",
+    "messageId": "message_id",
+    "userId": "user_id",
+    "messageType": "message_type",
+    "commandName": "command_name",
+    "commandArgs": "command_args",
+    "replyToId": "reply_to_id",
+}
+
+
+def _normalize_inbound_payload(data: dict) -> dict:
+    """Translate camelCase WS event keys to the snake_case shape the
+    adapter was originally written for.
+
+    Idempotent: snake_case keys present in `data` take precedence over
+    camelCase aliases so backfill paths or future call sites that already
+    normalize aren't overridden. Returns the original dict object when no
+    aliases need translating (zero-copy fast path).
+    """
+    if not any(camel in data for camel in _INBOUND_CAMEL_ALIASES):
+        return data
+    out = dict(data)
+    for camel, snake in _INBOUND_CAMEL_ALIASES.items():
+        if camel in out and snake not in out:
+            out[snake] = out[camel]
+    return out
+
 # Strip Telegram MarkdownV2 punctuation escapes that some agents emit out
 # of habit. BGOS's mobile renderer is CommonMark; the backslashes show
 # through as ugly visible characters otherwise. Match only the
@@ -1325,6 +1366,11 @@ class BGOSAdapter(BasePlatformAdapter):
         assistants (e.g. a race where a pairing was just revoked but the WS
         hasn't caught up).
 
+        Accepts both snake_case (REST `/api/v1/integrations/inbound`) and
+        camelCase (WS `inbound_message`) key shapes — the BGOS backend
+        emits them differently and the adapter has to absorb both. See
+        `_normalize_inbound_payload` for the alias table.
+
         Bridge-local slash commands (`/new`, `/retry`, `/status`) are
         intercepted here and handled adapter-side — they never reach the
         Hermes agent. Everything else flows through `handle_message`.
@@ -1333,6 +1379,7 @@ class BGOSAdapter(BasePlatformAdapter):
         backfill replay (history isn't "user typing fast", it's historical)
         and `/retry` replay (already merged into a single canonical text).
         """
+        data = _normalize_inbound_payload(data)
         assistant_id = data.get("assistant_id")
         if assistant_id is None:
             log.debug("inbound missing assistant_id: %s", data)
