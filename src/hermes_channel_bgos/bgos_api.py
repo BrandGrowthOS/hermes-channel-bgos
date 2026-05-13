@@ -9,11 +9,14 @@ push agent catalog, create upload URL.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from .config import BgosConfig
+
+log = logging.getLogger(__name__)
 
 
 class BgosApiError(Exception):
@@ -72,6 +75,25 @@ class BgosApi:
         params: Any = None,
         require_pairing: bool = True,
     ) -> Any:
+        # Diagnostic visibility (enabled via BGOS_DEBUG=1): one DEBUG line
+        # per outbound HTTP call so operators can correlate streaming
+        # behavior with adapter wire activity. Body length only — never
+        # the body itself, which can contain user-visible content.
+        # Caught live 2026-05-13 when the streaming-preview cleanup path
+        # produced duplicate visible messages on BGOS and there was no
+        # way to tell from logs which adapter requests had fired.
+        if log.isEnabledFor(logging.DEBUG):
+            body_len = -1
+            if isinstance(json, dict):
+                try:
+                    import json as _json
+                    body_len = len(_json.dumps(json))
+                except Exception:
+                    body_len = -1
+            log.debug(
+                "bgos_api.request method=%s path=%s body_len=%d",
+                method, path, body_len,
+            )
         resp = await self._client.request(
             method,
             path,
@@ -79,6 +101,11 @@ class BgosApi:
             params=params,
             headers=self._headers(require_pairing=require_pairing),
         )
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "bgos_api.response method=%s path=%s status=%d resp_len=%d",
+                method, path, resp.status_code, len(resp.content or b""),
+            )
         if resp.status_code >= 400:
             body: Any
             code: str | None = None
