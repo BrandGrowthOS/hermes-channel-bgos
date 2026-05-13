@@ -422,3 +422,164 @@ async def test_retry_cache_uses_merged_text():
         })
     await asyncio.sleep(0.15)
     assert adapter._state.last_user_text_by_chat[42] == "alpha bravo charlie"
+
+
+# -----------------------------------------------------------------------------
+# camelCase inbound payloads (0.5.3). The BGOS backend's WS inbound_message
+# event uses camelCase keys (assistantId, chatId, messageId, messageType)
+# while the REST `/api/v1/integrations/inbound` endpoint still returns
+# snake_case. The adapter has to absorb both. Caught live on kc's server
+# 2026-05-13 when every WS message was silently dropped at the
+# `assistant_id is None` check and only the REST poll loop's 5-second
+# fallback was delivering anything.
+# -----------------------------------------------------------------------------
+
+
+async def test_camelcase_inbound_dispatches():
+    """A WS-shape camelCase payload must reach handle_message just like
+    snake_case does. Concretely: assistantId / chatId / messageId /
+    userId / messageType — exactly the keys the live backend emits."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    received: list[Any] = []
+
+    async def capture(event):
+        received.append(event)
+
+    adapter.handle_message = capture
+    adapter._text_batch_window = 0.05  # speed up batching flush
+
+    await adapter._handle_inbound({
+        "assistantId": 7,
+        "userId": "user_42",
+        "chatId": 830,
+        "messageId": 6041,
+        "text": "test 1",
+        "files": [],
+        "messageType": "standard",
+    })
+    await asyncio.sleep(0.15)
+    assert len(received) == 1
+    assert received[0].text == "test 1"
+
+
+async def test_snake_case_takes_precedence_over_camel_alias():
+    """If a payload contains BOTH (e.g. an over-eager translator upstream),
+    the snake_case value wins. Guards against any future normalization
+    in the backend that double-emits keys."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    received: list[Any] = []
+
+    async def capture(event):
+        received.append(event)
+
+    adapter.handle_message = capture
+    adapter._text_batch_window = 0.05
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,           # winner
+        "assistantId": 999,          # ignored (would route to unknown assistant)
+        "chat_id": 100,              # winner
+        "chatId": 200,               # ignored
+        "message_id": 5000,          # winner
+        "messageId": 5001,           # ignored
+        "user_id": "real_user",
+        "userId": "wrong_user",
+        "text": "ok",
+        "files": [],
+        "message_type": "standard",
+        "messageType": "approval_request",  # ignored
+    })
+    await asyncio.sleep(0.15)
+    assert len(received) == 1
+    # If the camelCase had won, this would have routed to assistant 999
+    # (unknown) and dropped → received would be empty.
+
+
+async def test_camelcase_slash_command_routes_to_bridge_local(mock_bgos_server):
+    """Slash commands also have to honor the camelCase shape, since the
+    same WS event channel delivers them. Use a bridge-local command
+    (/status) so we can verify routing without needing an agent."""
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 999})
+    adapter._state.set_route(7, "default")
+
+    try:
+        await adapter._handle_inbound({
+            "assistantId": 7,
+            "userId": "u",
+            "chatId": 42,
+            "messageId": 100,
+            "text": "/status",
+            "files": [],
+            "messageType": "slash_command",
+            "commandName": "status",
+            "commandArgs": "",
+        })
+        # Bridge-local /status posts an ack via POST /api/v1/messages
+        posts = [r for r in mock_bgos_server.requests
+                 if r.method == "POST" and r.path == "/api/v1/messages"]
+        assert len(posts) == 1
+        body = posts[0].json_body
+        assert body["chatId"] == 42
+        assert "BGOS adapter status" in body["text"]
+    finally:
+        # Close the httpx client so the test doesn't leak the socket
+        # into the next test (which would trip pytest -W error on an
+        # unraisable ResourceWarning).
+        await adapter.disconnect()
+
+
+async def test_camelcase_files_inbound():
+    """Inbound camelCase with attachments. files[] payload elements are
+    NOT touched by _normalize_inbound_payload (file entries use their own
+    field names like fileName/fileMimeType handled by _format_inbound_files
+    separately); we only verify the top-level keys translate."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    received: list[Any] = []
+
+    async def capture(event):
+        received.append(event)
+
+    adapter.handle_message = capture
+
+    await adapter._handle_inbound({
+        "assistantId": 7,
+        "userId": "u",
+        "chatId": 42,
+        "messageId": 100,
+        "text": "look at this",
+        "files": [{"filename": "a.png", "mime": "image/png",
+                   "url": "https://s3.example/a.png"}],
+        "messageType": "standard",
+    })
+    # File-bearing messages bypass batching → flush immediate, no sleep
+    assert len(received) == 1
+
+
+async def test_normalize_inbound_payload_is_zero_copy_for_snake_only():
+    """Hot-path optimization: when no camelCase aliases are present, the
+    helper returns the input dict object unchanged (no allocation)."""
+    from hermes_channel_bgos.bgos_adapter import _normalize_inbound_payload
+    original = {
+        "assistant_id": 7, "chat_id": 1, "message_id": 1,
+        "user_id": "u", "text": "x", "files": [],
+        "message_type": "standard",
+    }
+    result = _normalize_inbound_payload(original)
+    assert result is original  # same object, not a copy
+
+
+async def test_normalize_inbound_payload_does_not_mutate_input():
+    """When aliases ARE present, the helper returns a NEW dict so callers
+    can rely on the input being untouched (e.g. for logging)."""
+    from hermes_channel_bgos.bgos_adapter import _normalize_inbound_payload
+    original = {"assistantId": 7, "chatId": 1, "messageId": 1}
+    result = _normalize_inbound_payload(original)
+    assert result is not original
+    assert "assistant_id" not in original  # input unchanged
+    assert result["assistant_id"] == 7
