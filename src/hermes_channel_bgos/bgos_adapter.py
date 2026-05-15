@@ -494,6 +494,15 @@ class BGOSAdapter(BasePlatformAdapter):
         self._state = StateStore()
         self._ws: BgosWs | None = None
         self.pairing_id: int | None = None
+        # The user who owns this pairing. Populated in connect() from
+        # /api/v1/integrations/me. Used as the canonical fallback for
+        # PATCH userId when last_user_id_by_chat is empty for a chat
+        # (happens when the first inbound on a chat was a REST backfill
+        # entry, which carries no user_id — caught live 2026-05-15 with
+        # 0.6.1 returning 400 on tool_progress card PATCH). All chats
+        # under this pairing belong to assistants owned by this user,
+        # so the ownership check in UpdateMessageDto always passes.
+        self.pairing_user_id: str | None = None
         # Approval bookkeeping — approval_id → session_key. Populated by
         # send_exec_approval, drained by Task 8's callback router.
         self._approval_state: dict[int, str] = {}
@@ -636,6 +645,13 @@ class BGOSAdapter(BasePlatformAdapter):
         """
         me = await self._api.whoami()
         self.pairing_id = me["pairing_id"]
+        # Cache the pairing owner's user_id for use as the PATCH /messages
+        # userId fallback when last_user_id_by_chat is empty. The whoami
+        # response always carries it (pairing.controller.ts returns
+        # `user_id: pairing.userId`). Falls back to None gracefully if a
+        # mock or older backend omits it — PATCH still fails in that case
+        # but no worse than before.
+        self.pairing_user_id = me.get("user_id") or me.get("userId")
         # Backend /api/v1/integrations/me returns assistants with the key
         # `assistant_id` (see backend/src/integrations/pairing.controller.ts
         # line ~128: `assistant_id: Number(r.id)`). Earlier drafts guessed
@@ -1048,9 +1064,12 @@ class BGOSAdapter(BasePlatformAdapter):
         # Backend's UpdateMessageDto requires userId on PATCH (caught live
         # 2026-05-13: missing userId → 400 "userId should not be empty"
         # → adapter falls back to fresh POST → duplicate visible on BGOS).
-        # The most-recent inbound from this chat is the right value: that
-        # user prompted the assistant reply we're editing.
-        user_id = self._state.last_user_id_by_chat.get(chat_key)
+        # The most-recent inbound from this chat is the preferred value
+        # (that user prompted the assistant reply we're editing), but
+        # REST-backfill seeded chats may have no recorded user_id — fall
+        # back to the pairing owner's user_id, which always owns the
+        # chain chat → assistant → user for this pairing.
+        user_id = self._patch_user_id_for_chat(chat_key)
 
         # tool_progress intercept — if the gateway is editing the streaming
         # preview with emoji-prefixed tool text, route to a separate
@@ -1125,6 +1144,26 @@ class BGOSAdapter(BasePlatformAdapter):
             raise
         return _send_result(message_id=mid_int)
 
+    def _patch_user_id_for_chat(self, chat_key: int) -> str | None:
+        """Resolve the userId to attach to a PATCH /api/v1/messages/{id}.
+
+        Preference order:
+          1. The most-recent inbound user_id for this chat — the user
+             who just prompted the assistant reply we're editing.
+          2. The pairing owner's user_id — always valid for any chat
+             in this pairing (all assistants under a pairing belong to
+             pairing.userId, so the backend's ownership check
+             `WHERE m.id = $1 AND a.user_id = $2` always passes).
+
+        Returns None only when neither is set, which means we never
+        successfully called connect() — in that case PATCH will fail
+        with the same 400 it would have failed with before this fix.
+        """
+        return (
+            self._state.last_user_id_by_chat.get(chat_key)
+            or self.pairing_user_id
+        )
+
     async def _handle_tool_progress_edit(
         self,
         chat_key: int,
@@ -1158,6 +1197,11 @@ class BGOSAdapter(BasePlatformAdapter):
         # call into the adapter concurrently (the send() path for the
         # first tool, then edit_message for subsequent tools, sometimes
         # racing within the same 1.5s throttle window).
+        # The send() path passes user_id=None (no inbound context for the
+        # first-tool case where it's invoked). Fall back to the pairing
+        # owner so any subsequent PATCH on this card has a valid userId.
+        if user_id is None:
+            user_id = self.pairing_user_id
         lock = self._tool_progress_lock_by_chat.setdefault(
             chat_key, asyncio.Lock(),
         )
@@ -1246,7 +1290,7 @@ class BGOSAdapter(BasePlatformAdapter):
             if entry.get("status") == "running":
                 entry["status"] = "done"
         summary = _build_tool_progress_summary(tools_list, done=True)
-        user_id = self._state.last_user_id_by_chat.get(chat_key)
+        user_id = self._patch_user_id_for_chat(chat_key)
         try:
             await self._api.patch_message(
                 card_id,
