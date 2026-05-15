@@ -163,7 +163,42 @@ Adapter intercepts these before `handle_message` is called. Agent never sees the
 
 **Agents should:** declare their native slash-command catalog at plugin connect time via `PUT /integrations/assistants/:id/commands` (shape: `[{command, description, scope: "all"}, ...]`). The BGOS frontend's slash picker reads this and auto-suggests.
 
-### 8. Conversation / chat model
+### 8. `tool_progress` — collapsible tool-call card
+
+When an agent runs one or more tools during a turn, BGOS can render the activity as a dedicated tinted card that visually separates it from the agent's actual reply. Three states:
+
+- **Running** (pulsing yellow dot, auto-expanded) — at least one tool is still executing for this turn. Card lists the tools as they land.
+- **Done, collapsed** (hollow yellow ring, one-line summary) — all tools finished. Card auto-collapses to "Used N tools · …".
+- **Done, expanded** — user tapped the row to re-open the full transcript.
+
+**Wire (extends `CreateMessageDto` and `UpdateMessageDto`):**
+```ts
+{
+  messageType: "tool_progress",
+  text: "Working… · read_file, terminal",   // short summary (legacy-client fallback)
+  toolProgress: {
+    state: "running" | "done",
+    tools: [
+      {
+        icon: "📖",           // emoji prefix (gateway/plugin chooses)
+        name: "read_file",    // canonical tool name
+        args: "/etc/hostname", // short args summary (≤120 chars)
+        status: "running" | "done" | "error"
+      }
+    ]
+  }
+}
+```
+
+`options.tools` is append-only over the message's lifetime — each PATCH adds new entries or transitions `state`. POST creates the card; PATCH (with `toolProgress` field set) appends tools or flips `state="done"`.
+
+Channel-agnostic by design — Hermes streams via PATCH edits as the gateway probes tool calls; OpenClaw/Gobot/Claude Code can POST a single done-state card per turn at end of turn. See spec: `docs/superpowers/specs/2026-05-15-tool-progress-message-type-design.md`.
+
+**Use for:** any plugin emitting one or more tool calls during a turn where the user benefits from seeing what the agent did without it competing visually with the agent's actual reply.
+
+**Do NOT use for:** the agent's text reply itself (use `standard`), buttons (use `standard` + `options[]`), approvals (use `approval_request`).
+
+### 9. Conversation / chat model
 
 - **DM-only** — no group chats, no forum topics, no threads.
 - One BGOS chat maps to one agent conversation.
@@ -202,7 +237,7 @@ Hermes agents learn about BGOS via a `PLATFORM_HINTS` entry in `agent/prompt_bui
 - **Home-channel cron** — set `BGOS_HOME_CHANNEL` env var on the Hermes server. Crons scheduled with `deliver="bgos"` route to that chat id.
 
 **Phase 1 Telegram-parity UX (shipped in `hermes-channel-bgos` v0.5.0, 2026-05-12):**
-- **Tool-progress bubbles** — agents using long-running tools get emoji-prefixed status bubbles that animate in place: 🔍 search, 🧠 memory, 🔧 patch, 💻 shell, 📖 read, 🌐 navigate, 📋 plan, ⚡ default. Driven entirely by the upstream Hermes gateway; no agent-side syntax needed.
+- **Tool-progress card** (since v0.6.0, 2026-05-15) — the gateway's emoji-prefixed status text (`🔍 search`, `🧠 memory`, `🔧 patch`, `💻 shell`, `📖 read`, `🌐 navigate`, `📋 plan`, `⚡ default`) is intercepted by the adapter's `edit_message` override, parsed via `_parse_tool_progress_text`, and emitted as a dedicated `messageType="tool_progress"` card with structured `toolProgress: {state, tools[]}`. The streaming-preview cleanup at end of turn finalizes the card to `state="done"` so it auto-collapses on the frontend. Older BGOS clients without the renderer fall back to the `text` summary (no breakage). No agent-side syntax needed.
 - **Streaming responses** — token-by-token responses stream into a single bubble that edits in place. Throttled to 1 edit per 1.5s per chat.
 - **Typing indicator** — ephemeral "typing…" affordance during long tool calls / between progress edits. Emitted over the `typing` Socket.IO event.
 - **Intermediate-preview cleanup** — when streaming completes, the gateway deletes the in-progress preview and posts a fresh final message so the user-visible timestamp reflects completion time.
