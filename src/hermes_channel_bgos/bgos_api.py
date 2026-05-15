@@ -192,6 +192,7 @@ class BgosApi:
         approval_meta: dict | None = None,
         render_mode: str | None = None,
         reply_to_id: int | None = None,
+        tool_progress: dict | None = None,
     ) -> dict:
         """POST to /api/v1/messages. Wire format matches backend CreateMessageDto
         (camelCase: chatId, messageType, approvalMeta, renderMode, replyToId).
@@ -225,6 +226,8 @@ class BgosApi:
             body["renderMode"] = render_mode
         if reply_to_id is not None:
             body["replyToId"] = reply_to_id
+        if tool_progress is not None:
+            body["toolProgress"] = tool_progress
         return await self._request("POST", "/api/v1/messages", json=body)
 
     async def patch_message(
@@ -236,6 +239,7 @@ class BgosApi:
         options: list[dict] | None = None,
         render_mode: str | None = None,
         user_id: str | None = None,
+        tool_progress: dict | None = None,
     ) -> dict:
         """PATCH /api/v1/messages/{id}. Mutates only the fields the caller
         supplies — backend's UpdateMessageDto whitelists each. Sending
@@ -266,6 +270,8 @@ class BgosApi:
             body["renderMode"] = render_mode
         if user_id is not None:
             body["userId"] = user_id
+        if tool_progress is not None:
+            body["toolProgress"] = tool_progress
         return await self._request("PATCH", f"/api/v1/messages/{message_id}", json=body)
 
     async def delete_message(self, message_id: int) -> None:
