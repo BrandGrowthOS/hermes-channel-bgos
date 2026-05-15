@@ -1401,6 +1401,20 @@ class BGOSAdapter(BasePlatformAdapter):
             )
             return
 
+        # Persist the last-seen message id IMMEDIATELY after we confirm the
+        # event is for a known assistant. Every inbound path past this point
+        # — bridge-local short-circuit, Hermes dispatch, file batching —
+        # consumes the message exactly once, so the cursor must advance
+        # regardless of which branch handles it. Without this guard, the
+        # bridge-local short-circuit below skipped the save and the REST
+        # poll loop would keep re-finding /new (or /retry / /status) in
+        # `inbound?since_message_id=<stale_cursor>` every 5 seconds and
+        # re-dispatching them — producing the live-server "50 conversation
+        # reset acks in a row" loop caught 2026-05-15.
+        msg_id = data.get("message_id")
+        if isinstance(msg_id, int):
+            self._save_last_id(msg_id)
+
         # Bridge-local intercept (Task 9): slash_command messages whose
         # command name is in BRIDGE_LOCAL_COMMANDS are handled by the adapter.
         if data.get("message_type") == "slash_command":
@@ -1417,9 +1431,6 @@ class BGOSAdapter(BasePlatformAdapter):
         # finding it in the text. Images become markdown image syntax for
         # vision-capable models; docs become labeled link lines.
         agent_visible_text = _format_inbound_files(event.text, event.files)
-        # Persist the last-seen message id BEFORE dispatch, so even if
-        # handle_message crashes we don't infinite-loop on restart.
-        self._save_last_id(event.message_id)
 
         # Track the most-recent inbound user_id per chat. The PATCH
         # /api/v1/messages/{id} endpoint requires `userId` (backend's
