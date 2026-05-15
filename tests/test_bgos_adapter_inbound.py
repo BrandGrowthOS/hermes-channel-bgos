@@ -533,6 +533,52 @@ async def test_camelcase_slash_command_routes_to_bridge_local(mock_bgos_server):
         await adapter.disconnect()
 
 
+async def test_bridge_local_slash_command_advances_cursor(mock_bgos_server, tmp_path, monkeypatch):
+    """Regression for the 0.5.7 hotfix: bridge-local slash commands
+    (/new, /status, /retry, /resume, /help) must advance the inbound
+    cursor BEFORE the bridge-local short-circuit returns.
+
+    Live-server symptom caught 2026-05-15: a single /new produced 50+
+    "Conversation reset" acks. Root cause: cursor wasn't saved on the
+    bridge-local branch, so the REST poll re-fetched the same /new from
+    `inbound?since_message_id=<stale>` every 5s and re-dispatched it
+    forever. The fix moves _save_last_id ahead of the slash-command
+    routing block so every accepted event advances the cursor."""
+    # _save_last_id persists to ~/.hermes/bgos_last_id by default; pin
+    # it to an isolated tmpdir so the test (a) doesn't pollute the dev
+    # machine's real cursor and (b) starts from a known clean baseline.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 999})
+    adapter._state.set_route(7, "default")
+
+    try:
+        # Cursor file doesn't exist yet → reads as 0.
+        assert adapter._load_last_id() == 0
+
+        await adapter._handle_inbound({
+            "assistant_id": 7,
+            "user_id": "u",
+            "chat_id": 42,
+            "message_id": 500,
+            "text": "/new",
+            "files": [],
+            "message_type": "slash_command",
+            "command_name": "new",
+            "command_args": "",
+        })
+
+        # The cursor MUST advance, otherwise the REST poll's
+        # since_message_id stays at 0 and re-fetches /new on every
+        # 5s tick → infinite "Conversation reset" loop.
+        assert adapter._load_last_id() == 500
+    finally:
+        await adapter.disconnect()
+
+
 async def test_camelcase_files_inbound():
     """Inbound camelCase with attachments. files[] payload elements are
     NOT touched by _normalize_inbound_payload (file entries use their own

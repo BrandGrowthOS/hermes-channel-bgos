@@ -4,6 +4,8 @@ BGOS channel adapter for [Nous Research's Hermes agent](https://github.com/NousR
 
 **Status:** Phase 1 — running in production. Message round-trips work end-to-end. Approvals render as 4-button inline bubbles. A handful of gotchas documented below.
 
+**v0.5.7 (2026-05-15) — Hotfix: bridge-local cursor advance.** Bridge-local slash commands (`/new`, `/status`, `/retry`, `/resume`, `/help`) were short-circuiting before the inbound cursor was persisted. The 5-second REST poll's `since_message_id` therefore stayed pinned to a stale value and kept re-fetching the same command from `/api/v1/integrations/inbound`, re-dispatching it on every tick. Caught live as 50+ "Conversation reset" acks for a single `/new`. Fix: `_save_last_id` is now called on every accepted inbound (including bridge-local) before any branch returns. If you're caught in a live loop, upgrade to 0.5.7 and restart Hermes; the cursor advances on the first tick after restart, so the loop stops within ~5s.
+
 **v0.5.0 (2026-05-12) — Telegram-parity round.** This release closes most of the UX gap between BGOS and the Telegram channel. No fork-patch changes required.
 
 - **Gateway-driven tool-progress UI** — emoji-prefixed tool bubbles (🔍 search, 🧠 memory, 🔧 patch, 💻 shell, ⚡…), edit-in-place streaming responses, typing indicators between long tool calls, and intermediate-streaming-preview cleanup all flow automatically because the adapter now overrides three optional `BasePlatformAdapter` methods (`edit_message`, `delete_message`, `send_typing`) — the gates Hermes's gateway probes to decide whether to drive these features. Edit calls are throttled to 1 per 1.5s per chat to mirror the Telegram pattern.
