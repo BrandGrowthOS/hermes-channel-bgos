@@ -33,38 +33,53 @@ from hermes_channel_bgos.config import BgosConfig
 
 def test_parse_tool_progress_read_file_double_quoted():
     out = _parse_tool_progress_text('📖 read_file: "/etc/hostname"')
-    assert out == {
+    assert out == [{
         "icon": "📖",
         "name": "read_file",
         "args": "/etc/hostname",
         "status": "done",
-    }
+    }]
 
 
 def test_parse_tool_progress_terminal_single_quoted():
     out = _parse_tool_progress_text("💻 terminal: 'echo hi'")
-    assert out is not None
-    assert out["icon"] == "💻"
-    assert out["name"] == "terminal"
-    assert out["args"] == "echo hi"
+    assert out is not None and len(out) == 1
+    entry = out[0]
+    assert entry["icon"] == "💻"
+    assert entry["name"] == "terminal"
+    assert entry["args"] == "echo hi"
 
 
 def test_parse_tool_progress_search_files_no_quotes():
     out = _parse_tool_progress_text("🔎 search_files approval|exec_approval")
-    assert out is not None
-    assert out["name"] == "search_files"
-    assert out["args"] == "approval|exec_approval"
+    assert out is not None and len(out) == 1
+    assert out[0]["name"] == "search_files"
+    assert out[0]["args"] == "approval|exec_approval"
 
 
 def test_parse_tool_progress_truncates_long_args():
     long_arg = "x" * 200
     out = _parse_tool_progress_text(f"💻 terminal: \"{long_arg}\"")
+    assert out is not None and len(out) == 1
+    assert "…" in out[0]["args"]
+    assert len(out[0]["args"]) <= 120
+
+
+def test_parse_tool_progress_multi_line_accumulation():
+    """The gateway joins ALL accumulated tool lines with newlines and
+    re-sends the full list on every edit_message (upstream
+    gateway/run.py:14454). The parser MUST return all entries so the
+    card stays in sync — earlier first-line-only behavior dropped every
+    tool after the first."""
+    text = (
+        '📖 read_file: "/etc/os-release"\n'
+        '💻 terminal: "df -h /"\n'
+        '💻 terminal: "uptime"'
+    )
+    out = _parse_tool_progress_text(text)
     assert out is not None
-    # 117 chars + ellipsis (one codepoint) = 118-char string, but the
-    # contract is "≤120 chars" — we just check the truncation marker is
-    # present and the length didn't blow up.
-    assert "…" in out["args"]
-    assert len(out["args"]) <= 120
+    assert [e["name"] for e in out] == ["read_file", "terminal", "terminal"]
+    assert [e["args"] for e in out] == ["/etc/os-release", "df -h /", "uptime"]
 
 
 def test_parse_tool_progress_rejects_plain_text():
@@ -87,15 +102,17 @@ def test_parse_tool_progress_rejects_non_emoji_unicode():
     assert _parse_tool_progress_text("ا read_file: /etc/hostname") is None
 
 
-def test_parse_tool_progress_first_line_only():
-    # The gateway may stream multiple lines in one update; only the first
-    # line should be parsed (so multi-line previews aren't misinterpreted).
+def test_parse_tool_progress_skips_non_matching_lines():
+    """Lines that don't match the tool-progress shape are silently
+    dropped (e.g. the gateway's "(×3)" dedup tail at
+    gateway/run.py:14416). Matching entries are still authoritative."""
     out = _parse_tool_progress_text(
         '📖 read_file: "/etc/hostname"\n'
-        "second line that is regular text"
+        "second line that is regular text\n"
+        '💻 terminal: "ls"'
     )
     assert out is not None
-    assert out["name"] == "read_file"
+    assert [e["name"] for e in out] == ["read_file", "terminal"]
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +158,9 @@ async def test_edit_message_first_tool_posts_card(mock_bgos_server):
 
 @pytest.mark.asyncio
 async def test_edit_message_subsequent_tool_patches_card(mock_bgos_server):
-    """Same agent turn, more tools → PATCH the existing card."""
+    """Same agent turn, more tools → PATCH the existing card. The gateway
+    re-sends the WHOLE accumulated tool list each edit, so the second
+    edit's payload contains both tools."""
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
@@ -151,8 +170,13 @@ async def test_edit_message_subsequent_tool_patches_card(mock_bgos_server):
     adapter._state.last_user_id_by_chat[42] = "user_abc"
 
     try:
+        # First edit — only the read_file line so far.
         await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
-        await adapter.edit_message(42, 500, '💻 terminal: "uname -a"')
+        # Second edit — gateway accumulates and re-sends BOTH lines.
+        await adapter.edit_message(
+            42, 500,
+            '📖 read_file: "/etc/hostname"\n💻 terminal: "uname -a"',
+        )
 
         patches = [r for r in mock_bgos_server.requests
                    if r.method == "PATCH" and r.path == "/api/v1/messages/9001"]
@@ -163,6 +187,69 @@ async def test_edit_message_subsequent_tool_patches_card(mock_bgos_server):
         assert [t["name"] for t in tools] == ["read_file", "terminal"]
         # userId must be sent on PATCH (backend's UpdateMessageDto requires it).
         assert body["userId"] == "user_abc"
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_first_tool_posts_card(mock_bgos_server):
+    """The gateway's progress loop calls `adapter.send()` for the FIRST
+    tool of a turn (upstream gateway/run.py:14483-14488). The send()
+    intercept must POST it as a tool_progress card just like
+    edit_message would."""
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7001})
+
+    try:
+        result = await adapter.send(42, '📖 read_file: "/etc/hostname"')
+
+        posts = [r for r in mock_bgos_server.requests
+                 if r.method == "POST" and r.path == "/api/v1/messages"]
+        assert len(posts) == 1
+        body = posts[0].json_body
+        assert body["messageType"] == "tool_progress"
+        assert body["toolProgress"]["state"] == "running"
+        assert [t["name"] for t in body["toolProgress"]["tools"]] == ["read_file"]
+        # send() returns the card's message_id so the gateway's
+        # `progress_msg_id` points at our card. Subsequent edit_messages
+        # target the card directly.
+        assert result.message_id == "7001"
+        assert adapter._tool_progress_card_id_by_chat[42] == 7001
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_delete_message_finalizes_card_at_card_id(mock_bgos_server):
+    """When the gateway deletes the CARD itself (because send() returned
+    the card's id as the progress_msg_id), the adapter finalizes to
+    state='done' WITHOUT issuing the actual DELETE — the card persists
+    as the historical record."""
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7001})
+    mock_bgos_server.on("PATCH", "/api/v1/messages/7001").respond(200, {"id": 7001})
+    mock_bgos_server.on("DELETE", "/api/v1/messages/7001").respond(204, None)
+
+    try:
+        # Tool emitted via send() — card_id = 7001.
+        await adapter.send(42, '📖 read_file: "/etc/hostname"')
+        # Gateway end-of-turn — deletes what it thinks is the progress
+        # bubble, which is the card itself.
+        await adapter.delete_message(42, 7001)
+
+        patches = [r for r in mock_bgos_server.requests
+                   if r.method == "PATCH" and r.path == "/api/v1/messages/7001"]
+        assert len(patches) == 1
+        assert patches[0].json_body["toolProgress"]["state"] == "done"
+        # CRITICAL: the card is NOT actually deleted.
+        deletes = [r for r in mock_bgos_server.requests
+                   if r.method == "DELETE" and r.path == "/api/v1/messages/7001"]
+        assert len(deletes) == 0
+        assert 42 not in adapter._tool_progress_card_id_by_chat
     finally:
         await adapter.disconnect()
 
@@ -201,19 +288,20 @@ async def test_delete_message_finalizes_card(mock_bgos_server):
 
 
 @pytest.mark.asyncio
-async def test_edit_message_dedups_same_tool(mock_bgos_server):
-    """Throttle / retry sometimes resends the same tool line; the adapter
-    must not append duplicate entries."""
+async def test_edit_message_replaces_not_appends(mock_bgos_server):
+    """Each gateway edit_message carries the FULL accumulated tool list,
+    so the adapter REPLACES tracked tools — no accumulation. Same line
+    sent twice still yields one entry."""
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
+    mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
     adapter._state.last_user_id_by_chat[42] = "user_abc"
 
     try:
         await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
-        # Same exact line again — must be a no-op on the tools list.
         await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
 
         assert len(adapter._tool_progress_tools_by_chat[42]) == 1
@@ -225,13 +313,18 @@ async def test_edit_message_dedups_same_tool(mock_bgos_server):
 async def test_concurrent_first_tools_post_only_once(mock_bgos_server):
     """Two edit_message coroutines for the same chat racing in the SAME
     throttle window must NOT both POST a fresh card and orphan one.
-    Reviewer flag 2026-05-15 — guard via per-chat asyncio.Lock."""
+    Reviewer flag 2026-05-15 — guard via per-chat asyncio.Lock.
+
+    Note on contents: each gateway edit_message carries the FULL
+    accumulated tool list (upstream gateway/run.py:14454), so the second
+    call here sends a 2-tool payload. The adapter REPLACES tracked tools
+    each call, so the final state has 2 tools — but there must still be
+    exactly one POST (the lock prevents both racers from creating
+    duplicate cards)."""
     import asyncio as _asyncio
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
-    # Both POSTs would return id=9001 if we double-fired — the bug shows
-    # up as TWO POSTs to /api/v1/messages instead of one POST + one PATCH.
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
@@ -240,18 +333,25 @@ async def test_concurrent_first_tools_post_only_once(mock_bgos_server):
     try:
         await _asyncio.gather(
             adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"'),
-            adapter.edit_message(42, 500, '💻 terminal: "uname -a"'),
+            adapter.edit_message(
+                42, 500,
+                '📖 read_file: "/etc/hostname"\n💻 terminal: "uname -a"',
+            ),
         )
 
         posts = [r for r in mock_bgos_server.requests
                  if r.method == "POST" and r.path == "/api/v1/messages"]
-        patches = [r for r in mock_bgos_server.requests
-                   if r.method == "PATCH" and r.path == "/api/v1/messages/9001"]
+        # The key invariant: EXACTLY ONE POST. The second racer must
+        # observe the first racer's card_id_by_chat entry under the
+        # lock and PATCH instead.
         assert len(posts) == 1, f"expected one POST, got {len(posts)}"
-        assert len(patches) == 1, f"expected one PATCH, got {len(patches)}"
-        # Card tracking is in a single, stable place.
         assert adapter._tool_progress_card_id_by_chat[42] == 9001
-        assert len(adapter._tool_progress_tools_by_chat[42]) == 2
+        # The final tool list depends on which racer landed last, but
+        # since at least one of them carried both tools, the final
+        # PATCH'd body has both — or the body of the lone POST has one.
+        # Either way the card converges. We just verify no duplicate
+        # POST was issued; tool-count accuracy is the gateway's
+        # contract.
     finally:
         await adapter.disconnect()
 

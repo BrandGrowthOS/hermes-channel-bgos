@@ -353,37 +353,82 @@ _TOOL_PROGRESS_RE = re.compile(
 )
 
 
-def _parse_tool_progress_text(text: str | None) -> dict | None:
+def _parse_tool_progress_line(line: str) -> dict | None:
     """Parse a single line of gateway tool-progress text into a structured
-    entry: {icon, name, args, status='done'} or None if the input doesn't
+    entry: {icon, name, args, status='done'} or None if the line doesn't
     match the expected emoji-prefixed shape.
 
-    `args` is stripped of surrounding quotes and truncated to 120 chars
-    (backend's ToolProgressEntryDto.args MaxLength). Status defaults to
-    'done' — the gateway's edit_message stream sends one tool-progress
-    line per completed tool call, so by the time the adapter sees the
-    text the call is already finished. The CARD's outer state is what
-    distinguishes "running with N tools so far" from "all done".
+    Status defaults to 'done' — each tool-progress line the gateway emits
+    represents a completed tool call. The CARD's outer state distinguishes
+    "still running with N tools so far" from "all tools complete".
     """
-    if not text:
+    line = line.strip()
+    if not line:
         return None
-    # Only consider the FIRST line — the gateway may stream multiple tool
-    # bubbles in one update, but each line maps to one tool call. The
-    # adapter's edit_message is called once per change anyway.
-    first_line = text.strip().splitlines()[0] if text.strip() else ""
-    m = _TOOL_PROGRESS_RE.match(first_line)
+    m = _TOOL_PROGRESS_RE.match(line)
     if not m:
         return None
     icon = m.group("icon").strip()
     name = m.group("name").strip()
     args = (m.group("args") or "").strip()
-    # Strip a single layer of surrounding quotes (single or double) — the
-    # gateway double-quotes args for readability.
     if len(args) >= 2 and args[0] == args[-1] and args[0] in ('"', "'"):
         args = args[1:-1]
     if len(args) > 120:
         args = args[:117] + "…"
     return {"icon": icon, "name": name, "args": args, "status": "done"}
+
+
+def _parse_tool_progress_text(text: str | None) -> list[dict] | None:
+    """Parse the gateway's tool-progress content into the full list of
+    accumulated tool entries, or None when no line looks like a tool-
+    progress emit.
+
+    The gateway accumulates tool lines into one bubble (see upstream
+    gateway/run.py:14454 — `full_text = "\\n".join(progress_lines)`),
+    so subsequent edit_message calls deliver the WHOLE list each time.
+    We mirror that semantic: parse every line, return the list, and the
+    handler REPLACES the tracked tools rather than appending. That way
+    we never drop entries on multi-line edits and we don't need dedup.
+
+    Returns:
+      - None if `text` is empty, or no non-blank line matches the tool-
+        progress shape (caller falls back to the regular streaming path).
+      - A list of {icon, name, args, status} dicts when at least one line
+        parses. Lines that DON'T parse are silently dropped — the gateway
+        sometimes appends `(×N)` dedup tails (gateway/run.py:14416), and
+        those won't match our regex, but the previous tool entries we
+        captured are still authoritative.
+    """
+    if not text:
+        return None
+    entries: list[dict] = []
+    for raw_line in text.splitlines():
+        parsed = _parse_tool_progress_line(raw_line)
+        if parsed is not None:
+            entries.append(parsed)
+    if not entries:
+        return None
+    return entries
+
+
+def _build_tool_progress_summary(tools: list[dict], *, done: bool) -> str:
+    """One-line summary text used as the card's `text` field. Legacy
+    clients (no tool_progress rendering) display this; structured clients
+    show the card body instead.
+    """
+    count = len(tools)
+    if count == 0:
+        return "Working…" if not done else "No tools used"
+    names = [t.get("name", "?") for t in tools][:4]
+    verb = (
+        f"Used {count} tool{'s' if count != 1 else ''}"
+        if done
+        else f"Using {count} tool{'s' if count != 1 else ''}"
+    )
+    summary = f"{verb} · {', '.join(names)}"
+    if count > 4:
+        summary += f", +{count - 4} more"
+    return summary
 
 
 def _send_result(*, message_id: int | None) -> SendResult:
@@ -873,6 +918,25 @@ class BGOSAdapter(BasePlatformAdapter):
         cleaned_text, options, render_mode = _parse_buttons_block(
             self.format_message(content)
         )
+
+        # tool_progress intercept on the SEND path too — the gateway's
+        # progress loop calls `adapter.send()` for the FIRST tool of a
+        # turn (no prior progress_msg_id), then `edit_message` for
+        # subsequent tools (upstream gateway/run.py:14483-14488). Without
+        # this hook we'd POST the first tool as a standard chat bubble
+        # and ONLY route the later ones into a card, which would look
+        # broken.
+        # Skip when buttons are present — those would be meaningless on
+        # a tool_progress card. Spec:
+        #   docs/superpowers/specs/2026-05-15-tool-progress-message-type-design.md
+        parsed_tools = (
+            _parse_tool_progress_text(cleaned_text) if not options else None
+        )
+        if parsed_tools is not None:
+            return await self._handle_tool_progress_edit(
+                int(chat_id), 0, parsed_tools, None,
+            )
+
         chunks = self._chunk_text(cleaned_text)
         last_result: SendResult | None = None
         last_message_id: int | None = None
@@ -992,12 +1056,15 @@ class BGOSAdapter(BasePlatformAdapter):
         # preview with emoji-prefixed tool text, route to a separate
         # tool_progress card so the visual treatment matches what users
         # expect (tinted card with pulsing-→-hollow dot) instead of looking
-        # like a regular agent message bubble.
+        # like a regular agent message bubble. The gateway joins ALL
+        # accumulated tool lines with `\n` and re-sends them every edit
+        # (upstream gateway/run.py:14454), so we parse the full list and
+        # REPLACE the tracked tools each time.
         # Spec: docs/superpowers/specs/2026-05-15-tool-progress-message-type-design.md
-        parsed_tool = _parse_tool_progress_text(cleaned_text)
-        if parsed_tool is not None:
+        parsed_tools = _parse_tool_progress_text(cleaned_text)
+        if parsed_tools is not None:
             return await self._handle_tool_progress_edit(
-                chat_key, mid_int, parsed_tool, user_id,
+                chat_key, mid_int, parsed_tools, user_id,
             )
         now = asyncio.get_running_loop().time()
         last = self._last_edit_at.get(chat_key, 0.0)
@@ -1062,76 +1129,55 @@ class BGOSAdapter(BasePlatformAdapter):
         self,
         chat_key: int,
         preview_mid: int,
-        parsed_tool: dict,
+        parsed_tools: list[dict],
         user_id: str | None,
     ) -> SendResult:
-        """The gateway is editing the streaming-preview message with a
-        tool-progress line (e.g. "📖 read_file: /etc/hostname"). Absorb
-        the edit and route it to a dedicated tool_progress card instead
-        — the streaming preview stays unchanged, and the user sees the
-        tool activity in a tinted card with a pulsing dot.
+        """The gateway is editing the streaming-preview message with
+        tool-progress content (one or more emoji-prefixed lines). Absorb
+        the edit and route it to a dedicated tool_progress card instead.
 
-        First call per agent turn: POST a new tool_progress message
-        (messageType="tool_progress", state="running", tools=[parsed_tool]).
-        Subsequent calls: PATCH the same card with an extended tools list.
+        The gateway accumulates ALL tool lines and re-sends the full
+        list every edit (upstream gateway/run.py:14454,
+        `full_text = "\\n".join(progress_lines)`), so the parsed list IS
+        the new authoritative state — we REPLACE the tracked tools each
+        call rather than appending.
+
+        First call per agent turn: POST a new tool_progress message.
+        Subsequent calls: PATCH the same card with the refreshed list.
 
         Each preview_mid is recorded against this chat so delete_message
         can finalize the card to state="done" when the gateway cleans up
         the preview at end of turn.
 
         Returns a placeholder SendResult so the gateway treats the edit as
-        successful (otherwise it'd fall back to send()). On HTTP failure
-        we log and return success anyway — tool_progress is opportunistic
-        UI polish; we never want to break the agent's reply path over it.
+        successful. On HTTP failure we log and return success anyway —
+        tool_progress is opportunistic UI polish; we never want to break
+        the agent's reply path over it.
         """
-        # Serialize all card mutations for one chat — the gateway can call
-        # edit_message concurrently (different tool calls within the same
-        # 1.5s throttle window), and without this lock two coroutines
-        # would both observe `card_id_by_chat is None`, both POST a fresh
-        # card, and one would be orphaned (state=running forever).
+        # Serialize all card mutations for one chat — the gateway can
+        # call into the adapter concurrently (the send() path for the
+        # first tool, then edit_message for subsequent tools, sometimes
+        # racing within the same 1.5s throttle window).
         lock = self._tool_progress_lock_by_chat.setdefault(
             chat_key, asyncio.Lock(),
         )
         async with lock:
-            # Dedup — if the gateway sends the same tool line twice in
-            # quick succession (throttle retry, regex collapse, etc.),
-            # don't double-append. Compare by (icon, name, args).
-            tools_list = self._tool_progress_tools_by_chat.setdefault(chat_key, [])
-            if tools_list:
-                last = tools_list[-1]
-                if (
-                    last.get("icon") == parsed_tool["icon"]
-                    and last.get("name") == parsed_tool["name"]
-                    and last.get("args") == parsed_tool["args"]
-                ):
-                    # Same tool we just recorded — no-op, but still register
-                    # the preview mapping so delete_message finalizes the card.
-                    self._tool_progress_preview_to_chat[preview_mid] = chat_key
-                    return _send_result(message_id=preview_mid)
-
-            tools_list.append(parsed_tool)
+            # Replace, don't accumulate — the gateway's content is the
+            # full accumulated list.
+            self._tool_progress_tools_by_chat[chat_key] = list(parsed_tools)
             # Map the streaming-preview message_id → chat. delete_message
             # uses this to know "the agent's turn is wrapping up; flip my
-            # card to done".
-            self._tool_progress_preview_to_chat[preview_mid] = chat_key
+            # card to done". preview_mid=0 is used by send()-path callers
+            # (no preview exists yet) and we skip the mapping for that.
+            if preview_mid > 0:
+                self._tool_progress_preview_to_chat[preview_mid] = chat_key
 
-            # Build the wire payload. Truncated summary lands in `text` so
-            # any legacy client (no tool_progress rendering) still sees
-            # something readable.
-            names = [t["name"] for t in tools_list][:4]
-            verb = "Working…" if len(tools_list) == 0 else (
-                f"Using {len(tools_list)} tool{'s' if len(tools_list) != 1 else ''}"
-            )
-            summary = f"{verb} · {', '.join(names)}"
-            if len(tools_list) > 4:
-                summary += f", +{len(tools_list) - 4} more"
-
-            card_payload = {"state": "running", "tools": tools_list}
+            summary = _build_tool_progress_summary(parsed_tools, done=False)
+            card_payload = {"state": "running", "tools": parsed_tools}
             existing_card_id = self._tool_progress_card_id_by_chat.get(chat_key)
 
             try:
                 if existing_card_id is None:
-                    # First tool for this turn — POST a new card.
                     resp = await self._api.post_message(
                         chat_id=chat_key,
                         text=summary,
@@ -1142,7 +1188,6 @@ class BGOSAdapter(BasePlatformAdapter):
                     if isinstance(new_id_val, int):
                         self._tool_progress_card_id_by_chat[chat_key] = new_id_val
                 else:
-                    # Same turn, more tools — PATCH the existing card.
                     await self._api.patch_message(
                         existing_card_id,
                         text=summary,
@@ -1150,10 +1195,6 @@ class BGOSAdapter(BasePlatformAdapter):
                         tool_progress=card_payload,
                     )
             except BgosApiError as exc:
-                # Don't break the agent's reply path over UI polish. If
-                # the backend rejects (older version without tool_progress
-                # support, 5xx, etc.), drop the card tracking so subsequent
-                # edits don't keep retrying against a half-built state.
                 log.warning(
                     "tool_progress card emit failed chat=%d status=%s body=%s; "
                     "falling back to plain streaming edits",
@@ -1161,7 +1202,8 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
                 self._tool_progress_card_id_by_chat.pop(chat_key, None)
                 self._tool_progress_tools_by_chat.pop(chat_key, None)
-                self._tool_progress_preview_to_chat.pop(preview_mid, None)
+                if preview_mid > 0:
+                    self._tool_progress_preview_to_chat.pop(preview_mid, None)
             except Exception:
                 log.warning(
                     "tool_progress card emit failed chat=%d (unexpected); "
@@ -1170,13 +1212,20 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
                 self._tool_progress_card_id_by_chat.pop(chat_key, None)
                 self._tool_progress_tools_by_chat.pop(chat_key, None)
-                self._tool_progress_preview_to_chat.pop(preview_mid, None)
+                if preview_mid > 0:
+                    self._tool_progress_preview_to_chat.pop(preview_mid, None)
 
-        # Return success so the gateway doesn't fall back to fresh send().
-        # We intentionally don't touch the streaming preview itself — the
-        # tool emoji content is now in the card, and the preview stays
-        # whatever the gateway last set it to (typically "Thinking…").
-        return _send_result(message_id=preview_mid)
+        # Return the right message id to the gateway so its
+        # `progress_msg_id` tracking aligns with what we did:
+        #   - edit_message path (preview_mid > 0): echo the preview id;
+        #     the gateway already knows it.
+        #   - send() path (preview_mid == 0): return the CARD id we
+        #     just created/PATCHed, so the gateway treats it as the
+        #     progress bubble and routes subsequent edits/deletes to it.
+        if preview_mid > 0:
+            return _send_result(message_id=preview_mid)
+        card_id = self._tool_progress_card_id_by_chat.get(chat_key)
+        return _send_result(message_id=card_id)
 
     async def _finalize_tool_progress_card(self, chat_key: int) -> None:
         """Transition the active tool_progress card for this chat from
@@ -1196,13 +1245,7 @@ class BGOSAdapter(BasePlatformAdapter):
         for entry in tools_list:
             if entry.get("status") == "running":
                 entry["status"] = "done"
-        # Final summary text — uses the "Used N tools" past-tense phrasing.
-        names = [t["name"] for t in tools_list][:4]
-        summary = f"Used {len(tools_list)} tool{'s' if len(tools_list) != 1 else ''}"
-        if names:
-            summary += f" · {', '.join(names)}"
-            if len(tools_list) > 4:
-                summary += f", +{len(tools_list) - 4} more"
+        summary = _build_tool_progress_summary(tools_list, done=True)
         user_id = self._state.last_user_id_by_chat.get(chat_key)
         try:
             await self._api.patch_message(
@@ -1269,9 +1312,28 @@ class BGOSAdapter(BasePlatformAdapter):
         backend incidents surface.
         """
         mid_int = int(message_id)
-        # End-of-turn signal for the tool_progress card. We pop first so
-        # even if the finalize PATCH fails, the next turn starts clean.
+        # End-of-turn signal for the tool_progress card. Two cases:
+        #
+        # Case A — `mid_int` is the gateway's streaming preview message,
+        # which we recorded against the active card when intercepting an
+        # edit_message. Finalize the card to state="done" and continue
+        # with the actual DELETE (the preview is real and the gateway
+        # owns it).
+        #
+        # Case B — `mid_int` IS the card itself (which happens when the
+        # adapter's send() intercept absorbed the very first tool: the
+        # card_id we returned to the gateway is what it now wants to
+        # delete). Finalize the card to state="done" and DO NOT delete —
+        # the card is the historical record we want to keep.
         finalize_chat = self._tool_progress_preview_to_chat.pop(mid_int, None)
+        card_chat = None
+        for chat_id_iter, card_id in list(self._tool_progress_card_id_by_chat.items()):
+            if card_id == mid_int:
+                card_chat = chat_id_iter
+                break
+        if card_chat is not None:
+            await self._finalize_tool_progress_card(card_chat)
+            return True
         if finalize_chat is not None:
             await self._finalize_tool_progress_card(finalize_chat)
         try:
