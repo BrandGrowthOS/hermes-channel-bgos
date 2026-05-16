@@ -953,6 +953,26 @@ class BGOSAdapter(BasePlatformAdapter):
                 int(chat_id), 0, parsed_tools, None,
             )
 
+        # End-of-turn signal: this send() is delivering a plain agent reply
+        # (no tool markers). If we still have an open tool_progress card for
+        # this chat, the gateway never called delete_message on it (some
+        # gateway flows skip the preview-cleanup hook entirely — observed
+        # live in chat 830 where every batch in a turn re-PATCHed msg 7462
+        # because the cache never cleared). Finalize the card now so the
+        # next batch in the next turn starts a fresh one. No-op when there
+        # is no active card.
+        try:
+            await self._finalize_tool_progress_card(int(chat_id))
+        except Exception:
+            # Finalization is best-effort — a failure here must not block
+            # the actual agent reply. The cache entry is popped before the
+            # PATCH attempt inside the finalizer, so even on error the
+            # NEXT turn starts cleanly.
+            log.warning(
+                "tool_progress pre-send finalize failed chat=%s",
+                chat_id, exc_info=True,
+            )
+
         chunks = self._chunk_text(cleaned_text)
         last_result: SendResult | None = None
         last_message_id: int | None = None
