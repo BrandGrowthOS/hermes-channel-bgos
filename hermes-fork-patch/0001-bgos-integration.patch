@@ -80,6 +80,22 @@ index 3a6ec244..dcd5d165 100644
 +## ask_user_input modal (NOT YET WIRED)
 +BGOS also supports a full-screen multi-question modal (`ask_user_input` in the n8n BGOSAction node). Hermes-side support is scheduled but NOT YET shipped — for multi-question flows today, use sequential inline-button messages instead.
 +
++## Reply-quote (Telegram-style quoted replies)
++You can anchor a reply to a specific earlier message by embedding `[[BGOS_REPLY_TO]]<message_id>[[/BGOS_REPLY_TO]]` anywhere in your reply (single line). The adapter extracts the id, strips the marker from the visible text, and forwards it as `replyToId` on the backend POST. BGOS then renders a slim Telegram-style quoted header inside the new bubble — tap → jumps the user back to the source message. The snapshot is frozen at write time; future edits/deletes of the source don't change the rendered preview.
++
++Use this when:
++- Answering a question from N messages ago, where the user would otherwise have to scroll up to figure out what you're talking about.
++- Following up on your own past commitment ("you said you'd watch X — it just happened").
++- A cron/external trigger fires and you want to surface a notification tied to a specific earlier conversation point.
++- Correcting or amending a specific earlier statement of yours.
++
++Do NOT quote when:
++- You're replying to the immediately preceding user turn — alignment already implies the subject, the quote is noise.
++- The chat is fresh (≤2 turns) and there's no ambiguity.
++- You're just acknowledging ("Got it" / "On it") — nothing to anchor to.
++
++Same-chat constraint: the source message must be in the SAME BGOS chat as the reply. The backend rejects cross-chat references with a 400. To get a stable `message_id` to target, use the `id` field on the inbound MessageEvent — that's the BGOS message id.
++
 +## Conversation context
 +Each BGOS chat maps to a single Hermes conversation. DMs only — no group threads, no forum topics. The user can wipe context via `/new`. Typing indicators, stickers, reactions, and message editing by the user are not supported.""",
  }

@@ -198,13 +198,44 @@ Channel-agnostic by design — Hermes streams via PATCH edits as the gateway pro
 
 **Do NOT use for:** the agent's text reply itself (use `standard`), buttons (use `standard` + `options[]`), approvals (use `approval_request`).
 
-### 9. Conversation / chat model
+### 9. Reply-quote (Telegram-style quoted replies)
+
+When the agent wants to anchor a message to a specific earlier one — answering a stale question, following up on a past commitment, surfacing a proactive nudge tied to an old thread — it sets `replyToId` to the source message id. BGOS stores a frozen plain-text snapshot of the source's text + sender alongside the new message and renders a tappable quoted header inside the receiving bubble. Tapping the header scrolls to the source and briefly flashes it.
+
+**Wire (extends `CreateMessageDto` / `MessageWrapperDto`):**
+```ts
+{
+  // ...all existing fields
+  replyToId: number   // optional; source message id (same chat)
+}
+```
+
+**Server behavior:**
+- Same-chat constraint enforced — 400 if `replyToId` references a message in a different chat.
+- Snapshot computed server-side at write time: plain-text-stripped source text (≤280 chars) + source sender. Frozen forever — source edits/deletes do not change the snapshot.
+- `ON DELETE SET NULL` on the FK — deleting the source nullifies `replyToId` but the snapshot stays so the preview keeps rendering. Tap is a no-op with toast "Original message deleted".
+- Snapshot for media-only sources: `"🎤 Voice message"` (audio) / `"📎 <filename>"` (file).
+
+**When to use (agents):**
+- ✅ Answering a question from N messages ago when the user would otherwise have to scroll up to figure out the context.
+- ✅ Following up on your own past commitment ("you said you'd watch X — it just happened").
+- ✅ Proactive notification triggered by cron / external webhook tied to an earlier specific message.
+- ✅ Correcting or amending a specific earlier statement of yours.
+
+**When NOT to use:**
+- ❌ The reply addresses the immediately preceding user message — the quote is noise, alignment already implies it.
+- ❌ The chat is fresh (≤2 turns) and there's no ambiguity.
+- ❌ Pure acknowledgements ("Got it" / "On it") — nothing to anchor to.
+
+Per-plugin wire syntax is in the cheat-sheet below. Spec: `BGOS/docs/superpowers/specs/2026-05-19-reply-quote-design.md`.
+
+### 10. Conversation / chat model
 
 - **DM-only** — no group chats, no forum topics, no threads.
 - One BGOS chat maps to one agent conversation.
 - The user can reset context via `/new` (bridge-local).
 - Chat title is user-editable; agents can rename via `PATCH /chats/:id/title` (plugin-specific).
-- **Not supported:** user-side message editing, reactions, stickers, typing indicators on the user side, `reply_to` message threading (noted in design spec but not shipped; do not rely on it).
+- **Not supported:** user-side message editing, reactions, stickers, typing indicators on the user side. (Quoted-reply threading is supported — see §9.)
 
 ---
 
@@ -215,9 +246,11 @@ How the agent connected through each plugin actually invokes these capabilities.
 ### Claude Code MCP plugin (`bgos-claude-plugin`, private repo)
 
 MCP server with typed tools:
-- `reply` — text + files + inline buttons in one call. Fields: `chat_id`, `text`, `files[]`, `buttons[]`, `render_mode: "inline" | "modal"`.
+- `reply` — text + files + inline buttons in one call. Fields: `chat_id`, `text`, `files[]`, `buttons[]`, `render_mode: "inline" | "modal"`, `reply_to_message_id` (optional, capability §9).
 - `ask_user_input` — blocking modal. Fields: `chat_id`, `questions[]`.
 - `edit_message`, `rename_chat` — message ops.
+
+**Reply-quote (§9):** set `reply_to_message_id` on `reply` when you're anchoring to a specific older message. The MCP server forwards it as `replyToId` in the POST body; the backend computes + persists the frozen snapshot.
 
 Agent learns this via the MCP server's `instructions` + per-tool `description` fields. Canonical source: `bgos-claude-plugin/server.ts` lines ~244–337 + tool-registration block.
 
@@ -232,6 +265,7 @@ Hermes agents learn about BGOS via a `PLATFORM_HINTS` entry in `agent/prompt_bui
 - **Files / media** — include `MEDIA:/absolute/path/to/file` lines in the reply. Handled natively by the adapter's `send_image/voice/video/document/animation` overrides.
 - **Approvals** — agent doesn't initiate; Hermes's approvals system calls `adapter.send_exec_approval` when a sensitive tool fires. Rendered as the 4-button bubble.
 - **Inline buttons (non-approval)** — embed a `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` block in the reply. Lines inside the block are `Label | value` (pipe-separated), one per line, max 6. Adapter extracts the block and posts `options: [{text, callbackData}]` with `renderMode: 'inline'`. When the user taps a chip, the adapter receives `inbound_click` on the `assistant:<id>` WS room and synthesizes a user `MessageEvent` with `text = <clicked button label>` — the agent sees the tap as a normal user reply.
+- **Reply-quote (§9)** — embed `[[BGOS_REPLY_TO]]<message_id>[[/BGOS_REPLY_TO]]` anywhere in the reply (single line). Adapter extracts the id, strips the marker from the text before posting, and forwards as `replyToId` on the backend POST. Use when answering a stale question or anchoring a proactive nudge to a specific earlier message.
 - **`ask_user_input` modal** — **NOT YET WIRED.** Planned via `[[BGOS_ASK]]...[[/BGOS_ASK]]` marker. Until shipped, use sequential inline-button messages.
 - **Slash commands from agent to user** — push via `PUT /integrations/assistants/:id/commands` (adapter's `sync_commands_for` method).
 - **Home-channel cron** — set `BGOS_HOME_CHANNEL` env var on the Hermes server. Crons scheduled with `deliver="bgos"` route to that chat id.
@@ -263,10 +297,12 @@ All these unlock because the adapter overrides the relevant `BasePlatformAdapter
 ### OpenClaw (`openclaw-channel-bgos`, BGOS monorepo)
 
 Standalone daemon with method-based API:
-- `BgosOutbound.sendText({assistantId, chatId, text})` — plain.
-- `BgosOutbound.sendButtons({assistantId, chatId, text, options})` — inline options.
-- `BgosOutbound.sendApprovalRequest({assistantId, chatId, text, meta, options?})` — 4-button.
-- `BgosOutbound.sendAgentError({assistantId, chatId, reason})` — styled error bubble.
+- `BgosOutbound.sendText({assistantId, chatId, text, replyToMessageId?})` — plain.
+- `BgosOutbound.sendButtons({assistantId, chatId, text, options, replyToMessageId?})` — inline options.
+- `BgosOutbound.sendApprovalRequest({assistantId, chatId, text, meta, options?, replyToMessageId?})` — 4-button.
+- `BgosOutbound.sendAgentError({assistantId, chatId, reason, replyToMessageId?})` — styled error bubble.
+
+**Reply-quote (§9):** every send method accepts `replyToMessageId` and forwards it as `replyToId` on the backend POST. Use when anchoring to a specific earlier message — see §9 for when-to-use rules.
 
 Today OpenClaw does NOT expose an agent-facing instruction document — the agent is assumed to know what BGOS supports from its own system prompt. **This canonical doc should be surfaced to OpenClaw agents** (either by injecting a summary into their system prompt at connect time, or by exposing a `bgos-capabilities` text resource the agent can query). Implementation TBD.
 

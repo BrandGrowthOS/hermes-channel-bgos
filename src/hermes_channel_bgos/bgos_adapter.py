@@ -85,6 +85,16 @@ _BUTTONS_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Agent-emitted reply-quote marker. The agent writes the source message id
+# between these tags and the adapter extracts it into the `replyToId` field
+# on the outbound POST so BGOS renders a Telegram-style quoted header on
+# the receiving bubble. The marker is stripped from the visible text before
+# posting. Spec: BGOS/docs/superpowers/specs/2026-05-19-reply-quote-design.md
+_REPLY_TO_BLOCK_RE = re.compile(
+    r"\[\[BGOS_REPLY_TO\]\]\s*(\d+)\s*\[\[/BGOS_REPLY_TO\]\]",
+    re.IGNORECASE,
+)
+
 # Backend rejects inline messages with >6 options (see PR #62 + memory
 # `inline_buttons_shipped.md`). Agents that emit more get truncated; we log
 # a warning so this isn't silent.
@@ -255,6 +265,33 @@ def _format_inbound_files(text: str, files: list[dict]) -> str:
     if text:
         return text + suffix
     return f"[User attached {len(files)} file(s)]" + suffix
+
+
+def _parse_reply_to_block(content: str) -> tuple[str, int | None]:
+    """Extract a `[[BGOS_REPLY_TO]]<id>[[/BGOS_REPLY_TO]]` marker from agent text.
+
+    Returns `(cleaned_text, reply_to_id_or_None)`. The marker is stripped
+    from the text before the message is posted so the user never sees it.
+    If the marker contains a non-integer payload it's silently dropped
+    (text still cleaned). Only the first match is honored — a reply can
+    target at most one source message.
+
+    Use case: AI quoting an older user message or its own past commitment.
+    See spec BGOS/docs/superpowers/specs/2026-05-19-reply-quote-design.md
+    """
+    if not content:
+        return content, None
+    match = _REPLY_TO_BLOCK_RE.search(content)
+    if match is None:
+        return content, None
+    try:
+        reply_to_id = int(match.group(1))
+    except (ValueError, TypeError):
+        reply_to_id = None
+    cleaned = _REPLY_TO_BLOCK_RE.sub("", content).strip()
+    if reply_to_id is not None and reply_to_id <= 0:
+        reply_to_id = None
+    return cleaned, reply_to_id
 
 
 def _parse_buttons_block(content: str) -> tuple[str, list[dict], str | None]:
@@ -930,9 +967,19 @@ class BGOSAdapter(BasePlatformAdapter):
         assistant's reply with the inbound peer message — without it, the
         originator's pollForReply() falls back to positional matching, which
         works for 1:1 side threads but not for any future fan-in patterns.
+
+        Reply-quote: agents can also embed
+        `[[BGOS_REPLY_TO]]<message_id>[[/BGOS_REPLY_TO]]` in the reply to
+        anchor it to a specific earlier message — the adapter extracts the
+        id and forwards it as `replyToId`. The explicit `reply_to` kwarg
+        from Hermes (a2a side-thread) wins if both are set. See spec
+        BGOS/docs/superpowers/specs/2026-05-19-reply-quote-design.md.
         """
-        cleaned_text, options, render_mode = _parse_buttons_block(
-            self.format_message(content)
+        formatted = self.format_message(content)
+        formatted, marker_reply_to = _parse_reply_to_block(formatted)
+        cleaned_text, options, render_mode = _parse_buttons_block(formatted)
+        effective_reply_to: int | None = (
+            int(reply_to) if reply_to is not None else marker_reply_to
         )
 
         # tool_progress intercept on the SEND path too — the gateway's
@@ -988,7 +1035,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 options=(options or None) if is_first else None,
                 render_mode=render_mode if is_first else None,
                 reply_to_id=(
-                    int(reply_to) if reply_to is not None and is_first else None
+                    effective_reply_to if effective_reply_to is not None and is_first else None
                 ),
             )
             message_id = resp.get("id") if isinstance(resp, dict) else None
