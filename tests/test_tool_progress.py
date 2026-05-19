@@ -288,6 +288,71 @@ async def test_delete_message_finalizes_card(mock_bgos_server):
 
 
 @pytest.mark.asyncio
+async def test_plain_send_finalizes_active_tool_progress_card(mock_bgos_server):
+    """End-of-turn signal via send() of a non-tool-progress reply.
+
+    Regression: live in chat 830 every batch in a turn re-PATCHed the same
+    card msg 7462 because the cache (`_tool_progress_card_id_by_chat`)
+    never cleared. delete_message wasn't called for that gateway flow, so
+    the only finalize path was unreachable.
+
+    Fix: send() of a plain agent reply finalizes any active card first,
+    so the next turn's first tool starts a FRESH card via POST.
+    """
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    # First POST → card creation. Second PATCH → card finalize. Third
+    # POST → the plain agent reply. Fourth POST → next turn's fresh card.
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7001})
+    mock_bgos_server.on("PATCH", "/api/v1/messages/7001").respond(200, {"id": 7001})
+
+    try:
+        # Turn 1, tool batch — card created.
+        await adapter.send(42, '📖 read_file: "/etc/hostname"')
+        assert adapter._tool_progress_card_id_by_chat[42] == 7001
+
+        # Turn 1 finale — agent posts the answer (no tool markers). This
+        # is the new signal: finalize the active card so the next turn
+        # starts clean.
+        mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7002})
+        await adapter.send(42, "The hostname is foo.example.com.")
+
+        # Card cache cleared.
+        assert 42 not in adapter._tool_progress_card_id_by_chat
+        # The card was PATCHed with state='done' before the plain POST.
+        patches = [r for r in mock_bgos_server.requests
+                   if r.method == "PATCH" and r.path == "/api/v1/messages/7001"]
+        assert len(patches) >= 1
+        assert patches[-1].json_body["toolProgress"]["state"] == "done"
+
+        # Turn 2 — next tool batch starts a FRESH card (different id).
+        mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7003})
+        await adapter.send(42, '💻 terminal: "uptime"')
+        assert adapter._tool_progress_card_id_by_chat[42] == 7003
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_plain_send_no_active_card_is_noop(mock_bgos_server):
+    """The pre-send finalize is a no-op when there's no active card —
+    a chat that never used tools should not see any spurious PATCH."""
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9100})
+
+    try:
+        await adapter.send(42, "Hello, world.")
+
+        patches = [r for r in mock_bgos_server.requests if r.method == "PATCH"]
+        assert patches == []
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_edit_message_replaces_not_appends(mock_bgos_server):
     """Each gateway edit_message carries the FULL accumulated tool list,
     so the adapter REPLACES tracked tools — no accumulation. Same line
@@ -406,3 +471,109 @@ async def test_edit_message_non_tool_text_falls_through(mock_bgos_server):
         assert len(posts) == 0
     finally:
         await adapter.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# userId fallback to pairing owner (0.6.2 fix — caught live 2026-05-15 when
+# REST-backfill-seeded chats had no recorded per-chat user_id and tool-
+# progress PATCHes returned 400 "userId should not be empty").
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_patch_falls_back_to_pairing_user_id(mock_bgos_server):
+    """When no per-chat user_id is recorded (REST backfill seed, etc.),
+    tool-progress PATCH must use the pairing owner's user_id so the
+    backend's ownership check passes."""
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
+    mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
+    adapter._state.set_route(7, "default")
+    # No last_user_id_by_chat entry for chat 42 — simulates a chat seeded
+    # entirely from REST backfill (which carries no inbound user_id).
+    adapter.pairing_user_id = "pairing_owner_user"
+
+    try:
+        await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
+        await adapter.edit_message(
+            42, 500,
+            '📖 read_file: "/etc/hostname"\n💻 terminal: "uname -a"',
+        )
+
+        patches = [r for r in mock_bgos_server.requests
+                   if r.method == "PATCH" and r.path == "/api/v1/messages/9001"]
+        assert len(patches) == 1
+        assert patches[0].json_body["userId"] == "pairing_owner_user"
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_per_chat_user_id_wins_over_pairing_user_id(mock_bgos_server):
+    """When BOTH the per-chat recorded user_id AND the pairing owner are
+    set, the per-chat one wins — it identifies the actual prompter,
+    which is more specific and matches the legacy behavior."""
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
+    mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
+    adapter._state.set_route(7, "default")
+    adapter._state.last_user_id_by_chat[42] = "prompter_user"
+    adapter.pairing_user_id = "pairing_owner_user"
+
+    try:
+        await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
+        await adapter.edit_message(
+            42, 500,
+            '📖 read_file: "/etc/hostname"\n💻 terminal: "uname -a"',
+        )
+
+        patches = [r for r in mock_bgos_server.requests
+                   if r.method == "PATCH" and r.path == "/api/v1/messages/9001"]
+        assert len(patches) == 1
+        assert patches[0].json_body["userId"] == "prompter_user"
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_finalize_card_falls_back_to_pairing_user_id(mock_bgos_server):
+    """delete_message → _finalize_tool_progress_card must use the pairing
+    owner as fallback when no per-chat user_id was recorded."""
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
+    mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
+    adapter._state.set_route(7, "default")
+    adapter.pairing_user_id = "pairing_owner_user"
+
+    try:
+        # Seed a running card the same way the live adapter would.
+        await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
+        # End-of-turn — the gateway tries to DELETE the preview, the adapter
+        # intercepts and PATCHes the card to state=done instead.
+        await adapter.delete_message(42, 500)
+
+        patches = [r for r in mock_bgos_server.requests
+                   if r.method == "PATCH" and r.path == "/api/v1/messages/9001"]
+        assert len(patches) == 1
+        body = patches[0].json_body
+        assert body["userId"] == "pairing_owner_user"
+        assert body["toolProgress"]["state"] == "done"
+    finally:
+        await adapter.disconnect()
+
+
+def test_patch_user_id_helper_returns_none_when_neither_set():
+    """If neither per-chat user_id nor pairing_user_id is set (no connect()
+    has been called and no inbound has arrived), the helper returns None.
+    PATCH still fails in that case — no worse than before this fix."""
+    adapter = BGOSAdapter(BgosConfig(
+        base_url="http://localhost:0", pairing_token="pair_xyz",
+    ))
+    # No state set — fresh adapter, no connect, no inbound.
+    assert adapter._patch_user_id_for_chat(42) is None
