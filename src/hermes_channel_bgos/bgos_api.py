@@ -650,17 +650,23 @@ class BgosApi:
         the BGOS mobile app.
 
         Wire: PATCH /api/v1/integrations/assistants/{id}/status
-        Body: { "statusText": str|null, "statusEmoji": str|null }
+        Body: { "statusText": str|null, "statusEmoji"?: str }
 
-        Empty string or None for `status_text` clears the displayed status.
-        `status_emoji` is optional; omit or pass None to leave/clear the emoji.
-        Body keys are camelCase to match the backend DTO convention (same as
-        `post_message`'s snake→camel translation).
+        `statusText` is always included (null clears the displayed status text;
+        empty string is also treated as clear by the backend). `statusEmoji` is
+        only included when the caller supplies a non-None value — omitting it
+        entirely tells the backend to leave the existing emoji unchanged, whereas
+        sending `"statusEmoji": null` would clear it. Body keys are camelCase to
+        match the backend DTO convention (same as `post_message`'s snake→camel
+        translation).
         """
+        body: dict = {"statusText": status_text}
+        if status_emoji is not None:
+            body["statusEmoji"] = status_emoji
         await self._request(
             "PATCH",
             f"/api/v1/integrations/assistants/{assistant_id}/status",
-            json={"statusText": status_text, "statusEmoji": status_emoji},
+            json=body,
         )
 
     async def push_agent_catalog(self, *, pairing_id: int, entries: list[dict]) -> None:

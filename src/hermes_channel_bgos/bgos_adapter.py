@@ -195,10 +195,12 @@ def _parse_event_block(content: str) -> tuple[str, dict | None]:
 # PATCH /api/v1/integrations/assistants/{id}/status with the given text.
 # The line is stripped from the message before posting to the user.
 # "STATUS:" with no trailing text (or "STATUS: -") clears the status
-# (status_text=""). Inline emoji in the text is preserved and sent as
-# statusEmoji if isolated after the colon; otherwise the full text is
-# forwarded as statusText. Case-insensitive prefix match; leading/trailing
-# whitespace on the value is stripped.
+# (status_text=""). The entire value after the colon (including any inline
+# emoji) is sent as statusText; statusEmoji is NOT separately extracted by
+# this marker — the backend's existing emoji is left untouched (patch_status
+# omits statusEmoji from the body when no explicit emoji is provided).
+# Case-insensitive prefix match; leading/trailing whitespace on the value
+# is stripped.
 _STATUS_LINE_RE = re.compile(
     r"^STATUS:\s*(.*)$",
     re.IGNORECASE | re.MULTILINE,
