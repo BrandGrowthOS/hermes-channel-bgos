@@ -639,6 +639,30 @@ class BgosApi:
             json={"commands": commands},
         )
 
+    async def patch_status(
+        self,
+        *,
+        assistant_id: int,
+        status_text: str | None,
+        status_emoji: str | None = None,
+    ) -> None:
+        """Update (or clear) the agent's status line visible under its name in
+        the BGOS mobile app.
+
+        Wire: PATCH /api/v1/integrations/assistants/{id}/status
+        Body: { "statusText": str|null, "statusEmoji": str|null }
+
+        Empty string or None for `status_text` clears the displayed status.
+        `status_emoji` is optional; omit or pass None to leave/clear the emoji.
+        Body keys are camelCase to match the backend DTO convention (same as
+        `post_message`'s snake→camel translation).
+        """
+        await self._request(
+            "PATCH",
+            f"/api/v1/integrations/assistants/{assistant_id}/status",
+            json={"statusText": status_text, "statusEmoji": status_emoji},
+        )
+
     async def push_agent_catalog(self, *, pairing_id: int, entries: list[dict]) -> None:
         """Push (or update) the agent catalog for this pairing. Backend DTO
         uses the key `agents` (see AgentCatalogPushDto) — we translate from
