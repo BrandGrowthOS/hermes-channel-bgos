@@ -39,25 +39,34 @@ def check_package() -> CheckResult:
     return CheckResult("package", OK, f"hermes_channel_bgos {__version__}")
 
 
-def check_fork_patch() -> CheckResult:
+def check_registration() -> CheckResult:
+    """Is BGOS registered with Hermes — via the plugin system OR the fork patch?
+    Reports which path is active, or FAIL with how to enable one."""
     try:
         from gateway.config import Platform  # type: ignore
-        from gateway.platforms.bgos import BGOSAdapter  # type: ignore
     except Exception as exc:
         return CheckResult(
-            "fork_patch", FAIL,
+            "registration", FAIL,
             f"Hermes gateway not importable ({exc.__class__.__name__})",
-            fix="Run this from Hermes's Python env, and apply the fork patch: "
-                "git am hermes-fork-patch/0001-bgos-integration.patch",
+            fix="Run this from Hermes's Python env. Then either install the BGOS "
+                "plugin (symlink plugins/platforms/bgos into ~/.hermes/plugins/) "
+                "or apply the fork patch.",
         )
     if getattr(Platform, "BGOS", None) is None:
         return CheckResult(
-            "fork_patch", FAIL, "Platform.BGOS missing",
-            fix="Re-apply the fork patch (it registers Platform.BGOS).",
+            "registration", FAIL, "Platform.BGOS not registered",
+            fix="Enable BGOS: plugin path — symlink plugins/platforms/bgos into "
+                "~/.hermes/plugins/bgos and restart; or legacy — apply "
+                "hermes-fork-patch/0001-bgos-integration.patch.",
         )
-    return CheckResult(
-        "fork_patch", OK, f"Platform.BGOS + {BGOSAdapter.__name__} importable",
-    )
+    # Distinguish plugin vs patch: the plugin loader records loaded plugins.
+    try:
+        import gateway.platform_registry as _reg  # type: ignore
+        loaded = getattr(_reg, "loaded_platform_plugins", lambda: [])()
+        via = "plugin" if any("bgos" in str(p).lower() for p in loaded) else "patch"
+    except Exception:
+        via = "patch"  # registry not present → must be the fork-patch build
+    return CheckResult("registration", OK, f"Platform.BGOS registered (via {via})")
 
 
 def check_config() -> tuple[BgosConfig | None, CheckResult]:
@@ -192,7 +201,7 @@ def check_gateway_process() -> CheckResult:
 
 
 async def run_checks(*, offline: bool = False) -> list[CheckResult]:
-    results = [check_package(), check_fork_patch()]
+    results = [check_package(), check_registration()]
     cfg, cfg_result = check_config()
     results.append(cfg_result)
     results.append(check_env())

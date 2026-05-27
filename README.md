@@ -57,15 +57,22 @@ Setting this up by hand involves patching Hermes across ~11 files, wiring up a P
 > git clone https://github.com/BrandGrowthOS/hermes-channel-bgos.git ~/hermes-channel-bgos
 > ```
 >
-> **3. Apply the Hermes fork patch.** The integration requires ~80 lines of registration boilerplate in the Hermes install. Patch is at `~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch`:
-> ```
-> cd <hermes-install-path>
-> git checkout -b bgos-integration
-> git am ~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch
-> # If that fails with "patch does not apply" (upstream drift), retry with:
-> git am --3way ~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch
-> ```
-> If you still get conflicts, stop and show me — don't guess.
+> **3. Register BGOS with Hermes.** **First check for plugin support:** `<correct-python> -c "import gateway.platform_registry" && echo PLUGIN_OK`.
+> - **If it prints `PLUGIN_OK` (modern Hermes): skip the fork patch.** After installing the pip package (step 4), symlink the plugin in:
+>   ```
+>   mkdir -p ~/.hermes/plugins
+>   ln -sfn ~/hermes-channel-bgos/plugins/platforms/bgos ~/.hermes/plugins/bgos
+>   ```
+>   No core edits, nothing to rebase. Confirm later with `hermes-bgos-doctor` (`registration: ... via plugin`).
+> - **Otherwise (pre-plugin Hermes): apply the fork patch** (~80 lines of registration boilerplate) at `~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch`:
+>   ```
+>   cd <hermes-install-path>
+>   git checkout -b bgos-integration
+>   git am ~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch
+>   # If that fails with "patch does not apply" (upstream drift), retry with:
+>   git am --3way ~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch
+>   ```
+>   If you still get conflicts, stop and show me — don't guess.
 >
 > **4. Install the vendor package into Hermes's Python env.** Install into the **exact** interpreter that runs Hermes — pin it with `--python`:
 > - **uv (primary path — most Hermes installs are uv-managed venvs):**
@@ -150,9 +157,27 @@ That's the whole setup. When it's done, you're paired, agents are bound, message
 
 ## Manual setup
 
-Two installs: a patched Hermes (one-time per machine) + this vendor package.
+Two paths: the **plugin path** (preferred — no core edits, nothing to rebase) on modern Hermes, or the legacy **fork patch** on Hermes that predates the plugin system. Both install this vendor package into Hermes's Python.
 
-### Step 1 — Apply the Hermes fork patch
+### Step 0 — Plugin path (preferred on modern Hermes)
+
+If your Hermes has the plugin system (`<hermes-python> -c "import gateway.platform_registry"` succeeds), **skip the fork patch entirely**:
+
+1. Clone + install the pip package into Hermes's Python (Step 2 below):
+   ```bash
+   git clone https://github.com/BrandGrowthOS/hermes-channel-bgos.git ~/hermes-channel-bgos
+   uv pip install --python <hermes-install>/venv/bin/python -e ~/hermes-channel-bgos
+   ```
+2. Make the plugin discoverable:
+   ```bash
+   mkdir -p ~/.hermes/plugins
+   ln -sfn ~/hermes-channel-bgos/plugins/platforms/bgos ~/.hermes/plugins/bgos
+   ```
+3. Pair (Step 4) + set env vars (Step 5), then restart Hermes. Verify with `hermes-bgos-doctor` — the `registration` line should read `via plugin`.
+
+One `ctx.register_platform()` call registers `Platform.BGOS` with the adapter, config, auth, **cron delivery**, prompt hint, and status — **no core-file edits and nothing to rebase on upstream updates**. If `import gateway.platform_registry` fails, your Hermes predates the plugin system — use the fork-patch path below.
+
+### Step 1 — Apply the Hermes fork patch (legacy / pre-plugin Hermes only)
 
 ```bash
 # If you're setting up Hermes from scratch, clone + install it first
