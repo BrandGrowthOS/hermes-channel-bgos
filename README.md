@@ -36,7 +36,7 @@ Backend dependencies still in flight: `DELETE /api/v1/messages/{id}` (for stream
 
 ## Quick start with Claude Code (recommended)
 
-Setting this up by hand involves patching Hermes across ~16 files, wiring up a Python package into whatever environment Hermes is using (uv / pipx / venv / system), and getting a bunch of env vars right. Easiest path: paste the prompt below into [Claude Code](https://claude.com/claude-code) running **on the server where your Hermes lives**. It will do the setup, ask you for the missing pieces (pair code, agent routes), and confirm everything's green.
+Setting this up by hand involves patching Hermes across ~11 files, wiring up a Python package into whatever environment Hermes is using (uv / pipx / venv / system), and getting a bunch of env vars right. Easiest path: paste the prompt below into [Claude Code](https://claude.com/claude-code) running **on the server where your Hermes lives**. It will do the setup, ask you for the missing pieces (pair code, agent routes), and confirm everything's green.
 
 > ### Prompt to paste to Claude Code on your Hermes server
 >
@@ -67,10 +67,15 @@ Setting this up by hand involves patching Hermes across ~16 files, wiring up a P
 > ```
 > If you still get conflicts, stop and show me — don't guess.
 >
-> **4. Install the vendor package into Hermes's Python env.** Use the actual Python that runs Hermes. Examples:
-> - uv-managed venv: `<hermes-install>/venv/bin/pip install -e ~/hermes-channel-bgos` (may not have pip; use `uv pip install -e ~/hermes-channel-bgos` from inside `<hermes-install>` instead).
-> - pipx: `pipx inject <hermes-package> -e ~/hermes-channel-bgos`.
-> - System Python (Debian/Ubuntu may need `--break-system-packages`; avoid if the server also runs other Python tools).
+> **4. Install the vendor package into Hermes's Python env.** Install into the **exact** interpreter that runs Hermes — pin it with `--python`:
+> - **uv (primary path — most Hermes installs are uv-managed venvs):**
+>   ```
+>   uv pip install --python <hermes-install>/venv/bin/python -e ~/hermes-channel-bgos
+>   ```
+>   The `--python` flag targets Hermes's venv explicitly, so it works from any cwd and never lands in the wrong env. (uv-managed venvs usually have no `pip` binary on disk, which is why bare `pip` fails.)
+> - **Regular venv with pip:** `<hermes-install>/venv/bin/pip install -e ~/hermes-channel-bgos`.
+> - **pipx:** `pipx inject <hermes-package> -e ~/hermes-channel-bgos`.
+> - **System Python** (last resort; Debian/Ubuntu may need `--break-system-packages`; avoid if the server also runs other Python tools).
 >
 > Verify with:
 > ```
@@ -80,9 +85,9 @@ Setting this up by hand involves patching Hermes across ~16 files, wiring up a P
 > ```
 > All three should print successfully.
 >
-> **5. Ask me for a pair code.** Tell me to:
-> - Open the BGOS app → **Integrations** → ⚡ **Hermes** card → **"Connect a new Hermes server"** — copy the `BGOS-XXXX-XX` code.
-> - Report it back to you. Codes expire in 10 minutes.
+> **5. Ask me for a pair code.** `BGOS-XXXX-XX` is a **placeholder** — there is no real code until I generate one. Tell me to:
+> - Open the BGOS app → **Integrations** → ⚡ **Hermes** card → **"Connect a new Hermes server"** — copy the generated code (looks like `BGOS-7F3A-2K`).
+> - Report it back to you. **Codes expire in 10 minutes** — if I'm slow, generate a fresh one. Don't run the pair command with the literal `BGOS-XXXX-XX`.
 >
 > Then pair. If you already know my agent routes (ask me — see step 6), pass them with `--agents` so they're tickable in the Integrations UI immediately, even before the gateway starts:
 > ```
@@ -104,7 +109,7 @@ Setting this up by hand involves patching Hermes across ~16 files, wiring up a P
 > ```
 > Note `BGOS_API_KEY` is NOT strictly required — the fork patch now auto-reads the pairing token from `~/.hermes/secrets/bgos.json`. But if you're paranoid, include it too.
 >
-> **8. Start Hermes.** If a systemd service existed, `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.service`. Otherwise whatever launch command Kc/I use normally.
+> **8. Start Hermes.** Linux systemd: `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.service`. macOS launchd: `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway` (find the env file Hermes loads with `hermes config env-path` — on macOS it's usually `~/.hermes/.env`, not `<hermes-install>/.env`). Otherwise whatever launch command Kc/I use normally.
 >
 > **9. Verify it's alive.** Run the bundled doctor (use the same Python that runs Hermes) — it checks the install, pairing, and exposed agents in one shot:
 > ```
@@ -165,18 +170,17 @@ git am ~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch \
   || git am --3way ~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch
 ```
 
-Patch touches 16 files registering `Platform.BGOS` per Hermes's `gateway/platforms/ADDING_A_PLATFORM.md`. See [`hermes-fork-patch/FORK-NOTES.md`](hermes-fork-patch/FORK-NOTES.md) for the per-file breakdown and drift status.
+Patch modifies **11 files** registering `Platform.BGOS` per Hermes's `gateway/platforms/ADDING_A_PLATFORM.md` (16 candidate touch-points, several of which are no-ops on the current base). The live list is self-verifying — `git apply --numstat hermes-fork-patch/0001-bgos-integration.patch`. See [`hermes-fork-patch/FORK-NOTES.md`](hermes-fork-patch/FORK-NOTES.md) for the per-file breakdown, drift status, and the **plugin-migration path** that may soon replace this patch entirely.
 
 ### Step 2 — Install the vendor package into Hermes's Python environment
 
 Use whichever Python actually runs your Hermes. Common cases:
 
-**uv-managed venv at `<hermes>/venv/`** (typical for Hermes installs):
+**uv-managed venv at `<hermes>/venv/`** (typical for Hermes installs — the primary path):
 ```bash
-cd <hermes-install-path>
-uv pip install -e ~/hermes-channel-bgos
+uv pip install --python <hermes-install>/venv/bin/python -e ~/hermes-channel-bgos
 ```
-`uv`-managed venvs often don't have `pip` on disk — use `uv pip install` from inside the Hermes dir.
+`--python` pins the exact interpreter Hermes runs, so this works from any directory and can't land in the wrong env. `uv`-managed venvs often have no `pip` binary on disk, which is why bare `pip install` fails — use `uv pip install`.
 
 **pipx-managed Hermes:**
 ```bash
@@ -212,14 +216,20 @@ See [Configuration](#configuration-env-vars) below. Add them to Hermes's systemd
 
 ```
 bgos_ws.connected pairing_id=<N> assistants=[...]
-pushed agent catalog: <N> entries
+BGOS catalog pushed: <route>:<Name>
 ```
 
 ---
 
 ## Configuration (env vars)
 
-Put these wherever Hermes's launcher reads env. For a systemd user service, create a drop-in:
+Put these wherever Hermes's launcher reads env. **Find the file Hermes actually loads** with:
+
+```bash
+hermes config env-path        # prints the active env file path on any platform
+```
+
+### Linux (systemd user service)
 
 ```bash
 mkdir -p ~/.config/systemd/user/hermes-gateway.service.d
@@ -232,6 +242,28 @@ EOF
 touch <hermes-install>/.env && chmod 600 <hermes-install>/.env
 # Add the vars below to that file
 ```
+
+Restart: `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.service`.
+
+### macOS (launchd)
+
+On macOS, Hermes runs as a launchd agent (`ai.hermes.gateway`), and the env file is typically **`~/.hermes/.env`** (confirm with `hermes config env-path` — it may differ from `<hermes-install>/.env`). Edit that file directly (Hermes's launchd plist already loads it), then restart and verify:
+
+```bash
+# 1. Find + edit the env file Hermes loads
+hermes config env-path                  # e.g. /Users/<you>/.hermes/.env
+#    add the BGOS_* vars below to that file (chmod 600 it — contains a token)
+
+# 2. Restart the gateway
+launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
+
+# 3. Verify it connected + pushed the catalog (adjust the log path to your install)
+log show --predicate 'process == "hermes"' --last 2m 2>/dev/null \
+  | grep -iE "bgos_ws.connected|BGOS catalog pushed" \
+  || tail -n 200 ~/.hermes/logs/gateway.log | grep -iE "bgos_ws.connected|BGOS catalog pushed"
+```
+
+Then run `hermes-bgos-doctor` to confirm everything's green.
 
 | Var | Default | Required? | What |
 |---|---|---|---|
@@ -255,7 +287,7 @@ BGOS_ALLOW_ALL_USERS=true
 
 ## First-time pairing
 
-1. In BGOS → **Integrations** → ⚡ **Hermes card** → **"Connect a new Hermes server"**. Copy the `BGOS-XXXX-XX` code. It expires in 10 minutes.
+1. In BGOS → **Integrations** → ⚡ **Hermes card** → **"Connect a new Hermes server"**. Copy the generated code. `BGOS-XXXX-XX` throughout this README is a **placeholder** — your real code looks like `BGOS-7F3A-2K`. It **expires in 10 minutes**; generate a fresh one if it lapses.
 
 2. On the Hermes server, run — using the same Python that runs Hermes:
    ```bash
