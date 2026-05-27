@@ -31,6 +31,7 @@ from .commands_sync import (
     build_manifest,
     fetch_hermes_native_commands,
 )
+from .agents import enumerate_agents_from_env
 from .config import BgosConfig
 from .state_store import StateStore
 
@@ -797,56 +798,13 @@ class BGOSAdapter(BasePlatformAdapter):
     def _enumerate_agents(self) -> list[dict]:
         """Discover Hermes's configured agents for the agent-catalog push.
 
-        Checked in order; first non-empty source wins:
-
-        1. `BGOS_AGENTS_JSON` env var — a JSON list of
-           `{"agent_route": str, "name": str, "description"?: str,
-            "avatar_url"?: str}` objects. Use for rich descriptions or when
-           names contain commas/colons.
-        2. `BGOS_AGENTS` env var — comma-separated `route:Display Name` pairs
-           (e.g. `"hades:Hades,ramy:Ramy"`). If a bare route is given without
-           a colon, it's used as both route and display name.
-        3. (TODO — Phase 4) Hermes's runtime agent registry. When the adapter
-           can introspect the gateway's configured agents directly, this
-           env-var indirection goes away.
-
-        Returns `[]` when nothing is configured. Callers should treat an
-        empty list as a warn-but-continue condition, not an error.
+        Delegates to `agents.enumerate_agents_from_env`, the single source of
+        truth for the `BGOS_AGENTS_JSON` / `BGOS_AGENTS` precedence and the
+        `route:Display Name` spec format (also used by the pair CLI's
+        `--agents` flag and the doctor). Returns `[]` when nothing is
+        configured — callers treat that as warn-but-continue, not an error.
         """
-        raw_json = os.environ.get("BGOS_AGENTS_JSON", "").strip()
-        if raw_json:
-            try:
-                data = json.loads(raw_json)
-            except json.JSONDecodeError:
-                log.warning("BGOS_AGENTS_JSON is not valid JSON — ignoring")
-            else:
-                if isinstance(data, list):
-                    out = []
-                    for entry in data:
-                        if isinstance(entry, dict) and entry.get("agent_route"):
-                            out.append(entry)
-                    if out:
-                        return out
-
-        raw = os.environ.get("BGOS_AGENTS", "").strip()
-        if raw:
-            out: list[dict] = []
-            for piece in raw.split(","):
-                piece = piece.strip()
-                if not piece:
-                    continue
-                if ":" in piece:
-                    route, name = piece.split(":", 1)
-                    route = route.strip()
-                    name = name.strip() or route
-                else:
-                    route = piece
-                    name = piece
-                if route:
-                    out.append({"agent_route": route, "name": name})
-            return out
-
-        return []
+        return enumerate_agents_from_env()
 
     async def _poll_loop(self, interval: float) -> None:
         """Poll REST inbound every `interval` seconds.
