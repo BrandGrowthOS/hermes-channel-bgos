@@ -738,6 +738,23 @@ class BGOSAdapter(BasePlatformAdapter):
         # can either set BGOS_AGENTS env var next time or bind via curl.
         await self._push_agent_catalog_safe()
 
+        # Surface bound-assistant state explicitly so operators see at a glance
+        # whether any agents are exposed yet. Zero is the common fresh-install
+        # state (catalog pushed, user hasn't ticked agents in the UI) — and
+        # with hot-refresh that resolves on its own, no restart required.
+        bound = sorted(self._state.assistant_route.items())
+        if bound:
+            log.info(
+                "BGOS bound assistants: %s",
+                ", ".join(f"{aid}:{route}" for aid, route in bound),
+            )
+        else:
+            log.warning(
+                "BGOS: 0 assistants exposed yet — open BGOS Integrations → "
+                "Hermes → tick agent(s) → Save. New exposures hot-load "
+                "automatically (no gateway restart needed)."
+            )
+
         # Replay any messages that arrived while the adapter was down. The
         # cursor comes from the persisted last-id file ($HERMES_HOME/
         # bgos_last_id) — WITHOUT persistence every restart would backfill
@@ -872,7 +889,13 @@ class BGOSAdapter(BasePlatformAdapter):
             await self._api.push_agent_catalog(
                 pairing_id=self.pairing_id, entries=agents,
             )
-            log.info("pushed agent catalog: %d entries", len(agents))
+            log.info(
+                "BGOS catalog pushed: %s",
+                ", ".join(
+                    f"{a['agent_route']}:{a.get('name', a['agent_route'])}"
+                    for a in agents
+                ),
+            )
         except Exception:
             log.exception("agent catalog push failed (non-fatal)")
 
