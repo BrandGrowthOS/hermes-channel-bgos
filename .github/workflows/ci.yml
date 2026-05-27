@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (with dev deps)
+        run: pip install -e ".[dev]"
+
+      - name: Validate fork patch is well-formed
+        # Catches malformed hunk headers ('corrupt patch at line N') that would
+        # block `git am` on a fresh install. --numstat parses the patch format
+        # without needing the Hermes target files present. (--check can't run
+        # here: the Hermes source isn't in this repo.)
+        run: git apply --numstat hermes-fork-patch/0001-bgos-integration.patch
+
+      - name: Run tests
+        run: python -m pytest -q
