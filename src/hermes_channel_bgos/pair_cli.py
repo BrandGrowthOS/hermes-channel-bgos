@@ -17,6 +17,7 @@ from pathlib import Path
 
 import click
 
+from .agents import parse_agents_spec
 from .bgos_api import BgosApi, BgosApiError
 from .config import BgosConfig
 
@@ -46,22 +47,32 @@ def secrets_path() -> Path:
     "--integration", default="hermes", show_default=True,
     help="Integration type. Leave default.",
 )
-def main(code: str, device_label: str, base_url: str, integration: str) -> None:
+@click.option(
+    "--agents", default="", show_default=False,
+    help="Comma-separated route:Name agents to publish to BGOS at pair time, "
+         "e.g. 'default:David' or 'hades:Hades,ramy:Ramy'. Lets you tick "
+         "agents in the Integrations UI before the gateway even starts.",
+)
+def main(
+    code: str, device_label: str, base_url: str, integration: str, agents: str,
+) -> None:
     """Exchange a BGOS pairing code for a pairing token.
 
     The token is written to ~/.hermes/secrets/bgos.json (mode 0600 on POSIX).
     Re-run to re-pair — the old file is overwritten.
     """
-    asyncio.run(_run(code, device_label, base_url, integration))
+    asyncio.run(_run(code, device_label, base_url, integration, agents))
 
 
 async def _run(
-    code: str, device_label: str, base_url: str, integration: str,
+    code: str, device_label: str, base_url: str, integration: str, agents: str,
 ) -> None:
+    catalog = parse_agents_spec(agents)
     api = BgosApi(BgosConfig(base_url=base_url, pairing_token=None))
     try:
         resp = await api.pair_exchange(
             code=code, device_label=device_label, integration=integration,
+            agent_catalog=catalog,
         )
     except BgosApiError as exc:
         code_str = f" {exc.code}" if exc.code else ""
@@ -91,6 +102,27 @@ async def _run(
             pass
 
     click.secho(f"Paired. Secret written to {path}", fg="green")
+
+    # Publish the catalog with the authenticated token too, so it lands even
+    # if the pre-auth pair-exchange didn't persist agentCatalog. This makes
+    # the agents tickable in the Integrations UI before the gateway ever
+    # starts.
+    if catalog:
+        auth_api = BgosApi(
+            BgosConfig(base_url=base_url, pairing_token=resp["pairing_token"]),
+        )
+        try:
+            await auth_api.push_agent_catalog(
+                pairing_id=resp["pairing_id"], entries=catalog,
+            )
+            click.secho(f"Published {len(catalog)} agent(s) to BGOS.", fg="green")
+        except BgosApiError as exc:
+            click.secho(
+                f"Catalog push failed (non-fatal): HTTP {exc.status}",
+                fg="yellow", err=True,
+            )
+        finally:
+            await auth_api.close()
 
 
 if __name__ == "__main__":  # pragma: no cover

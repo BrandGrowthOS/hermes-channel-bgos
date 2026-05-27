@@ -115,3 +115,34 @@ def test_secrets_path_respects_hermes_home(tmp_path, monkeypatch):
     """Pure sync — no fixtures that need an event loop."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "custom"))
     assert secrets_path() == tmp_path / "custom" / "secrets" / "bgos.json"
+
+
+async def test_pair_cli_agents_pushes_catalog(mock_bgos_server, tmp_secrets_dir):
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "tok", "pairing_id": 55},
+    )
+    mock_bgos_server.on(
+        "POST", "/api/v1/integrations/pairings/55/agent-catalog",
+    ).respond(200, {})
+
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "host",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:David,hades:Hades",
+    ])
+    assert result.exit_code == 0, result.output
+
+    pe = mock_bgos_server.last_request("POST", "/api/v1/integrations/pair-exchange")
+    assert pe.json_body["agentCatalog"] == [
+        {"agent_route": "default", "name": "David"},
+        {"agent_route": "hades", "name": "Hades"},
+    ]
+
+    cat = mock_bgos_server.last_request(
+        "POST", "/api/v1/integrations/pairings/55/agent-catalog",
+    )
+    assert cat.headers["X-BGOS-Pairing"] == "tok"
+    assert cat.json_body == {"agents": [
+        {"agent_route": "default", "name": "David"},
+        {"agent_route": "hades", "name": "Hades"},
+    ]}
