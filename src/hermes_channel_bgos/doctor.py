@@ -61,15 +61,32 @@ def check_fork_patch() -> CheckResult:
 
 
 def check_config() -> tuple[BgosConfig | None, CheckResult]:
-    """Resolve the pairing config the same way the adapter does. Returns the
+    """Resolve the pairing config from env + the secrets file. Returns the
     config (or None) plus a CheckResult. A missing token is the canonical
-    'not paired' state and yields the get-a-code instruction."""
-    from .bgos_adapter import BGOSAdapter
+    'not paired' state and yields the get-a-code instruction.
+
+    Mirrors the adapter's env+secrets precedence (`BGOS_API_KEY` →
+    secrets-file token; `BGOS_BACKEND_URL` → secrets-file base_url → prod
+    default) — the subset that applies when running standalone, where there's
+    no Hermes config object to read. Deliberately does NOT import the adapter
+    module: it pulls in Hermes/mock shims that aren't importable outside the
+    gateway runtime or the test harness.
+    """
     from .pair_cli import secrets_path
     sp = secrets_path()
-    try:
-        cfg = BGOSAdapter._resolve_config(None)
-    except RuntimeError:
+    secrets: dict = {}
+    if sp.is_file():
+        try:
+            secrets = _json.loads(sp.read_text())
+        except (OSError, ValueError):
+            secrets = {}
+    token = os.environ.get("BGOS_API_KEY") or secrets.get("pairing_token")
+    base_url = (
+        os.environ.get("BGOS_BACKEND_URL")
+        or secrets.get("base_url")
+        or "https://api.brandgrowthos.ai"
+    )
+    if not token:
         return None, CheckResult(
             "config", FAIL,
             f"no pairing token found (checked $BGOS_API_KEY and {sp})",
@@ -77,9 +94,9 @@ def check_config() -> tuple[BgosConfig | None, CheckResult]:
                 "new Hermes server', copy the BGOS-XXXX-XX code, then run: "
                 "hermes-pair-bgos <CODE> --device-label <host>",
         )
-    return cfg, CheckResult(
+    return BgosConfig(base_url=base_url, pairing_token=token), CheckResult(
         "config", OK,
-        f"token resolved; base_url={cfg.base_url}; secrets={sp} (exists={sp.exists()})",
+        f"token resolved; base_url={base_url}; secrets={sp} (exists={sp.exists()})",
     )
 
 
