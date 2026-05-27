@@ -1,0 +1,37 @@
+name: bgos-platform
+label: BGOS
+kind: platform
+version: 0.9.0
+description: >
+  BGOS (Brand GrowthOS) channel adapter for Hermes — chat with your Hermes
+  agents from the BGOS mobile/desktop app. Pairs via `hermes-pair-bgos`;
+  all logic lives in the `hermes-channel-bgos` pip package (install it into
+  Hermes's Python first). This plugin is the drop-in alternative to the
+  legacy fork patch on plugin-capable Hermes.
+author: Brand GrowthOS
+requires_env: []
+optional_env:
+  - name: BGOS_AGENTS
+    description: "Comma-separated route:Name agents to expose (e.g. default:Hermes)"
+    prompt: "BGOS agents (route:Name, comma-separated)"
+    password: false
+  - name: BGOS_ALLOW_ALL_USERS
+    description: "Allow any BGOS user to message this agent (true/false)"
+    prompt: "Allow all BGOS users? (true/false)"
+    password: false
+  - name: BGOS_ALLOWED_USERS
+    description: "Comma-separated Clerk user IDs allowed (allowlist alternative)"
+    prompt: "Allowed BGOS user IDs (comma-separated)"
+    password: false
+  - name: BGOS_BACKEND_URL
+    description: "BGOS backend base URL (default https://api.brandgrowthos.ai)"
+    prompt: "BGOS backend URL (or empty)"
+    password: false
+  - name: BGOS_HOME_CHANNEL
+    description: "BGOS chat ID for cron / notification delivery"
+    prompt: "Home channel chat ID (or empty)"
+    password: false
+  - name: BGOS_HOME_CHANNEL_NAME
+    description: "Human label for the home channel"
+    prompt: "Home channel display name (or empty)"
+    password: false

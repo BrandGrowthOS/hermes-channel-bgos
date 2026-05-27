@@ -92,3 +92,44 @@ async def test_standalone_send_errors_when_unpaired(tmp_path, monkeypatch):
     from hermes_channel_bgos import plugin as plugin_mod
     result = await plugin_mod.standalone_send(None, "830", "hi")
     assert "error" in result
+
+
+def test_plugin_yaml_is_valid_and_declares_platform():
+    import pathlib
+
+    import yaml
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    data = yaml.safe_load((repo / "plugins/platforms/bgos/plugin.yaml").read_text())
+    assert data["kind"] == "platform"
+    assert data["name"]
+    req = {e["name"] for e in data.get("requires_env", [])}
+    opt = {e["name"] for e in data.get("optional_env", [])}
+    assert "BGOS_AGENTS" in (req | opt)
+    assert "BGOS_ALLOW_ALL_USERS" in (req | opt)
+
+
+def test_register_wires_all_hooks():
+    import importlib.util
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "bgos_plugin_adapter", repo / "plugins/platforms/bgos/adapter.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured = {}
+
+    class FakeCtx:
+        def register_platform(self, **kwargs):
+            captured.update(kwargs)
+
+    mod.register(FakeCtx())
+    assert captured["name"] == "bgos"
+    assert captured["cron_deliver_env_var"] == "BGOS_HOME_CHANNEL"
+    assert captured["allow_all_env"] == "BGOS_ALLOW_ALL_USERS"
+    assert captured["allowed_users_env"] == "BGOS_ALLOWED_USERS"
+    assert callable(captured["adapter_factory"])
+    assert callable(captured["env_enablement_fn"])
+    assert callable(captured["standalone_sender_fn"])
+    assert captured["platform_hint"]
