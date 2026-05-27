@@ -738,6 +738,13 @@ class BGOSAdapter(BasePlatformAdapter):
         # can either set BGOS_AGENTS env var next time or bind via curl.
         await self._push_agent_catalog_safe()
 
+        # Push each bound assistant's slash-command manifest so the BGOS
+        # composer's slash picker has commands to show. Without this the
+        # picker is empty for Hermes agents (the catalog was never synced —
+        # sync_commands_for had no caller). Each call is fail-open.
+        for assistant_id in list(self._state.assistant_route.keys()):
+            await self.sync_commands_for(assistant_id)
+
         # Surface bound-assistant state explicitly so operators see at a glance
         # whether any agents are exposed yet. Zero is the common fresh-install
         # state (catalog pushed, user hasn't ticked agents in the UI) — and
@@ -831,6 +838,11 @@ class BGOSAdapter(BasePlatformAdapter):
                     self._ws.unbind_assistant(aid)
             if self._ws is not None and added:
                 self._ws.bind_assistants(list(new_routes.keys()))
+
+            # Sync the slash-command manifest for newly-bound assistants so
+            # the picker populates without a restart (mirrors connect()).
+            for aid in added:
+                await self.sync_commands_for(aid)
 
             log.info(
                 "bgos scope refreshed: added=%s removed=%s bound=%s",

@@ -252,9 +252,49 @@ async def test_sync_commands_for_puts_merged_manifest(mock_bgos_server, monkeypa
 async def test_sync_commands_for_unknown_assistant_noop(mock_bgos_server):
     adapter = await _connected_adapter(mock_bgos_server)
     try:
-        # assistant 999 isn't in the route map; should silently no-op
+        # assistant 999 isn't in the route map; should silently no-op.
+        # (connect() pushes commands for the bound assistant 7, so we assert
+        # specifically that NO PUT targeted the unknown 999 path.)
         await adapter.sync_commands_for(999)
-        # No PUT fired
-        assert not any(r.method == "PUT" for r in mock_bgos_server.requests)
+        assert not any(
+            r.method == "PUT" and r.path.endswith("/assistants/999/commands")
+            for r in mock_bgos_server.requests
+        )
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_connect_pushes_command_catalog(mock_bgos_server, monkeypatch):
+    """connect() must push each bound assistant's slash-command manifest so
+    the BGOS composer's slash picker is populated.
+
+    Regression: sync_commands_for had NO caller, so a Hermes agent's command
+    manifest stayed empty and the picker never popped. Bridge-locals
+    (new/retry/status) are always present even with no native commands.
+    """
+    import hermes_channel_bgos.bgos_adapter as adapter_mod
+
+    monkeypatch.setattr(
+        adapter_mod, "fetch_hermes_native_commands", lambda route: [],
+    )
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200,
+        {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
+    )
+    mock_bgos_server.on(
+        "PUT", "/api/v1/integrations/assistants/7/commands",
+    ).respond(200, {})
+
+    adapter = BGOSAdapter(
+        BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
+    )
+    await adapter.connect()
+    try:
+        req = mock_bgos_server.last_request(
+            "PUT", "/api/v1/integrations/assistants/7/commands",
+        )
+        names = [c["command"] for c in req.json_body["commands"]]
+        assert {"new", "retry", "status"}.issubset(set(names))
     finally:
         await adapter.disconnect()
