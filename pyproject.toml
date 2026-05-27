@@ -21,6 +21,7 @@ dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "aiohttp>=3.9",
+  "PyYAML>=6",
 ]
 
 # NOTE: Hermes does not support entry_points-based platform discovery
