@@ -629,3 +629,115 @@ async def test_normalize_inbound_payload_does_not_mutate_input():
     assert result is not original
     assert "assistant_id" not in original  # input unchanged
     assert result["assistant_id"] == 7
+
+
+# -----------------------------------------------------------------------------
+# Hot-refresh on unknown assistant_id (v0.8.0). When a message arrives for an
+# assistant the adapter doesn't know — almost always because the user exposed a
+# new agent in BGOS *after* the gateway started — the adapter re-fetches whoami,
+# rebinds, and retries the lookup once instead of dropping until restart.
+# -----------------------------------------------------------------------------
+
+
+class _FakeWs:
+    def __init__(self):
+        self.bound: list[int] | None = None
+        self.unbound: list[int] = []
+
+    def bind_assistants(self, ids):
+        self.bound = list(ids)
+
+    def unbind_assistant(self, aid):
+        self.unbound.append(aid)
+
+
+async def test_hot_refresh_recovers_unknown_assistant(monkeypatch):
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "hades")
+    fake_ws = _FakeWs()
+    adapter._ws = fake_ws
+    adapter._text_batch_window = 0.05
+
+    async def fake_whoami():
+        return {
+            "pairing_id": 1, "user_id": "owner",
+            "assistants": [
+                {"assistant_id": 7, "agent_route": "hades"},
+                {"assistant_id": 892, "agent_route": "default"},
+            ],
+        }
+    monkeypatch.setattr(adapter._api, "whoami", fake_whoami)
+
+    handled: list[Any] = []
+
+    async def capture(event):
+        handled.append(event)
+    adapter.handle_message = capture
+
+    await adapter._handle_inbound({
+        "assistant_id": 892, "chat_id": 5, "message_id": 1000,
+        "user_id": "owner", "text": "hello", "files": [],
+        "message_type": "standard",
+    })
+    await asyncio.sleep(0.15)
+
+    assert adapter._state.get_route(892) == "default"
+    assert fake_ws.bound is not None and 892 in fake_ws.bound
+    assert len(handled) == 1
+    assert handled[0].text == "hello"
+    await adapter._api.close()
+
+
+async def test_hot_refresh_still_unknown_is_dropped(monkeypatch):
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "hades")
+    adapter._ws = _FakeWs()
+
+    calls: list[int] = []
+
+    async def fake_whoami():
+        calls.append(1)
+        return {"pairing_id": 1, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]}
+    monkeypatch.setattr(adapter._api, "whoami", fake_whoami)
+
+    handled: list[Any] = []
+
+    async def capture(event):
+        handled.append(event)
+    adapter.handle_message = capture
+
+    await adapter._handle_inbound({
+        "assistant_id": 999, "chat_id": 5, "message_id": 1,
+        "user_id": "u", "text": "x", "files": [],
+        "message_type": "standard",
+    })
+    assert handled == []
+    assert len(calls) == 1  # refresh attempted exactly once
+    await adapter._api.close()
+
+
+async def test_hot_refresh_cooldown_limits_whoami(monkeypatch):
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "hades")
+    adapter._ws = _FakeWs()
+    adapter._scope_refresh_cooldown = 60.0  # long → 2nd refresh gated
+
+    calls: list[int] = []
+
+    async def fake_whoami():
+        calls.append(1)
+        return {"pairing_id": 1, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]}
+    monkeypatch.setattr(adapter._api, "whoami", fake_whoami)
+
+    async def noop(event):
+        pass
+    adapter.handle_message = noop
+
+    for mid in (1, 2):
+        await adapter._handle_inbound({
+            "assistant_id": 999, "chat_id": 5, "message_id": mid,
+            "user_id": "u", "text": "x", "files": [],
+            "message_type": "standard",
+        })
+    assert len(calls) == 1  # second inbound's refresh blocked by cooldown
+    await adapter._api.close()
