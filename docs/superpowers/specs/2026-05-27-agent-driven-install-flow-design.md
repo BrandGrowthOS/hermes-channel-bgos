@@ -44,8 +44,13 @@ New method `_refresh_pairing_scope()`:
   - removed ids → `remove_assistant` + `_ws.unbind_assistant`.
 - Calls `self._ws.bind_assistants(list(routes))` so new `assistant:<id>` rooms
   are joined immediately (already supported by `BgosWs.bind_assistants`).
-- Fires `sync_commands_for(aid)` for each newly-added assistant (fail-open).
+  Guarded by `if self._ws is not None` (the adapter is exercised in unit tests
+  without a live WS).
 - Refreshes `pairing_user_id` if it was previously unset.
+- **Parity note:** does NOT sync per-assistant command manifests.
+  `connect()` doesn't call `sync_commands_for` either (it's currently uncalled
+  code), so refresh stays symmetric with connect rather than becoming its sole
+  caller. Command-manifest sync is out of scope for this work.
 - Logs `bgos scope refreshed: added=[...] removed=[...] bound=[...]`.
 
 Concurrency / rate-limit:
@@ -121,8 +126,9 @@ configured and is pairing live + are agents exposed."
 - `--wait-for-exposure` — after pairing (+ catalog), polls `whoami` every
   `--wait-interval` (default 4s) up to `--wait-timeout` (default 180s), printing
   "Waiting for you to expose an agent in BGOS… Open Integrations → Hermes → tick
-  agent(s) → Save." On success prints bound assistants (id/route/name), exit 0.
-  On timeout prints guidance, exit non-zero.
+  agent(s) → Save." On success prints bound assistants (id/route/name). On
+  timeout prints guidance and exits **0** — pairing already succeeded and
+  exposures hot-load, so a timeout is not a hard failure.
 
 ### 4. Shared agent-spec parser
 
@@ -162,7 +168,9 @@ Follow the repo's existing `pytest` + `asyncio_mode=auto` + in-repo mock pattern
 - **Hot-refresh** (`test_bgos_adapter_inbound.py` or new): inbound for an unknown
   assistant triggers a `whoami` refresh, binds the new room, and the retried
   message is processed; cooldown prevents repeated `whoami` within the window;
-  an id still unknown after refresh is dropped with the warning.
+  an id still unknown after refresh is dropped with the warning. Tests inject a
+  fake `whoami` (the static HTTP mock can't change its response between calls)
+  and a fake `_ws` recording `bind_assistants`.
 - **Pair CLI** (`test_pair_cli.py`): `--agents` parses and pushes the catalog;
   `--wait-for-exposure` polls until assistants appear (mocked) and on timeout.
 - **Doctor** (new `test_doctor.py`): check results render OK/WARN/FAIL; `--json`
