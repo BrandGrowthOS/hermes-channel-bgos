@@ -97,10 +97,19 @@ def test_render_json_ok_when_no_fail():
     assert data["result"] == "ok"
 
 
+def test_check_registration_reports_none_without_hermes():
+    # No `gateway` importable in the test env, and Platform.BGOS not present.
+    from hermes_channel_bgos.doctor import check_registration, FAIL
+    r = check_registration()
+    assert r.name == "registration"
+    assert r.status == FAIL
+    assert "plugin" in r.fix.lower() or "patch" in r.fix.lower()
+
+
 async def test_doctor_main_exits_1_when_unconfigured(monkeypatch):
-    # No Hermes gateway in the test env → fork_patch FAILs → exit 1.
+    # No Hermes gateway in the test env → registration FAILs → exit 1.
     monkeypatch.delenv("BGOS_API_KEY", raising=False)
     runner = CliRunner()
     result = await asyncio.to_thread(runner.invoke, doctor_main, ["--offline"])
     assert result.exit_code == 1
-    assert "fork_patch" in result.output
+    assert "registration" in result.output
