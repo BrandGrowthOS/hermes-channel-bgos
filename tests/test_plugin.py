@@ -51,3 +51,44 @@ def test_env_enablement_none_when_unpaired(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("BGOS_API_KEY", raising=False)
     assert env_enablement() is None
+
+
+async def test_standalone_send_posts_via_bgos_api(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("BGOS_API_KEY", "tok")
+    monkeypatch.setenv("BGOS_BACKEND_URL", "http://x")
+
+    from hermes_channel_bgos import plugin as plugin_mod
+
+    captured = {}
+
+    class FakeApi:
+        def __init__(self, config):
+            captured["base_url"] = config.base_url
+            captured["token"] = config.pairing_token
+
+        async def post_message(self, *, chat_id, text, **kw):
+            captured["chat_id"] = chat_id
+            captured["text"] = text
+            return {"id": 4321}
+
+        async def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(plugin_mod, "BgosApi", FakeApi)
+
+    result = await plugin_mod.standalone_send(None, "830", "scheduled hello")
+    assert result["success"] is True
+    assert result["message_id"] == 4321
+    assert captured["chat_id"] == 830          # coerced to int
+    assert captured["text"] == "scheduled hello"
+    assert captured["token"] == "tok"
+    assert captured["closed"] is True
+
+
+async def test_standalone_send_errors_when_unpaired(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("BGOS_API_KEY", raising=False)
+    from hermes_channel_bgos import plugin as plugin_mod
+    result = await plugin_mod.standalone_send(None, "830", "hi")
+    assert "error" in result

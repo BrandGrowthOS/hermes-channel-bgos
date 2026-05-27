@@ -66,5 +66,38 @@ def env_enablement() -> dict | None:
     return seed
 
 
+async def standalone_send(
+    pconfig,
+    chat_id: str,
+    message: str,
+    *,
+    thread_id: str | None = None,
+    media_files: list[str] | None = None,
+    force_document: bool = False,
+) -> dict:
+    """Out-of-process send for cron / `send_message_tool` when the gateway
+    runner isn't in this process. Without this hook, `deliver=bgos` cron jobs
+    fail with "No live adapter for platform" — and historically the fork left
+    bgos sending unimplemented ("Direct sending not yet implemented for bgos").
+
+    `thread_id` / `media_files` / `force_document` are accepted for signature
+    parity with the registry's sender protocol; BGOS delivers text here.
+    """
+    token, base_url = resolve_pairing()
+    if not token:
+        return {"error": "bgos standalone send: not paired (no token)"}
+    api = BgosApi(BgosConfig(base_url=base_url, pairing_token=token))
+    try:
+        resp = await api.post_message(chat_id=int(chat_id), text=message)
+    except BgosApiError as exc:
+        return {"error": f"bgos standalone send: HTTP {exc.status}"}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"error": f"bgos standalone send failed: {exc.__class__.__name__}"}
+    finally:
+        await api.close()
+    msg_id = resp.get("id") if isinstance(resp, dict) else None
+    return {"success": True, "platform": "bgos", "chat_id": chat_id, "message_id": msg_id}
+
+
 # Set in Task 3 (extracted verbatim from the fork patch's PLATFORM_HINTS entry).
 BGOS_PLATFORM_HINT = ""
