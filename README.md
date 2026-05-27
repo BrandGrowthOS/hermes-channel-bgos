@@ -36,7 +36,7 @@ Backend dependencies still in flight: `DELETE /api/v1/messages/{id}` (for stream
 
 ## Quick start with Claude Code (recommended)
 
-Setting this up by hand involves patching Hermes across ~16 files, wiring up a Python package into whatever environment Hermes is using (uv / pipx / venv / system), and getting a bunch of env vars right. Easiest path: paste the prompt below into [Claude Code](https://claude.com/claude-code) running **on the server where your Hermes lives**. It will do the setup, ask you for the missing pieces (pair code, agent routes), and confirm everything's green.
+Setting this up by hand involves patching Hermes across ~11 files, wiring up a Python package into whatever environment Hermes is using (uv / pipx / venv / system), and getting a bunch of env vars right. Easiest path: paste the prompt below into [Claude Code](https://claude.com/claude-code) running **on the server where your Hermes lives**. It will do the setup, ask you for the missing pieces (pair code, agent routes), and confirm everything's green.
 
 > ### Prompt to paste to Claude Code on your Hermes server
 >
@@ -67,10 +67,15 @@ Setting this up by hand involves patching Hermes across ~16 files, wiring up a P
 > ```
 > If you still get conflicts, stop and show me — don't guess.
 >
-> **4. Install the vendor package into Hermes's Python env.** Use the actual Python that runs Hermes. Examples:
-> - uv-managed venv: `<hermes-install>/venv/bin/pip install -e ~/hermes-channel-bgos` (may not have pip; use `uv pip install -e ~/hermes-channel-bgos` from inside `<hermes-install>` instead).
-> - pipx: `pipx inject <hermes-package> -e ~/hermes-channel-bgos`.
-> - System Python (Debian/Ubuntu may need `--break-system-packages`; avoid if the server also runs other Python tools).
+> **4. Install the vendor package into Hermes's Python env.** Install into the **exact** interpreter that runs Hermes — pin it with `--python`:
+> - **uv (primary path — most Hermes installs are uv-managed venvs):**
+>   ```
+>   uv pip install --python <hermes-install>/venv/bin/python -e ~/hermes-channel-bgos
+>   ```
+>   The `--python` flag targets Hermes's venv explicitly, so it works from any cwd and never lands in the wrong env. (uv-managed venvs usually have no `pip` binary on disk, which is why bare `pip` fails.)
+> - **Regular venv with pip:** `<hermes-install>/venv/bin/pip install -e ~/hermes-channel-bgos`.
+> - **pipx:** `pipx inject <hermes-package> -e ~/hermes-channel-bgos`.
+> - **System Python** (last resort; Debian/Ubuntu may need `--break-system-packages`; avoid if the server also runs other Python tools).
 >
 > Verify with:
 > ```
@@ -80,17 +85,17 @@ Setting this up by hand involves patching Hermes across ~16 files, wiring up a P
 > ```
 > All three should print successfully.
 >
-> **5. Ask me for a pair code.** Tell me to:
-> - Open the BGOS app → **Integrations** → ⚡ **Hermes** card → **"Connect a new Hermes server"** — copy the `BGOS-XXXX-XX` code.
-> - Report it back to you. Codes expire in 10 minutes.
+> **5. Ask me for a pair code.** `BGOS-XXXX-XX` is a **placeholder** — there is no real code until I generate one. Tell me to:
+> - Open the BGOS app → **Integrations** → ⚡ **Hermes** card → **"Connect a new Hermes server"** — copy the generated code (looks like `BGOS-7F3A-2K`).
+> - Report it back to you. **Codes expire in 10 minutes** — if I'm slow, generate a fresh one. Don't run the pair command with the literal `BGOS-XXXX-XX`.
 >
-> Then pair:
+> Then pair. If you already know my agent routes (ask me — see step 6), pass them with `--agents` so they're tickable in the Integrations UI immediately, even before the gateway starts:
 > ```
-> <correct-python> -m hermes_channel_bgos.pair_cli BGOS-XXXX-XX --device-label <this-server-hostname>
+> <correct-python> -m hermes_channel_bgos.pair_cli BGOS-XXXX-XX --device-label <this-server-hostname> --agents "default:Hermes"
 > ```
-> Expected output: `Paired. Secret written to ~/.hermes/secrets/bgos.json`
+> (`--agents` is optional; without it, the catalog is published when the gateway first connects.) Expected output: `Paired. Secret written to ~/.hermes/secrets/bgos.json`
 >
-> **6. Ask me what my Hermes agents are called.** I'll give you a list of `route:Display Name` pairs (e.g. `default:Hermes` or `hades:Hades,ramy:Ramy`). Use this for `BGOS_AGENTS` in the next step.
+> **6. Ask me what my Hermes agents are called.** I'll give you a list of `route:Display Name` pairs (e.g. `default:Hermes` or `hades:Hades,ramy:Ramy`). Use this for both `--agents` above and `BGOS_AGENTS` in the next step.
 >
 > **7. Configure Hermes's environment.** The adapter needs these env vars. Set them so they survive restarts — usually via the Hermes systemd user service's `EnvironmentFile=` directive, or a service drop-in at `~/.config/systemd/user/hermes-gateway.service.d/bgos-env.conf`:
 > ```
@@ -104,16 +109,20 @@ Setting this up by hand involves patching Hermes across ~16 files, wiring up a P
 > ```
 > Note `BGOS_API_KEY` is NOT strictly required — the fork patch now auto-reads the pairing token from `~/.hermes/secrets/bgos.json`. But if you're paranoid, include it too.
 >
-> **8. Start Hermes.** If a systemd service existed, `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.service`. Otherwise whatever launch command Kc/I use normally.
+> **8. Start Hermes.** Linux systemd: `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.service`. macOS launchd: `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway` (find the env file Hermes loads with `hermes config env-path` — on macOS it's usually `~/.hermes/.env`, not `<hermes-install>/.env`). Otherwise whatever launch command Kc/I use normally.
 >
-> **9. Verify it's alive.** In Hermes's log (journalctl for systemd, or stdout) look for:
+> **9. Verify it's alive.** Run the bundled doctor (use the same Python that runs Hermes) — it checks the install, pairing, and exposed agents in one shot:
+> ```
+> <correct-python> -m hermes_channel_bgos.doctor
+> ```
+> Everything should be `OK`/`WARN`, with `RESULT: OK`. (A `WARN` on `pairing_live` just means I haven't ticked any agents in the UI yet — see step 10.) Also confirm in Hermes's log (journalctl for systemd, or stdout):
 > ```
 > bgos_ws.connected pairing_id=<N> assistants=[<id>]
-> pushed agent catalog: <N> entries
+> BGOS catalog pushed: <route>:<Name>
 > ```
-> No `TypeError`, no `KeyError`, no `BGOS pairing token not found`, no silent drops.
+> No `TypeError`, no `KeyError`, no `BGOS pairing token not found`.
 >
-> **10. Ask me to send a test message** from the BGOS app to the Hermes assistant. I should see the agent reply in a few seconds. If not, tail the Hermes log and report what you see.
+> **10. Ask me to expose + test.** Tell me to open BGOS → **Integrations** → **Hermes** → tick the agent(s) → **Save**, then send a message to the assistant. I should see a reply within a few seconds. Exposing an agent *after* the gateway started is fine — the adapter hot-loads new agents automatically (no restart needed). If there's no reply, run `hermes-bgos-doctor` and check the `pairing_live` line.
 >
 > **Troubleshooting reference:** https://github.com/BrandGrowthOS/hermes-channel-bgos#troubleshooting — check this first if any step errors. Common gotchas:
 > - Debian `externally-managed-environment` → you used system pip instead of Hermes's venv pip.
@@ -121,6 +130,7 @@ Setting this up by hand involves patching Hermes across ~16 files, wiring up a P
 > - `KeyError: 'id'` on connect → same, `git pull` and restart.
 > - Hermes card's agent catalog stays empty → `BGOS_AGENTS` isn't in the restarted service's env.
 > - Messages reach BGOS but never arrive at Hermes → `BGOS_ALLOW_ALL_USERS=true` missing.
+> - Agent selected in BGOS but no reply, log shows `inbound for unknown assistant_id=<id>` → you exposed the agent after the gateway started. On ≥0.8.0 this self-heals within a few seconds (hot-refresh); if it persists, run `hermes-bgos-doctor`.
 > - Every restart replays all message history → vendor pkg predates commit `c571cd6`, `git pull`.
 >
 > Report progress at each numbered step. Confirm before moving to the next one if anything's ambiguous.
@@ -160,18 +170,17 @@ git am ~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch \
   || git am --3way ~/hermes-channel-bgos/hermes-fork-patch/0001-bgos-integration.patch
 ```
 
-Patch touches 16 files registering `Platform.BGOS` per Hermes's `gateway/platforms/ADDING_A_PLATFORM.md`. See [`hermes-fork-patch/FORK-NOTES.md`](hermes-fork-patch/FORK-NOTES.md) for the per-file breakdown and drift status.
+Patch modifies **11 files** registering `Platform.BGOS` per Hermes's `gateway/platforms/ADDING_A_PLATFORM.md` (16 candidate touch-points, several of which are no-ops on the current base). The live list is self-verifying — `git apply --numstat hermes-fork-patch/0001-bgos-integration.patch`. See [`hermes-fork-patch/FORK-NOTES.md`](hermes-fork-patch/FORK-NOTES.md) for the per-file breakdown, drift status, and the **plugin-migration path** that may soon replace this patch entirely.
 
 ### Step 2 — Install the vendor package into Hermes's Python environment
 
 Use whichever Python actually runs your Hermes. Common cases:
 
-**uv-managed venv at `<hermes>/venv/`** (typical for Hermes installs):
+**uv-managed venv at `<hermes>/venv/`** (typical for Hermes installs — the primary path):
 ```bash
-cd <hermes-install-path>
-uv pip install -e ~/hermes-channel-bgos
+uv pip install --python <hermes-install>/venv/bin/python -e ~/hermes-channel-bgos
 ```
-`uv`-managed venvs often don't have `pip` on disk — use `uv pip install` from inside the Hermes dir.
+`--python` pins the exact interpreter Hermes runs, so this works from any directory and can't land in the wrong env. `uv`-managed venvs often have no `pip` binary on disk, which is why bare `pip install` fails — use `uv pip install`.
 
 **pipx-managed Hermes:**
 ```bash
@@ -207,14 +216,20 @@ See [Configuration](#configuration-env-vars) below. Add them to Hermes's systemd
 
 ```
 bgos_ws.connected pairing_id=<N> assistants=[...]
-pushed agent catalog: <N> entries
+BGOS catalog pushed: <route>:<Name>
 ```
 
 ---
 
 ## Configuration (env vars)
 
-Put these wherever Hermes's launcher reads env. For a systemd user service, create a drop-in:
+Put these wherever Hermes's launcher reads env. **Find the file Hermes actually loads** with:
+
+```bash
+hermes config env-path        # prints the active env file path on any platform
+```
+
+### Linux (systemd user service)
 
 ```bash
 mkdir -p ~/.config/systemd/user/hermes-gateway.service.d
@@ -228,6 +243,28 @@ touch <hermes-install>/.env && chmod 600 <hermes-install>/.env
 # Add the vars below to that file
 ```
 
+Restart: `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.service`.
+
+### macOS (launchd)
+
+On macOS, Hermes runs as a launchd agent (`ai.hermes.gateway`), and the env file is typically **`~/.hermes/.env`** (confirm with `hermes config env-path` — it may differ from `<hermes-install>/.env`). Edit that file directly (Hermes's launchd plist already loads it), then restart and verify:
+
+```bash
+# 1. Find + edit the env file Hermes loads
+hermes config env-path                  # e.g. /Users/<you>/.hermes/.env
+#    add the BGOS_* vars below to that file (chmod 600 it — contains a token)
+
+# 2. Restart the gateway
+launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
+
+# 3. Verify it connected + pushed the catalog (adjust the log path to your install)
+log show --predicate 'process == "hermes"' --last 2m 2>/dev/null \
+  | grep -iE "bgos_ws.connected|BGOS catalog pushed" \
+  || tail -n 200 ~/.hermes/logs/gateway.log | grep -iE "bgos_ws.connected|BGOS catalog pushed"
+```
+
+Then run `hermes-bgos-doctor` to confirm everything's green.
+
 | Var | Default | Required? | What |
 |---|---|---|---|
 | `BGOS_API_KEY` | — | No (fallback reads secrets file) | Pairing token. Written by `hermes-pair-bgos` to `~/.hermes/secrets/bgos.json`. The fork patch auto-reads from the secrets file if this env var is absent, so you usually don't need to set it explicitly. |
@@ -237,7 +274,8 @@ touch <hermes-install>/.env && chmod 600 <hermes-install>/.env
 | `BGOS_ALLOW_ALL_USERS` | `false` | **Yes** (unless you set `BGOS_ALLOWED_USERS`) | The fork's `BasePlatformAdapter._is_user_authorized` rejects all inbound messages unless this is `true`, OR the sender's Clerk user_id is in `BGOS_ALLOWED_USERS`. Without this, your messages silently never reach Hermes. |
 | `BGOS_ALLOWED_USERS` | — | No (alternative) | Comma-separated Clerk user IDs authorized to chat with this Hermes. |
 | `BGOS_POLL_INTERVAL` | `5` | No | Seconds between REST-poll backup checks for inbound messages. Only relevant while the WS push path has server-side gaps. Set to `0` to disable polling once WS push is reliable. |
-| `HERMES_HOME` | `~/.hermes` | No | Root for Hermes config + secrets + the persisted `bgos_last_id` cursor. |
+| `BGOS_SCOPE_REFRESH_COOLDOWN` | `10` | No | Seconds between hot-refresh `whoami` calls when inbound arrives for an unknown `assistant_id` (i.e. an agent exposed after the gateway started). Lower = faster recovery; higher = less backend load. |
+| `HERMES_HOME` | `~/.hermes` | No | Root for Hermes config + secrets + the persisted `bgos_last_id` cursor. **For a named-profile Hermes install, point this at the profile dir** (e.g. `~/.hermes/profiles/david`) so the secrets file, the `bgos_last_id` cursor, and the systemd `EnvironmentFile=` all resolve under the same root. |
 
 **Minimum working `.env`:**
 ```bash
@@ -249,7 +287,7 @@ BGOS_ALLOW_ALL_USERS=true
 
 ## First-time pairing
 
-1. In BGOS → **Integrations** → ⚡ **Hermes card** → **"Connect a new Hermes server"**. Copy the `BGOS-XXXX-XX` code. It expires in 10 minutes.
+1. In BGOS → **Integrations** → ⚡ **Hermes card** → **"Connect a new Hermes server"**. Copy the generated code. `BGOS-XXXX-XX` throughout this README is a **placeholder** — your real code looks like `BGOS-7F3A-2K`. It **expires in 10 minutes**; generate a fresh one if it lapses.
 
 2. On the Hermes server, run — using the same Python that runs Hermes:
    ```bash
@@ -261,7 +299,14 @@ BGOS_ALLOW_ALL_USERS=true
    ```
    Expected output: `Paired. Secret written to ~/.hermes/secrets/bgos.json` (mode 0600).
 
-3. Back in BGOS → Integrations → the Hermes card should now show your server under **Paired devices**. When Hermes is running with `BGOS_AGENTS` configured, the **"Pick which agents to expose"** checklist populates; tick what you want, click Save, and those agents appear as assistants in your sidebar.
+   Two optional flags make this smoother:
+   - `--agents "default:Hermes"` (or a comma list) publishes the agent catalog **at pair time**, so the agents are tickable in the Integrations UI before the gateway even starts.
+   - `--wait-for-exposure` then polls until you tick an agent in BGOS and prints the bound assistants — handy when scripting the whole flow:
+     ```bash
+     hermes-pair-bgos BGOS-XXXX-XX --device-label <host> --agents "default:Hermes" --wait-for-exposure
+     ```
+
+3. Back in BGOS → Integrations → the Hermes card shows your server under **Paired devices**. With the catalog published (via `--agents` or once the gateway connects), the **"Pick which agents to expose"** checklist populates; tick what you want, click Save, and those agents appear as assistants in your sidebar. Exposing an agent *after* the gateway is already running is fine — the adapter hot-loads new agents automatically (≥0.8.0), no restart required. Verify any time with `hermes-bgos-doctor`.
 
 4. Open the assistant's chat in the app and send a message. You should see a reply within a few seconds.
 
@@ -331,7 +376,9 @@ If that exists and is non-empty, the adapter should pick it up automatically.
 ```
 no Hermes agents discovered — Hermes Integrations card will show an empty catalog
 ```
-Fix: set `BGOS_AGENTS=<route>:<Display Name>` in the systemd env. Restart. Re-check logs for `pushed agent catalog: N entries`.
+Fix: set `BGOS_AGENTS=<route>:<Display Name>` in the systemd env. Restart. Re-check logs for `BGOS catalog pushed: <route>:<Name>`.
+
+**BGOS shows the server connected and the agent selected, but messages get no reply; log shows `inbound for unknown assistant_id=<id>`.** The agent was exposed *after* the gateway started, so the running adapter hadn't cached that assistant id. On **≥0.8.0** the adapter hot-refreshes the pairing scope on the first such message and self-heals within ~one poll cycle — no restart needed (tune via `BGOS_SCOPE_REFRESH_COOLDOWN`). On older versions, restart the gateway once. Confirm with `hermes-bgos-doctor` — the `pairing_live` line lists the exposed assistants the adapter can see.
 
 **Messages sent from BGOS never reach Hermes, but `/api/v1/integrations/inbound` REST endpoint shows them.** Most likely `BGOS_ALLOW_ALL_USERS=true` isn't set. The fork's auth gate silently drops inbound messages otherwise. There's also a known server-side WS-push gap that the adapter works around via a 5-second REST-poll loop (see `BGOS_POLL_INTERVAL`). If neither helps, tail Hermes's log for `bgos_ws` and `is_user_authorized` lines.
 
@@ -364,10 +411,12 @@ Then `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.
 - `BgosApi` (`bgos_api.py`) — async httpx client for the BGOS backend's integration endpoints. Sends `X-BGOS-Pairing` on every authenticated call. Wire format matches backend DTOs: camelCase (`chatId`, `messageType`, `approvalMeta`), options `{text, callbackData, style?}`, files `{fileName, fileMimeType, fileData? | s3Key?}`.
 - `BgosWs` (`bgos_ws.py`) — python-socketio client. Handshake with `?pairingToken=…`, joins `pairing:<id>` + `assistant:<id>` rooms, exponential-backoff reconnect, REST backfill hook on reconnect.
 - `BGOSAdapter` (`bgos_adapter.py`) — subclass of `BasePlatformAdapter`. Resolves config from (priority order) BgosConfig → Hermes config attrs → env vars → `~/.hermes/secrets/bgos.json`. Implements the 4 abstract methods + optional `send_image/voice/video/document/animation` + `send_exec_approval` with 4-button Telegram parity.
-- `StateStore` (`state_store.py`) — in-process state: assistant→route map, retry cache, conversation bindings. Not persisted; rebuilt from `whoami()` + REST backfill on reconnect.
+- `StateStore` (`state_store.py`) — in-process state: assistant→route map, retry cache, conversation bindings. Not persisted; rebuilt from `whoami()` + REST backfill on reconnect. When inbound arrives for an unknown `assistant_id`, the adapter re-runs `whoami()` and reconciles the map in place (hot-refresh), so agents exposed after startup work without a restart.
 - `bgos_last_id` file (`$HERMES_HOME/bgos_last_id`) — persisted cursor for the last seen message id. Monotonically advances. Prevents history-replay on restart.
 - `commands_sync.py` — merges Hermes's native slash manifest with the 3 bridge-local commands, pushes via `PUT /integrations/assistants/:id/commands`.
-- `pair_cli.py` — the `hermes-pair-bgos` console script.
+- `agents.py` — shared `route:Display Name` spec parser + env enumeration; the single source of truth used by the adapter's catalog push, the pair CLI's `--agents`, and the doctor.
+- `pair_cli.py` — the `hermes-pair-bgos` console script (`--agents` publishes the catalog at pair time; `--wait-for-exposure` polls until you tick agents).
+- `doctor.py` — the `hermes-bgos-doctor` console script. Non-interactive health check (package, fork patch, pairing token, env, catalog, live `whoami`, gateway process) with inline fixes; `--json` for scripted/agent use, exit 1 on any FAIL.
 - `hermes-fork-patch/` — the one-time fork patch (`0001-bgos-integration.patch`) + notes.
 
 Full design spec: [`../docs/superpowers/specs/2026-04-23-hermes-bgos-integration-design.md`](../docs/superpowers/specs/2026-04-23-hermes-bgos-integration-design.md) (in the BGOS monorepo).

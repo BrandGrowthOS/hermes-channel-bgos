@@ -4,7 +4,20 @@ Source of truth: upstream's `gateway/platforms/ADDING_A_PLATFORM.md`. Line numbe
 
 Goal: each entry should be the smallest possible change to register BGOS as a platform. If a change grows beyond "add one line" or "add one branch", we've drifted from the design and should reconsider.
 
-Total expected diff: ~80 lines added, 0 removed, across 16 files.
+The list below is **16 candidate touch-points**; on the 2026-04-23 base, 4 were no-ops (see Drift section), so the actual patch **modifies 11 files** (`git apply --numstat hermes-fork-patch/0001-bgos-integration.patch` is the live source of truth: 74 insertions, 3 deletions across 11 files).
+
+> ## ⚠️ Plugin migration path — this whole patch is now likely avoidable
+>
+> As of **current upstream `main`** (verified 2026-05-27 against `gateway/platforms/ADDING_A_PLATFORM.md`), Hermes ships a **plugin system** that did not exist at the 2026-04-23 assessment. A platform can register from `~/.hermes/plugins/<name>/` (files only — **no pip package, no core edits**) via a `plugin.yaml` + a `register(ctx)` entry point calling `ctx.register_platform(...)`. The doc states the plugin path "automatically handles: adapter creation, config parsing, user authorization, **cron delivery**, send_message routing, system prompt hints, status display, gateway setup, and more," with optional hooks including `env_enablement_fn`, `apply_yaml_config_fn`, `cron_deliver_env_var`, and `standalone_sender_fn`.
+>
+> **Implication:** the 11-file fork patch below — and the rebase-on-every-upstream-update pain, and the corrupt-patch class of install failures — can be replaced by a Hermes plugin shipped inside this vendor package. `standalone_sender_fn` + `cron_deliver_env_var` would also close the documented cron-delivery gap (touch-point #9b, "Direct sending not yet implemented for bgos").
+>
+> **Not yet done — needs verification before relying on it:**
+> 1. **Version floor unknown.** The doc states no minimum Hermes version. Confirm the plugin loader (`ctx.register_platform`, `~/.hermes/plugins/` discovery) exists in the installed Hermes on each target server before switching — older installs (the patch base was 0.10.0) may predate it.
+> 2. **Exact API unread.** The `plugin.yaml` schema and `register(ctx)`/`ctx` method signatures need to be read from the plugin-loader source, not just the overview doc, before implementing.
+> 3. **Scope to design properly.** Migrating fork-patch → plugin is its own project (new `plugin.yaml` + `register.py`, tests, doc/skill rewrite, deprecate the patch) — brainstorm + spec it; don't bolt it on.
+>
+> Until that migration lands and is verified on the target Hermes version, the fork patch below remains the supported path.
 
 ## The 16 touch-points
 

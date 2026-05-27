@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from .commands_sync import (
     build_manifest,
     fetch_hermes_native_commands,
 )
+from .agents import enumerate_agents_from_env
 from .config import BgosConfig
 from .state_store import StateStore
 
@@ -602,6 +604,20 @@ class BGOSAdapter(BasePlatformAdapter):
         # continuation suffixes (mirrors Telegram parity at
         # gateway/platforms/telegram.py:1457).
         self._max_message_length: int = _DEFAULT_MAX_MESSAGE_LENGTH
+        # Pairing-scope hot-refresh (v0.8.0). When inbound arrives for an
+        # assistant_id we don't recognize — almost always because the user
+        # exposed a new agent in the BGOS Integrations UI *after* the gateway
+        # started — we re-fetch whoami and reconcile the route map in place
+        # instead of dropping the message until the next restart.
+        # _scope_refresh_lock serializes concurrent refreshes (live WS + the
+        # REST poll loop can both hit an unknown id at once);
+        # _last_scope_refresh + _scope_refresh_cooldown rate-limit whoami so a
+        # genuinely-unknown id can't trigger a fetch on every poll tick.
+        self._scope_refresh_lock = asyncio.Lock()
+        self._last_scope_refresh: float = 0.0
+        self._scope_refresh_cooldown: float = float(
+            os.environ.get("BGOS_SCOPE_REFRESH_COOLDOWN", "10")
+        )
 
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
@@ -722,6 +738,23 @@ class BGOSAdapter(BasePlatformAdapter):
         # can either set BGOS_AGENTS env var next time or bind via curl.
         await self._push_agent_catalog_safe()
 
+        # Surface bound-assistant state explicitly so operators see at a glance
+        # whether any agents are exposed yet. Zero is the common fresh-install
+        # state (catalog pushed, user hasn't ticked agents in the UI) — and
+        # with hot-refresh that resolves on its own, no restart required.
+        bound = sorted(self._state.assistant_route.items())
+        if bound:
+            log.info(
+                "BGOS bound assistants: %s",
+                ", ".join(f"{aid}:{route}" for aid, route in bound),
+            )
+        else:
+            log.warning(
+                "BGOS: 0 assistants exposed yet — open BGOS Integrations → "
+                "Hermes → tick agent(s) → Save. New exposures hot-load "
+                "automatically (no gateway restart needed)."
+            )
+
         # Replay any messages that arrived while the adapter was down. The
         # cursor comes from the persisted last-id file ($HERMES_HOME/
         # bgos_last_id) — WITHOUT persistence every restart would backfill
@@ -738,6 +771,72 @@ class BGOSAdapter(BasePlatformAdapter):
         poll_interval = float(os.environ.get("BGOS_POLL_INTERVAL", "5"))
         self._poll_task = asyncio.create_task(self._poll_loop(poll_interval))
         return True
+
+    async def _refresh_pairing_scope(self) -> bool:
+        """Re-fetch the pairing scope from `GET /api/v1/integrations/me` and
+        reconcile the in-process assistant→route map (and WS room bindings)
+        with what BGOS now reports.
+
+        Called from `_handle_inbound` when a message arrives for an
+        assistant_id we don't recognize — the common case being the user
+        exposing a new agent in the BGOS Integrations UI *after* the gateway
+        started. Lets new assistants hot-load without a gateway restart.
+
+        Rate-limited: serialized by `_scope_refresh_lock` and gated by
+        `_scope_refresh_cooldown` (env `BGOS_SCOPE_REFRESH_COOLDOWN`, default
+        10s) so a flood of inbound for a genuinely-unknown id can't hammer
+        whoami. Fail-open — any error is logged and the route map left as-is.
+        Mirrors `connect()` (route map + WS bind + pairing_user_id); it does
+        NOT sync per-assistant command manifests, since connect() doesn't.
+
+        Returns True if the route map changed.
+        """
+        async with self._scope_refresh_lock:
+            now = time.monotonic()
+            if self._last_scope_refresh and (
+                now - self._last_scope_refresh < self._scope_refresh_cooldown
+            ):
+                return False
+            self._last_scope_refresh = now
+
+            try:
+                me = await self._api.whoami()
+            except Exception:
+                log.exception("pairing-scope refresh: whoami failed")
+                return False
+
+            if self.pairing_user_id is None:
+                self.pairing_user_id = me.get("user_id") or me.get("userId")
+
+            new_routes: dict[int, str] = {}
+            for entry in me.get("assistants", []):
+                aid = entry.get("assistant_id", entry.get("id"))
+                route = entry.get("agent_route")
+                if aid is None or route is None:
+                    continue
+                new_routes[aid] = route
+
+            old_ids = set(self._state.assistant_route.keys())
+            new_ids = set(new_routes.keys())
+            added = sorted(new_ids - old_ids)
+            removed = sorted(old_ids - new_ids)
+            if not added and not removed:
+                return False
+
+            for aid in added:
+                self._state.set_route(aid, new_routes[aid])
+            for aid in removed:
+                self._state.remove_assistant(aid)
+                if self._ws is not None:
+                    self._ws.unbind_assistant(aid)
+            if self._ws is not None and added:
+                self._ws.bind_assistants(list(new_routes.keys()))
+
+            log.info(
+                "bgos scope refreshed: added=%s removed=%s bound=%s",
+                added, removed, sorted(new_ids),
+            )
+            return True
 
     # -------------------------------------------------------------------------
     # Last-seen message-id persistence — prevents duplicate-replay on restart.
@@ -790,63 +889,26 @@ class BGOSAdapter(BasePlatformAdapter):
             await self._api.push_agent_catalog(
                 pairing_id=self.pairing_id, entries=agents,
             )
-            log.info("pushed agent catalog: %d entries", len(agents))
+            log.info(
+                "BGOS catalog pushed: %s",
+                ", ".join(
+                    f"{a['agent_route']}:{a.get('name', a['agent_route'])}"
+                    for a in agents
+                ),
+            )
         except Exception:
             log.exception("agent catalog push failed (non-fatal)")
 
     def _enumerate_agents(self) -> list[dict]:
         """Discover Hermes's configured agents for the agent-catalog push.
 
-        Checked in order; first non-empty source wins:
-
-        1. `BGOS_AGENTS_JSON` env var — a JSON list of
-           `{"agent_route": str, "name": str, "description"?: str,
-            "avatar_url"?: str}` objects. Use for rich descriptions or when
-           names contain commas/colons.
-        2. `BGOS_AGENTS` env var — comma-separated `route:Display Name` pairs
-           (e.g. `"hades:Hades,ramy:Ramy"`). If a bare route is given without
-           a colon, it's used as both route and display name.
-        3. (TODO — Phase 4) Hermes's runtime agent registry. When the adapter
-           can introspect the gateway's configured agents directly, this
-           env-var indirection goes away.
-
-        Returns `[]` when nothing is configured. Callers should treat an
-        empty list as a warn-but-continue condition, not an error.
+        Delegates to `agents.enumerate_agents_from_env`, the single source of
+        truth for the `BGOS_AGENTS_JSON` / `BGOS_AGENTS` precedence and the
+        `route:Display Name` spec format (also used by the pair CLI's
+        `--agents` flag and the doctor). Returns `[]` when nothing is
+        configured — callers treat that as warn-but-continue, not an error.
         """
-        raw_json = os.environ.get("BGOS_AGENTS_JSON", "").strip()
-        if raw_json:
-            try:
-                data = json.loads(raw_json)
-            except json.JSONDecodeError:
-                log.warning("BGOS_AGENTS_JSON is not valid JSON — ignoring")
-            else:
-                if isinstance(data, list):
-                    out = []
-                    for entry in data:
-                        if isinstance(entry, dict) and entry.get("agent_route"):
-                            out.append(entry)
-                    if out:
-                        return out
-
-        raw = os.environ.get("BGOS_AGENTS", "").strip()
-        if raw:
-            out: list[dict] = []
-            for piece in raw.split(","):
-                piece = piece.strip()
-                if not piece:
-                    continue
-                if ":" in piece:
-                    route, name = piece.split(":", 1)
-                    route = route.strip()
-                    name = name.strip() or route
-                else:
-                    route = piece
-                    name = piece
-                if route:
-                    out.append({"agent_route": route, "name": name})
-            return out
-
-        return []
+        return enumerate_agents_from_env()
 
     async def _poll_loop(self, interval: float) -> None:
         """Poll REST inbound every `interval` seconds.
@@ -1847,10 +1909,23 @@ class BGOSAdapter(BasePlatformAdapter):
             return
         route = self._state.get_route(assistant_id)
         if route is None:
-            log.warning(
-                "inbound for unknown assistant_id=%s — dropping", assistant_id,
+            # Unknown assistant — almost always the user just exposed a new
+            # agent in BGOS after the gateway started. Re-sync the pairing
+            # scope from whoami and retry the lookup once before giving up, so
+            # the message self-heals instead of being dropped until a manual
+            # restart. _refresh_pairing_scope is rate-limited internally.
+            log.info(
+                "inbound for unknown assistant_id=%s — refreshing pairing scope",
+                assistant_id,
             )
-            return
+            await self._refresh_pairing_scope()
+            route = self._state.get_route(assistant_id)
+            if route is None:
+                log.warning(
+                    "assistant_id=%s still unknown after refresh — dropping",
+                    assistant_id,
+                )
+                return
 
         # Persist the last-seen message id IMMEDIATELY after we confirm the
         # event is for a known assistant. Every inbound path past this point

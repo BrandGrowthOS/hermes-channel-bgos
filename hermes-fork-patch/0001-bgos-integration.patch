@@ -24,7 +24,7 @@ diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
 index 3a6ec244..dcd5d165 100644
 --- a/agent/prompt_builder.py
 +++ b/agent/prompt_builder.py
-@@ -422,6 +422,60 @@ PLATFORM_HINTS = {
+@@ -422,6 +422,76 @@ PLATFORM_HINTS = {
          "your response. Images are sent as native photos, and other files arrive as downloadable "
          "documents."
      ),

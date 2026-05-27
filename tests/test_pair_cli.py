@@ -115,3 +115,86 @@ def test_secrets_path_respects_hermes_home(tmp_path, monkeypatch):
     """Pure sync — no fixtures that need an event loop."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "custom"))
     assert secrets_path() == tmp_path / "custom" / "secrets" / "bgos.json"
+
+
+async def test_pair_cli_agents_pushes_catalog(mock_bgos_server, tmp_secrets_dir):
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "tok", "pairing_id": 55},
+    )
+    mock_bgos_server.on(
+        "POST", "/api/v1/integrations/pairings/55/agent-catalog",
+    ).respond(200, {})
+
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "host",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:David,hades:Hades",
+    ])
+    assert result.exit_code == 0, result.output
+
+    pe = mock_bgos_server.last_request("POST", "/api/v1/integrations/pair-exchange")
+    assert pe.json_body["agentCatalog"] == [
+        {"agent_route": "default", "name": "David"},
+        {"agent_route": "hades", "name": "Hades"},
+    ]
+
+    cat = mock_bgos_server.last_request(
+        "POST", "/api/v1/integrations/pairings/55/agent-catalog",
+    )
+    assert cat.headers["X-BGOS-Pairing"] == "tok"
+    assert cat.json_body == {"agents": [
+        {"agent_route": "default", "name": "David"},
+        {"agent_route": "hades", "name": "Hades"},
+    ]}
+
+
+async def test_wait_for_exposure_returns_when_assistants_appear():
+    from hermes_channel_bgos.pair_cli import wait_for_exposure
+
+    seq = [
+        {"assistants": []},
+        {"assistants": []},
+        {"assistants": [{"assistant_id": 892, "agent_route": "default", "name": "David"}]},
+    ]
+
+    class FakeApi:
+        def __init__(self):
+            self.i = 0
+
+        async def whoami(self):
+            r = seq[min(self.i, len(seq) - 1)]
+            self.i += 1
+            return r
+
+    api = FakeApi()
+    result = await wait_for_exposure(api, interval=0.01, timeout=5.0)
+    assert result == [{"assistant_id": 892, "agent_route": "default", "name": "David"}]
+    assert api.i >= 3
+
+
+async def test_wait_for_exposure_times_out_empty():
+    from hermes_channel_bgos.pair_cli import wait_for_exposure
+
+    class FakeApi:
+        async def whoami(self):
+            return {"assistants": []}
+
+    result = await wait_for_exposure(FakeApi(), interval=0.01, timeout=0.05)
+    assert result == []
+
+
+async def test_pair_cli_wait_for_exposure_timeout(mock_bgos_server, tmp_secrets_dir):
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "tok", "pairing_id": 7},
+    )
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 7, "assistants": []},
+    )
+
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "h",
+        "--base-url", mock_bgos_server.url,
+        "--wait-for-exposure", "--wait-timeout", "0.1", "--wait-interval", "0.02",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "expos" in result.output.lower()
