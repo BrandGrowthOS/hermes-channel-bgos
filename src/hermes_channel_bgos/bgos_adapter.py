@@ -1742,7 +1742,35 @@ class BGOSAdapter(BasePlatformAdapter):
             {"text": "Deny",               "callbackData": f"ea:deny:{approval_id}",
              "style": "danger",  "row_index": 1},
         ]
+        # Resolve the agent route for this approval (best-effort): prefer an
+        # explicit assistant_id in the gateway-provided metadata, else fall
+        # back to the single bound assistant. Mirrors the resolution used by
+        # `send_typing`.
+        assistant_id: int | None = None
+        if metadata and isinstance(metadata, dict):
+            cand = metadata.get("assistant_id")
+            if isinstance(cand, int):
+                assistant_id = cand
+        if assistant_id is None:
+            assistant_id = next(iter(self._state.assistant_route), None)
+        agent_route = (
+            self._state.get_route(assistant_id) if assistant_id is not None else None
+        ) or "hermes"
+
+        # The backend's ApprovalMetaDto (@ValidateNested) REQUIRES `tool`,
+        # `agent_route`, `risk`, and `request_id` (all non-optional). Omitting
+        # them 400s the POST — `send_exec_approval` then raises and Hermes'
+        # gateway silently falls back to a plain-text approval prompt (no
+        # buttons). `request_id` MUST be the string form of `approval_id` so
+        # it matches the `ea:<choice>:<approval_id>` callbackData the buttons
+        # carry (and the adapter's `_APPROVAL_CALLBACK_RE`). The extra keys
+        # below (command/session_key/approval_id/metadata) are retained for
+        # local debugging; the backend whitelist drops them today.
         approval_meta = {
+            "tool": command,
+            "agent_route": agent_route,
+            "risk": "high",
+            "request_id": str(approval_id),
             "command": command,
             "session_key": session_key,
             "approval_id": approval_id,

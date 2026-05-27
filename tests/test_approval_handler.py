@@ -83,6 +83,43 @@ async def test_send_exec_approval_posts_expected_payload(mock_bgos_server):
         await adapter.disconnect()
 
 
+async def test_approval_meta_conforms_to_backend_dto(mock_bgos_server):
+    """approvalMeta MUST carry the four fields the backend's ApprovalMetaDto
+    requires (`tool`, `agent_route`, `risk`, `request_id`).
+
+    Regression: the adapter used to send only {command, session_key,
+    approval_id, metadata}. The real backend runs `@ValidateNested()` against
+    ApprovalMetaDto (tool/agent_route/risk/request_id all required) and 400s
+    the POST — so `send_exec_approval` raised and Hermes' gateway fell back to
+    its plain-text approval prompt (no buttons). The mock server here returns
+    201 unconditionally, which is exactly why the original unit tests never
+    caught it; this test asserts the wire shape directly.
+    """
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 778})
+
+    adapter = await _connected_adapter(mock_bgos_server)  # assistant 7 → route "hades"
+    try:
+        await adapter.send_exec_approval(
+            chat_id=11,
+            command="rm -rf node_modules",
+            session_key="sess-abc-123",
+            description="Proceed?",
+        )
+        meta = mock_bgos_server.last_request(
+            "POST", "/api/v1/messages"
+        ).json_body["approvalMeta"]
+
+        # The four backend-required fields, correctly typed.
+        assert isinstance(meta.get("tool"), str) and meta["tool"]
+        assert meta.get("agent_route") == "hades"
+        assert meta.get("risk") in ("low", "medium", "high")
+        # request_id must be a STRING and equal the id baked into the
+        # `ea:<choice>:<id>` callbackData so the callback round-trips.
+        assert meta.get("request_id") == str(meta["approval_id"])
+    finally:
+        await adapter.disconnect()
+
+
 async def test_approval_id_monotonic_per_adapter(mock_bgos_server):
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 900})
 
