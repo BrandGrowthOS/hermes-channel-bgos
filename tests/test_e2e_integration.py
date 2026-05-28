@@ -322,3 +322,103 @@ async def test_multi_assistant_routing(mock_bgos_server, monkeypatch):
 
     by_route = {ev.agent_route: ev.text for ev in handled}
     assert by_route == {"hades": "to hades", "ramy": "to ramy"}
+
+
+async def test_a2a_reply_uses_chat_owner_not_addressed_assistant(mock_bgos_server, monkeypatch):
+    """A2A inbound events are addressed to this Hermes assistant, but the
+    side-thread chat can be owned by the peer assistant. send() must resolve
+    chat.assistantId from /chats/:id, otherwise /send-message skips the peer
+    bridge and the originating agent times out waiting for a tagged reply.
+    """
+    _seed_whoami(
+        mock_bgos_server,
+        assistants=[{"assistant_id": 894, "agent_route": "default"}],
+    )
+    mock_bgos_server.on("GET", "/api/v1/chats/950").respond(
+        200,
+        {"id": 950, "assistantId": 872, "kind": "a2a"},
+    )
+    mock_bgos_server.on("POST", "/api/v1/send-message").respond(
+        201,
+        {"message": {"id": 9001}},
+    )
+
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+
+    async def fake_handle(event: MessageEvent) -> None:
+        source = getattr(event, "source", None)
+        chat_id = getattr(event, "chat_id", None) or getattr(source, "chat_id")
+        await adapter.send(chat_id=chat_id, content=f"ack: {event.text}")
+
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+        await mock_bgos_server.emit_to_room(
+            "assistant:894", "inbound_message",
+            {
+                "chatId": 950,
+                "messageId": 8667,
+                "text": "Synthetic peer inbound test",
+                "userId": "user_1",
+                "assistantId": 894,
+                "messageType": "standard",
+                "peerConversationId": 71,
+                "turnState": "expecting_reply",
+            },
+        )
+        await asyncio.sleep(0.35)
+    finally:
+        await adapter.disconnect()
+
+    posts = [
+        r for r in mock_bgos_server.requests
+        if r.method == "POST" and r.path == "/api/v1/send-message"
+    ]
+    assert len(posts) == 1
+    assert posts[0].json_body["chatId"] == 950
+    assert posts[0].json_body["assistantId"] == 872
+    assert posts[0].json_body["text"] == "ack: Synthetic peer inbound test"
+
+
+async def test_empty_standard_inbound_is_dropped_after_cursor_advances(mock_bgos_server, monkeypatch):
+    """Restart reconciliation can emit empty standard events. They should not
+    resume Hermes sessions or resend a previous assistant answer.
+    """
+    _seed_whoami(mock_bgos_server)
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+
+    async def fake_handle(event: MessageEvent) -> None:
+        handled.append(event)
+
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+        await mock_bgos_server.emit_to_room(
+            "assistant:7", "inbound_message",
+            {
+                "chat_id": 11,
+                "message_id": 777,
+                "text": "",
+                "user_id": "u1",
+                "assistant_id": 7,
+                "message_type": "standard",
+                "files": [],
+            },
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        await adapter.disconnect()
+
+    assert handled == []
+    assert adapter._load_last_id() == 777

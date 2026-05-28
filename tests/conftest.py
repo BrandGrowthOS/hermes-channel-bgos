@@ -1,11 +1,20 @@
 """Pytest fixtures shared across the hermes-channel-bgos test suite."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from tests.mocks.mock_bgos_server import MockBgosServer
+
+
+# The package test suite asserts the vendor MessageEvent compatibility layer.
+# When tests run inside a full Hermes checkout, importing gateway.platforms.base
+# would switch the adapter to Hermes's runtime MessageEvent shape and make those
+# package-level assertions environment-dependent. Force the isolated mock path in
+# tests; production imports keep using Hermes when this env var is unset.
+os.environ.setdefault("HERMES_CHANNEL_BGOS_FORCE_MOCK_HERMES", "1")
 
 
 @pytest.fixture(autouse=True)

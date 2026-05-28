@@ -88,14 +88,36 @@ async def standalone_send(
         return {"error": "bgos standalone send: not paired (no token)"}
     api = BgosApi(BgosConfig(base_url=base_url, pairing_token=token))
     try:
-        resp = await api.post_message(chat_id=int(chat_id), text=message)
+        chat_key = int(chat_id)
+        assistant_id: int | None = None
+        try:
+            chat = await api.get_chat(chat_key)
+            raw_assistant_id = chat.get("assistantId", chat.get("assistant_id"))
+            assistant_id = int(raw_assistant_id) if raw_assistant_id is not None else None
+        except Exception:
+            assistant_id = None
+
+        if assistant_id is not None:
+            resp = await api.post_send_message(
+                chat_id=chat_key,
+                assistant_id=assistant_id,
+                text=message,
+                sender="assistant",
+                message_type="standard",
+            )
+            msg = resp.get("message") if isinstance(resp, dict) else None
+            msg_id = msg.get("id") if isinstance(msg, dict) else None
+        else:
+            # Legacy fallback. This saves a visible BGOS message, but cannot run
+            # the A2A bridge because /messages has no assistantId context.
+            resp = await api.post_message(chat_id=chat_key, text=message)
+            msg_id = resp.get("id") if isinstance(resp, dict) else None
     except BgosApiError as exc:
         return {"error": f"bgos standalone send: HTTP {exc.status}"}
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": f"bgos standalone send failed: {exc.__class__.__name__}"}
     finally:
         await api.close()
-    msg_id = resp.get("id") if isinstance(resp, dict) else None
     return {"success": True, "platform": "bgos", "chat_id": chat_id, "message_id": msg_id}
 
 

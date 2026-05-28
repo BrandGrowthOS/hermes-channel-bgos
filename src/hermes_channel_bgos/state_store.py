@@ -22,6 +22,7 @@ class StateStore:
     conversation_by_chat: dict[int, str] = field(default_factory=dict)
     last_assistant_message_by_chat: dict[int, int] = field(default_factory=dict)
     last_user_id_by_chat: dict[int, str] = field(default_factory=dict)
+    assistant_id_by_chat: dict[int, int] = field(default_factory=dict)
 
     def set_route(self, assistant_id: int, route: str) -> None:
         self.assistant_route[assistant_id] = route

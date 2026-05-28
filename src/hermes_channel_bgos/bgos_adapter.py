@@ -212,6 +212,8 @@ class MessageEvent:
         )
 
 try:  # pragma: no cover - exercised only when Hermes is installed
+    if os.environ.get("HERMES_CHANNEL_BGOS_FORCE_MOCK_HERMES"):
+        raise ImportError("test suite requested mock Hermes adapter")
     from gateway.config import Platform as _HermesPlatform  # type: ignore
     from gateway.platforms.base import (  # type: ignore
         BasePlatformAdapter,
@@ -522,11 +524,22 @@ class BGOSAdapter(BasePlatformAdapter):
         **kwargs`. We pass `Platform.BGOS` when Hermes is importable,
         fall back otherwise.
         """
-        if _HERMES_BGOS_PLATFORM is not None:
-            super().__init__(config, _HERMES_BGOS_PLATFORM)
+        hermes_platform = _HERMES_BGOS_PLATFORM
+        if hermes_platform is None:
+            try:
+                from gateway.config import Platform as _RuntimeHermesPlatform  # type: ignore
+                hermes_platform = _RuntimeHermesPlatform("bgos")  # plugin-registered pseudo-member
+            except Exception:
+                hermes_platform = None
+        if hermes_platform is not None:
+            super().__init__(config, hermes_platform)
         else:
-            # Mock path — accepts whatever we pass.
-            super().__init__()
+            # If real Hermes is importable before the BGOS plugin has registered
+            # Platform('bgos'), BasePlatformAdapter still requires (config,
+            # platform). A string platform is sufficient for the base class and
+            # keeps tests/import-order probes constructible. The in-repo mock
+            # also accepts these args.
+            super().__init__(config, "bgos")
         bgos_config = self._resolve_config(config)
         self._config = bgos_config
         self._api = BgosApi(bgos_config)
@@ -999,6 +1012,37 @@ class BGOSAdapter(BasePlatformAdapter):
                 self._ws = None
         await self._api.close()
 
+    async def _assistant_id_for_chat(self, chat_id: int) -> int | None:
+        """Return the BGOS assistant that owns `chat_id`.
+
+        For normal chats this lets us use `/api/v1/send-message` consistently.
+        For kind='a2a' side threads it is REQUIRED: `/api/v1/messages` only
+        saves a visible bubble, while `/api/v1/send-message` runs BGOS's
+        peer-conversation bridge so replies are delivered to the other agent
+        and the peer lifecycle/turn state is updated.
+        """
+        # Do not trust the inbound event's addressed assistant id as the
+        # chat owner. In BGOS a2a side threads can be owned by the peer chat
+        # while the inbound event is addressed to this Hermes assistant. Using
+        # that addressed id in /send-message makes the backend skip the peer
+        # bridge (`chat.assistantId !== senderAssistantId`), so replies become
+        # visible bubbles that the initiating peer never sees. Always refresh
+        # from GET /chats/:id when possible; keep the cache only as a legacy
+        # fallback for older/self-hosted backends.
+        cached = self._state.assistant_id_by_chat.get(chat_id)
+        try:
+            chat = await self._api.get_chat(chat_id)
+        except Exception:
+            log.debug("failed to resolve assistant_id for chat=%s", chat_id, exc_info=True)
+            return cached
+        assistant_id = chat.get("assistantId", chat.get("assistant_id")) if isinstance(chat, dict) else None
+        try:
+            assistant_id_int = int(assistant_id)
+        except (TypeError, ValueError):
+            return None
+        self._state.assistant_id_by_chat[chat_id] = assistant_id_int
+        return assistant_id_int
+
     def format_message(self, content: str) -> str:
         """Translate the agent's outbound text into BGOS-native form.
 
@@ -1101,18 +1145,41 @@ class BGOSAdapter(BasePlatformAdapter):
         for i, chunk in enumerate(chunks, start=1):
             suffix = f"\n({i}/{total})" if total > 1 else ""
             is_first = (i == 1)
-            resp = await self._api.post_message(
-                chat_id=int(chat_id),
-                text=chunk + suffix,
-                sender="assistant",
-                message_type="standard",
-                options=(options or None) if is_first else None,
-                render_mode=render_mode if is_first else None,
-                reply_to_id=(
-                    effective_reply_to if effective_reply_to is not None and is_first else None
-                ),
-            )
-            message_id = resp.get("id") if isinstance(resp, dict) else None
+            chat_key = int(chat_id)
+            assistant_id = await self._assistant_id_for_chat(chat_key)
+            if assistant_id is not None:
+                resp = await self._api.post_send_message(
+                    chat_id=chat_key,
+                    assistant_id=assistant_id,
+                    text=chunk + suffix,
+                    sender="assistant",
+                    message_type="standard",
+                    options=(options or None) if is_first else None,
+                    render_mode=render_mode if is_first else None,
+                    reply_to_id=(
+                        effective_reply_to if effective_reply_to is not None and is_first else None
+                    ),
+                )
+                message_obj = resp.get("message") if isinstance(resp, dict) else None
+                message_id = (
+                    message_obj.get("id") if isinstance(message_obj, dict) else None
+                )
+            else:
+                # Fallback for older/self-hosted BGOS backends that do not expose
+                # GET /chats/:id to pairings. This preserves legacy delivery, but
+                # a2a replies will not bridge without assistantId.
+                resp = await self._api.post_message(
+                    chat_id=chat_key,
+                    text=chunk + suffix,
+                    sender="assistant",
+                    message_type="standard",
+                    options=(options or None) if is_first else None,
+                    render_mode=render_mode if is_first else None,
+                    reply_to_id=(
+                        effective_reply_to if effective_reply_to is not None and is_first else None
+                    ),
+                )
+                message_id = resp.get("id") if isinstance(resp, dict) else None
             if isinstance(message_id, int):
                 last_message_id = message_id
             last_result = _send_result(message_id=message_id)
@@ -1990,6 +2057,10 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
         event = MessageEvent.from_ws(data, agent_route=route)
+        # Do NOT cache event.assistant_id as the chat owner here. For a2a
+        # peer messages, assistant_id is the addressed Hermes assistant, while
+        # chat.assistantId may be the peer-side thread owner. send() resolves
+        # the owner via GET /chats/:id so /send-message can run the peer bridge.
         # Surface user-attached files into the agent's view of the message.
         # Hermes's MessageEvent only carries `text` to the agent's prompt —
         # there's no first-class files/attachments slot downstream — so the
@@ -1997,6 +2068,22 @@ class BGOSAdapter(BasePlatformAdapter):
         # finding it in the text. Images become markdown image syntax for
         # vision-capable models; docs become labeled link lines.
         agent_visible_text = _format_inbound_files(event.text, event.files)
+
+        # BGOS can emit empty reconciliation/backfill events after gateway
+        # restarts. They carry no user-visible text and no attachments, but if
+        # dispatched into Hermes they resume stale sessions and can resend the
+        # previous assistant response. We already advanced the cursor above, so
+        # dropping them here preserves delivery semantics without replay loops.
+        if (
+            not agent_visible_text.strip()
+            and not event.files
+            and event.message_type == "standard"
+        ):
+            log.info(
+                "dropping empty BGOS inbound event chat=%s msg=%s",
+                event.chat_id, event.message_id,
+            )
+            return
 
         # Track the most-recent inbound user_id per chat. The PATCH
         # /api/v1/messages/{id} endpoint requires `userId` (backend's

@@ -97,23 +97,36 @@ async def test_adapter_send_posts_text_message(mock_bgos_server):
         await adapter.disconnect()
 
 
-async def test_adapter_send_accepts_reply_to_kwarg(mock_bgos_server):
-    """send() accepts reply_to for Hermes interface compatibility, but
-    backend's CreateMessageDto doesn't have a replyTo field yet — it gets
-    dropped by the whitelist. This test just verifies the kwarg doesn't
-    crash the call; Phase F will add backend support."""
+async def test_adapter_send_uses_send_message_when_chat_owner_resolves(mock_bgos_server):
+    """When GET /chats/:id resolves the owning assistant, send() must use
+    /send-message rather than /messages. /send-message is the backend path that
+    bridges kind='a2a' replies into peer_conversations and emits inbound_message
+    to the other assistant, matching the working Claude Code plugin.
+    """
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
-        200, {"pairing_id": 42, "assistants": []},
+        200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},
     )
-    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 301})
+    mock_bgos_server.on("GET", "/api/v1/chats/11").respond(
+        200, {"id": 11, "assistantId": 7, "kind": "a2a", "parentMessageId": 99},
+    )
+    mock_bgos_server.on("POST", "/api/v1/send-message").respond(
+        201, {"message": {"id": 301}},
+    )
 
     adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     await adapter.connect()
     try:
-        await adapter.send(chat_id=11, content="re: earlier", reply_to=100)
-        # Just confirms the call went through — no reply_to field on wire yet
-        req = mock_bgos_server.last_request("POST", "/api/v1/messages")
+        result = await adapter.send(chat_id=11, content="re: earlier", reply_to=100)
+        assert result.success is True
+        assert result.message_id == "301"
+
+        req = mock_bgos_server.last_request("POST", "/api/v1/send-message")
+        assert req.json_body["chatId"] == 11
+        assert req.json_body["assistantId"] == 7
+        assert req.json_body["text"] == "re: earlier"
         assert req.json_body["sender"] == "assistant"
+        assert req.json_body["messageType"] == "standard"
+        assert req.json_body["replyToId"] == 100
     finally:
         await adapter.disconnect()
 

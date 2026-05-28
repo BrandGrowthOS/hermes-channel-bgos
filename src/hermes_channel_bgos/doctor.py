@@ -52,20 +52,27 @@ def check_registration() -> CheckResult:
                 "plugin (symlink plugins/platforms/bgos into ~/.hermes/plugins/) "
                 "or apply the fork patch.",
         )
-    if getattr(Platform, "BGOS", None) is None:
-        return CheckResult(
-            "registration", FAIL, "Platform.BGOS not registered",
-            fix="Enable BGOS: plugin path — symlink plugins/platforms/bgos into "
-                "~/.hermes/plugins/bgos and restart; or legacy — apply "
-                "hermes-fork-patch/0001-bgos-integration.patch.",
-        )
-    # Distinguish plugin vs patch: the plugin loader records loaded plugins.
+    platform = getattr(Platform, "BGOS", None)
+    via = "patch"
+    if platform is None:
+        try:
+            from hermes_cli.plugins import discover_plugins  # type: ignore
+            discover_plugins(force=True)
+            platform = Platform("bgos")
+            via = "plugin"
+        except Exception:
+            return CheckResult(
+                "registration", FAIL, "Platform.BGOS not registered",
+                fix="Enable BGOS: plugin path — symlink plugins/platforms/bgos into "
+                    "~/.hermes/plugins/bgos and restart; or legacy — apply "
+                    "hermes-fork-patch/0001-bgos-integration.patch.",
+            )
+    # Distinguish plugin vs patch: the platform registry records plugin entries.
     try:
-        import gateway.platform_registry as _reg  # type: ignore
-        loaded = getattr(_reg, "loaded_platform_plugins", lambda: [])()
-        via = "plugin" if any("bgos" in str(p).lower() for p in loaded) else "patch"
+        from gateway.platform_registry import platform_registry  # type: ignore
+        via = "plugin" if platform_registry.is_registered("bgos") else via
     except Exception:
-        via = "patch"  # registry not present → must be the fork-patch build
+        pass
     return CheckResult("registration", OK, f"Platform.BGOS registered (via {via})")
 
 

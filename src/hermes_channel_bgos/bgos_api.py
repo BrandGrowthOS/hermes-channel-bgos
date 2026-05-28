@@ -56,7 +56,7 @@ class BgosApi:
     # Internals
     # -------------------------------------------------------------------------
 
-    def _headers(self, *, require_pairing: bool = True) -> dict[str, str]:
+    def _headers(self, *, require_pairing: bool = True, assistant_id: int | None = None) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self._config.pairing_token:
             headers["X-BGOS-Pairing"] = self._config.pairing_token
@@ -64,6 +64,8 @@ class BgosApi:
             raise RuntimeError(
                 "pairing token required for this endpoint but not configured"
             )
+        if assistant_id is not None:
+            headers["X-Caller-Assistant-Id"] = str(assistant_id)
         return headers
 
     async def _request(
@@ -74,6 +76,7 @@ class BgosApi:
         json: Any = None,
         params: Any = None,
         require_pairing: bool = True,
+        assistant_id: int | None = None,
     ) -> Any:
         # Diagnostic visibility (enabled via BGOS_DEBUG=1): one DEBUG line
         # per outbound HTTP call so operators can correlate streaming
@@ -99,7 +102,7 @@ class BgosApi:
             path,
             json=json,
             params=params,
-            headers=self._headers(require_pairing=require_pairing),
+            headers=self._headers(require_pairing=require_pairing, assistant_id=assistant_id),
         )
         if log.isEnabledFor(logging.DEBUG):
             log.debug(
@@ -179,6 +182,75 @@ class BgosApi:
     # -------------------------------------------------------------------------
     # Messages
     # -------------------------------------------------------------------------
+
+
+    async def get_chat(self, chat_id: int) -> dict:
+        """GET /api/v1/chats/{chat_id}. Returns chat metadata including assistantId and kind.
+
+        Used by standalone sends and adapter cache warmup to route A2A replies
+        through /send-message with the owning assistant id.
+        """
+        return await self._request("GET", f"/api/v1/chats/{chat_id}")
+
+    async def post_send_message(
+        self,
+        *,
+        chat_id: int,
+        assistant_id: int,
+        text: str,
+        sender: str = "assistant",
+        message_type: str = "standard",
+        files: list[dict] | None = None,
+        options: list[dict] | None = None,
+        approval_meta: dict | None = None,
+        render_mode: str | None = None,
+        reply_to_id: int | None = None,
+        turn_state: str | None = None,
+    ) -> dict:
+        """POST to /api/v1/send-message.
+
+        Unlike /api/v1/messages, this endpoint runs BGOS's peer-conversation
+        bridge for kind='a2a' chats, retro-tags replies with peerConversationId,
+        rotates turns, and emits inbound_message to the other assistant. This is
+        the path used by the working Claude Code plugin.
+        """
+        body: dict[str, Any] = {
+            "chatId": chat_id,
+            "assistantId": assistant_id,
+            "text": text,
+            "sender": sender,
+            "messageType": message_type,
+        }
+        if files:
+            body["files"] = files
+        if options:
+            body["options"] = options
+        if approval_meta is not None:
+            body["approvalMeta"] = approval_meta
+        if render_mode is not None:
+            body["renderMode"] = render_mode
+        if reply_to_id is not None:
+            body["replyToId"] = reply_to_id
+        if turn_state is not None:
+            body["turnState"] = turn_state
+        return await self._request("POST", "/api/v1/send-message", json=body)
+
+    async def peer_status(self, *, caller_assistant_id: int, peer_assistant_id: int) -> dict:
+        return await self._request(
+            "GET", f"/api/v1/peers/{peer_assistant_id}/status",
+            assistant_id=caller_assistant_id,
+        )
+
+    async def close_peer_conversation(
+        self, *, caller_assistant_id: int, peer_assistant_id: int, summary: str | None = None
+    ) -> dict:
+        body: dict[str, Any] = {"peerAssistantId": peer_assistant_id}
+        if summary:
+            body["summary"] = summary
+        return await self._request(
+            "POST", "/api/v1/peers/conversations/close",
+            json=body, assistant_id=caller_assistant_id,
+        )
 
     async def post_message(
         self,
