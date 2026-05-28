@@ -3,12 +3,16 @@ and the `/new` / `/retry` / `/status` bridge-local intercepts (Task 9).
 """
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter
 from hermes_channel_bgos.commands_sync import (
     BRIDGE_LOCAL_COMMANDS,
     build_manifest,
+    fetch_hermes_native_commands,
 )
 from hermes_channel_bgos.config import BgosConfig
 
@@ -86,6 +90,55 @@ def test_build_manifest_lowercases_names():
     native = [{"command": "HELP", "description": "uppercase"}]
     merged = build_manifest(native)
     assert any(c["command"] == "help" for c in merged)
+
+
+# ---------------------------------------------------------------------------
+# Hermes native command discovery
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_hermes_native_commands_reads_modern_registry_without_list_commands(monkeypatch):
+    """Regression: Hermes exposes COMMAND_REGISTRY, not list_commands().
+
+    The broken plugin imported hermes_cli.commands.list_commands, caught
+    ImportError, returned [], and therefore pushed only /new /retry /status to
+    BGOS.  Modern Hermes command discovery must read COMMAND_REGISTRY and
+    include gateway-available aliases such as /q.
+    """
+    class Cmd:
+        def __init__(self, name, description, *, aliases=(), args_hint="", cli_only=False):
+            self.name = name
+            self.description = description
+            self.aliases = aliases
+            self.args_hint = args_hint
+            self.cli_only = cli_only
+            self.gateway_config_gate = None
+
+    fake_pkg = types.ModuleType("hermes_cli")
+    fake_commands = types.ModuleType("hermes_cli.commands")
+    setattr(fake_commands, "COMMAND_REGISTRY", [
+        Cmd("help", "Show help"),
+        Cmd("background", "Run a prompt in the background", args_hint="<prompt>"),
+        Cmd("queue", "Queue a prompt", aliases=("q",), args_hint="<prompt>"),
+        Cmd("config", "Show config", cli_only=True),
+    ])
+    setattr(fake_commands, "_resolve_config_gates", lambda: set())
+    setattr(fake_commands, "_is_gateway_available", lambda cmd, overrides=None: not cmd.cli_only)
+    setattr(fake_commands, "_build_description", lambda cmd: (
+        f"{cmd.description} (usage: /{cmd.name} {cmd.args_hint})"
+        if cmd.args_hint else cmd.description
+    ))
+    setattr(fake_pkg, "commands", fake_commands)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.commands", fake_commands)
+
+    names = [c["command"] for c in fetch_hermes_native_commands("default")]
+
+    assert "help" in names
+    assert "background" in names
+    assert "queue" in names
+    assert "q" in names
+    assert "config" not in names
 
 
 # ---------------------------------------------------------------------------

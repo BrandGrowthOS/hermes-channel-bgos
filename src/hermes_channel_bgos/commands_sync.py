@@ -47,22 +47,75 @@ def build_manifest(native: list[dict]) -> list[dict]:
 
 
 def fetch_hermes_native_commands(agent_route: str) -> list[dict]:
-    """Return Hermes's native slash manifest for the given agent.
+    """Return Hermes's gateway-available slash manifest for ``agent_route``.
 
-    The exact internal API on Hermes is TBD (confirmed in Phase 4 against the
-    real repo). For now, attempt a best-effort import and fall back to an
-    empty list so the adapter still functions with only bridge-locals.
+    BGOS stores this list for the selected assistant and uses it to populate
+    the composer slash picker.  The source of truth in modern Hermes is
+    ``hermes_cli.commands.COMMAND_REGISTRY``.  Older drafts of this plugin
+    tried to import a non-existent ``list_commands`` helper, so discovery
+    always fell back to ``[]`` and BGOS showed only the three bridge-local
+    commands.  Keep this function intentionally defensive so command sync
+    never prevents the adapter from connecting.
     """
-    try:  # pragma: no cover - exercised only when Hermes is installed
-        from hermes_cli.commands import list_commands  # type: ignore
-    except ImportError:
+    del agent_route  # Hermes slash commands are currently profile-wide.
+
+    try:  # pragma: no cover - covered with synthetic modules in tests
+        from hermes_cli import commands as hc  # type: ignore
+    except Exception:
         return []
-    try:  # pragma: no cover
-        return [
-            {"command": c.name, "description": getattr(c, "description", "") or ""}
-            for c in list_commands(agent_route)
-        ]
+
+    entries: list[dict] = []
+    seen: set[str] = set()
+
+    def add(name: str, description: str) -> None:
+        normalized = (name or "").strip().lower().lstrip("/")
+        if not normalized or normalized in seen:
+            return
+        entries.append({"command": normalized, "description": description or f"Run /{normalized}"})
+        seen.add(normalized)
+
+    try:
+        registry = list(getattr(hc, "COMMAND_REGISTRY", []) or [])
+        resolve_gates = getattr(hc, "_resolve_config_gates", None)
+        overrides = resolve_gates() if callable(resolve_gates) else set()
+        is_available = getattr(hc, "_is_gateway_available", None)
+        build_description = getattr(hc, "_build_description", None)
+
+        for cmd in registry:
+            if callable(is_available) and not is_available(cmd, overrides):
+                continue
+            elif not callable(is_available) and getattr(cmd, "cli_only", False) and not getattr(cmd, "gateway_config_gate", None):
+                continue
+
+            name = getattr(cmd, "name", "")
+            if callable(build_description):
+                desc = build_description(cmd)
+            else:
+                args_hint = getattr(cmd, "args_hint", "") or ""
+                base = getattr(cmd, "description", "") or f"Run /{name}"
+                desc = f"{base} (usage: /{name} {args_hint})" if args_hint else base
+            add(name, str(desc))
+
+            aliases = getattr(cmd, "aliases", ()) or ()
+            if isinstance(aliases, (list, tuple, set)):
+                for alias in aliases:
+                    base = getattr(cmd, "description", "") or f"Run /{name}"
+                    add(str(alias), f"{base} (alias for /{name})")
+
+        iter_plugins = getattr(hc, "_iter_plugin_command_entries", None)
+        if callable(iter_plugins):
+            for name, description, args_hint in iter_plugins() or []:
+                suffix = f" (usage: /{name} {args_hint})" if args_hint else ""
+                add(name, f"{description}{suffix}")
+
+        return entries
     except Exception:  # pragma: no cover
-        # Defensive: if Hermes's API shape differs from what we guess, degrade
-        # gracefully rather than crashing the manifest sync.
-        return []
+        # Last-ditch compatibility with older Hermes versions that expose only
+        # COMMANDS = {'/help': '...'}; less precise, but still better than an
+        # empty native manifest.
+        try:
+            for name, description in (getattr(hc, "COMMANDS", {}) or {}).items():
+                add(name, str(description or ""))
+            return entries
+        except Exception:
+            return []
