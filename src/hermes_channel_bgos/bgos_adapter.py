@@ -546,6 +546,7 @@ class BGOSAdapter(BasePlatformAdapter):
         self._config = bgos_config
         self._api = BgosApi(bgos_config)
         self._state = StateStore()
+        self._consumed_peer_wait_replies_mtime_ns: int | None = None
         self._load_consumed_peer_wait_replies()
         self._ws: BgosWs | None = None
         self.pairing_id: int | None = None
@@ -886,34 +887,79 @@ class BGOSAdapter(BasePlatformAdapter):
         return hermes_home / "bgos_consumed_peer_wait_replies.json"
 
     def _load_consumed_peer_wait_replies(self) -> None:
+        path = self._consumed_peer_wait_replies_path()
         try:
-            raw = json.loads(self._consumed_peer_wait_replies_path().read_text())
+            stat = path.stat()
+            raw = json.loads(path.read_text())
         except (OSError, ValueError, TypeError):
             return
         if isinstance(raw, list):
             self._state.consumed_peer_wait_replies = [
                 item for item in raw if isinstance(item, dict)
             ][-200:]
+            self._consumed_peer_wait_replies_mtime_ns = stat.st_mtime_ns
+
+    def _refresh_consumed_peer_wait_replies_if_changed(self, *, force: bool = False) -> None:
+        path = self._consumed_peer_wait_replies_path()
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return
+        if force or self._consumed_peer_wait_replies_mtime_ns != mtime_ns:
+            self._load_consumed_peer_wait_replies()
+
+    @staticmethod
+    def _peer_wait_receipt_key(receipt: dict) -> tuple[Any, Any, Any, Any, Any]:
+        return (
+            receipt.get("conversationId"),
+            receipt.get("sideThreadChatId"),
+            receipt.get("sentMessageId"),
+            receipt.get("returnedReplyMessageId"),
+            receipt.get("createdAt"),
+        )
 
     def _persist_consumed_peer_wait_replies(self) -> None:
         try:
             path = self._consumed_peer_wait_replies_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(self._state.consumed_peer_wait_replies[-200:]))
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{id(self)}.tmp")
+            tmp.write_text(json.dumps(self._state.consumed_peer_wait_replies[-200:]))
+            tmp.replace(path)
+            self._consumed_peer_wait_replies_mtime_ns = path.stat().st_mtime_ns
         except OSError:
             log.warning("could not persist BGOS consumed peer wait replies")
 
     def _record_consumed_peer_wait_reply(self, receipt: dict) -> None:
         now = int(time.time())
         clean = {
+            "pending": bool(receipt.get("pending")),
             "conversationId": receipt.get("conversationId"),
             "sideThreadChatId": receipt.get("sideThreadChatId"),
             "sentMessageId": receipt.get("sentMessageId"),
             "returnedReplyMessageId": receipt.get("returnedReplyMessageId"),
+            "callerAssistantId": receipt.get("callerAssistantId"),
             "targetAssistantId": receipt.get("targetAssistantId"),
+            "parentMessageId": receipt.get("parentMessageId"),
             "createdAt": receipt.get("createdAt") or now,
         }
-        self._state.consumed_peer_wait_replies.append(clean)
+        self._refresh_consumed_peer_wait_replies_if_changed()
+        existing = [
+            item for item in self._state.consumed_peer_wait_replies
+            if self._peer_wait_receipt_key(item) != self._peer_wait_receipt_key(clean)
+        ]
+        if not clean["pending"] and clean.get("callerAssistantId") is None:
+            # Upgrade/remove this process's pending marker for the same target
+            # once the HTTP response gives us concrete message ids.
+            target_assistant_id = self._int_or_none(clean.get("targetAssistantId"))
+            existing = [
+                item for item in existing
+                if not (
+                    item.get("pending")
+                    and self._int_or_none(item.get("targetAssistantId")) == target_assistant_id
+                )
+            ]
+        existing.append(clean)
+        self._state.consumed_peer_wait_replies = existing
         self._state.consumed_peer_wait_replies = self._state.consumed_peer_wait_replies[-200:]
         self._persist_consumed_peer_wait_replies()
 
@@ -927,11 +973,25 @@ class BGOSAdapter(BasePlatformAdapter):
             return None
 
     def _is_consumed_peer_wait_reply(self, data: dict) -> bool:
+        self._refresh_consumed_peer_wait_replies_if_changed()
         msg_id = self._int_or_none(data.get("message_id"))
         chat_id = self._int_or_none(data.get("chat_id"))
         reply_to_id = self._int_or_none(data.get("reply_to_id"))
         conversation_id = self._int_or_none(data.get("peer_conversation_id"))
+        now = int(time.time())
         for receipt in list(self._state.consumed_peer_wait_replies):
+            created_at = self._int_or_none(receipt.get("createdAt"))
+            if created_at is not None and now - created_at > 300:
+                continue
+            if receipt.get("pending"):
+                # Pending markers are advisory only: they tell the adapter a
+                # cross-process waitForReply may soon persist a concrete
+                # consumed-reply receipt. They must not suppress by themselves,
+                # because legitimate later peer turns can share the same caller
+                # assistant/conversation shape. _wait_for_consumed_peer_wait_reply_race()
+                # gives helpers a short window to upgrade pending -> concrete,
+                # then this method drops only on exact message/reply IDs.
+                continue
             side_thread_chat_id = self._int_or_none(receipt.get("sideThreadChatId"))
             if side_thread_chat_id is not None and chat_id != side_thread_chat_id:
                 continue
@@ -949,6 +1009,27 @@ class BGOSAdapter(BasePlatformAdapter):
             if sent_message_id is not None and reply_to_id == sent_message_id:
                 return True
         return False
+
+    @staticmethod
+    def _looks_like_peer_wait_reply(data: dict) -> bool:
+        return (
+            data.get("message_type") == "standard"
+            and (
+                data.get("turn_state") == "expecting_reply"
+                or data.get("peer_conversation_id") is not None
+            )
+        )
+
+    async def _wait_for_consumed_peer_wait_reply_race(self, data: dict) -> bool:
+        if not self._looks_like_peer_wait_reply(data):
+            return False
+        # Cross-process waitForReply helpers can receive the HTTP reply and
+        # persist the consumed receipt within a few milliseconds of this live
+        # gateway receiving the same side-thread message over WS. Give that
+        # external writer a small race window, reload by mtime, then decide.
+        await asyncio.sleep(0.05)
+        self._refresh_consumed_peer_wait_replies_if_changed(force=True)
+        return self._is_consumed_peer_wait_reply(data)
 
     def _load_last_id(self) -> int:
         try:
@@ -2130,6 +2211,13 @@ class BGOSAdapter(BasePlatformAdapter):
         if self._is_consumed_peer_wait_reply(data):
             log.info(
                 "dropping already-consumed peer wait reply chat=%s msg=%s reply_to=%s conv=%s",
+                data.get("chat_id"), msg_id, data.get("reply_to_id"),
+                data.get("peer_conversation_id"),
+            )
+            return
+        if await self._wait_for_consumed_peer_wait_reply_race(data):
+            log.info(
+                "dropping peer wait reply after race-window recheck chat=%s msg=%s reply_to=%s conv=%s",
                 data.get("chat_id"), msg_id, data.get("reply_to_id"),
                 data.get("peer_conversation_id"),
             )

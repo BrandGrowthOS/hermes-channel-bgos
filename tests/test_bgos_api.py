@@ -303,6 +303,11 @@ async def test_send_peer_clamps_timeout_and_records_blocking_reply(mock_bgos_ser
         "turnState": "expecting_reply",
     }
     assert recorded == [{
+        "pending": True,
+        "callerAssistantId": 885,
+        "targetAssistantId": 894,
+        "parentMessageId": 8800,
+    }, {
         "conversationId": 73,
         "sideThreadChatId": 953,
         "sentMessageId": 8868,

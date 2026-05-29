@@ -4,6 +4,28 @@ BGOS channel adapter for [Nous Research's Hermes agent](https://github.com/NousR
 
 **Status:** Phase 1 — running in production. Message round-trips work end-to-end. Approvals render as 4-button inline bubbles. A handful of gotchas documented below.
 
+## One-command install
+
+Run this **on the server where Hermes runs**:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/BrandGrowthOS/hermes-channel-bgos/main/install.sh)
+```
+
+The installer detects the Hermes checkout and Python environment, clones/updates this plugin, installs it into the exact Hermes interpreter, registers BGOS through the modern plugin registry when available, falls back to the legacy fork patch when needed, writes the BGOS env defaults, optionally pairs with a BGOS code, restarts the gateway when it can detect the service, and finishes with `hermes-bgos-doctor`.
+
+For non-interactive installs:
+
+```bash
+BGOS_PAIR_CODE=BGOS-XXXX-XX \
+BGOS_AGENTS="default:Hermes" \
+bash <(curl -fsSL https://raw.githubusercontent.com/BrandGrowthOS/hermes-channel-bgos/main/install.sh)
+```
+
+Advanced overrides: `HERMES_INSTALL`, `HERMES_PYTHON`, `REPO_DIR`, `DEVICE_LABEL`, and `HERMES_SERVICE`.
+
+**v0.10.4 (2026-05-29) — Root install + cross-process waitForReply race fix.** Adds `install.sh` so Hermes servers can install/update the BGOS channel with one command. Fixes the peer `waitForReply` echo race found by Jeff's Hermes agent: the live gateway now refreshes consumed-reply receipts written by helper processes, writes a pending marker before the HTTP request starts, waits briefly during the WS race window for that marker to become a concrete receipt, and drops only exact already-returned peer replies instead of enqueueing them into Hermes. This prevents echo chains when an external tool/cron/helper calls `send_peer(wait_for_reply=True)` while preserving legitimate later peer turns.
+
 **v0.5.7 (2026-05-15) — Hotfix: bridge-local cursor advance.** Bridge-local slash commands (`/new`, `/status`, `/retry`, `/resume`, `/help`) were short-circuiting before the inbound cursor was persisted. The 5-second REST poll's `since_message_id` therefore stayed pinned to a stale value and kept re-fetching the same command from `/api/v1/integrations/inbound`, re-dispatching it on every tick. Caught live as 50+ "Conversation reset" acks for a single `/new`. Fix: `_save_last_id` is now called on every accepted inbound (including bridge-local) before any branch returns. If you're caught in a live loop, upgrade to 0.5.7 and restart Hermes; the cursor advances on the first tick after restart, so the loop stops within ~5s.
 
 **v0.5.0 (2026-05-12) — Telegram-parity round.** This release closes most of the UX gap between BGOS and the Telegram channel. No fork-patch changes required.

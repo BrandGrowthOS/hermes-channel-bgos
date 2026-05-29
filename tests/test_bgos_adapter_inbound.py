@@ -8,6 +8,7 @@ through the same translation path.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -391,6 +392,101 @@ async def test_wait_for_reply_poll_echo_is_dropped_after_restart(tmp_path, monke
         "peer_conversation_id": 73,
     }, batchable=False)
     assert received == []
+
+
+async def test_wait_for_reply_echo_reload_file_written_by_helper(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    adapter = _make_adapter()
+    adapter._state.set_route(885, "default")
+    receipt_path = tmp_path / "hermes_home" / "bgos_consumed_peer_wait_replies.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(json.dumps([{
+        "conversationId": "76",
+        "sideThreadChatId": 956,
+        "sentMessageId": 8981,
+        "returnedReplyMessageId": 8983,
+        "targetAssistantId": 894,
+    }]))
+    received: list[Any] = []
+    async def capture(event):
+        received.append(event)
+    adapter.handle_message = capture
+    await adapter._handle_inbound({
+        "assistant_id": 885,
+        "chat_id": 956,
+        "message_id": 8983,
+        "user_id": "user_1",
+        "text": "reply returned synchronously",
+        "message_type": "standard",
+        "reply_to_id": 8981,
+    }, batchable=False)
+    assert received == []
+
+
+async def test_wait_for_reply_echo_waits_for_cross_process_receipt_race(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    adapter = _make_adapter()
+    adapter._state.set_route(885, "default")
+    receipt_path = tmp_path / "hermes_home" / "bgos_consumed_peer_wait_replies.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    received: list[Any] = []
+    async def capture(event):
+        received.append(event)
+    adapter.handle_message = capture
+
+    async def helper_writes_receipt():
+        await asyncio.sleep(0.01)
+        receipt_path.write_text(json.dumps([{
+            "conversationId": "76",
+            "sideThreadChatId": 956,
+            "sentMessageId": 8981,
+            "returnedReplyMessageId": 8983,
+            "targetAssistantId": 894,
+        }]))
+
+    writer = asyncio.create_task(helper_writes_receipt())
+    await adapter._handle_inbound({
+        "assistant_id": 885,
+        "chat_id": 956,
+        "message_id": 8983,
+        "user_id": "user_1",
+        "text": "reply returned synchronously",
+        "message_type": "standard",
+        "reply_to_id": 8981,
+        "turn_state": "expecting_reply",
+    }, batchable=False)
+    await writer
+    assert received == []
+
+
+async def test_pending_wait_for_reply_marker_alone_does_not_drop_peer_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    helper = _make_adapter()
+    helper._record_consumed_peer_wait_reply({
+        "pending": True,
+        "callerAssistantId": 885,
+        "targetAssistantId": 894,
+        "parentMessageId": 8979,
+    })
+    adapter = _make_adapter()
+    adapter._state.set_route(885, "default")
+    received: list[Any] = []
+    async def capture(event):
+        received.append(event)
+    adapter.handle_message = capture
+    await adapter._handle_inbound({
+        "assistant_id": 885,
+        "chat_id": 956,
+        "message_id": 8983,
+        "user_id": "user_1",
+        "text": "peer turn while helper is still waiting",
+        "message_type": "standard",
+        "turn_state": "expecting_reply",
+    }, batchable=False)
+    assert len(received) == 1
+    assert received[0].text == "peer turn while helper is still waiting"
+
+
 async def test_wait_for_reply_false_peer_reply_still_delivers():
     adapter = _make_adapter()
     adapter._state.set_route(885, "default")
