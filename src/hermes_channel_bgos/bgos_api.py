@@ -284,6 +284,13 @@ class BgosApi:
             body["timeoutSeconds"] = max(1, min(int(timeout_seconds), 50))
         if turn_state is not None:
             body["turnState"] = turn_state
+        if wait_for_reply and on_wait_reply_consumed is not None:
+            on_wait_reply_consumed({
+                "pending": True,
+                "callerAssistantId": caller_assistant_id,
+                "targetAssistantId": target_assistant_id,
+                "parentMessageId": parent_message_id,
+            })
         resp = await self._request(
             "POST", f"/api/v1/peers/{target_assistant_id}/send",
             json=body, assistant_id=caller_assistant_id,
