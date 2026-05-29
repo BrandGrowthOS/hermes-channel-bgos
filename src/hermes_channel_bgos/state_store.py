@@ -23,6 +23,10 @@ class StateStore:
     last_assistant_message_by_chat: dict[int, int] = field(default_factory=dict)
     last_user_id_by_chat: dict[int, str] = field(default_factory=dict)
     assistant_id_by_chat: dict[int, int] = field(default_factory=dict)
+    # Replies already returned synchronously by /peers/:id/send waitForReply.
+    # If the same side-thread message later arrives by WS or REST backfill, the
+    # adapter advances the cursor but suppresses dispatch to avoid ping-pong.
+    consumed_peer_wait_replies: list[dict] = field(default_factory=list)
 
     def set_route(self, assistant_id: int, route: str) -> None:
         self.assistant_route[assistant_id] = route

@@ -5,7 +5,8 @@ is the one pre-auth endpoint (used to exchange a pair code for that token).
 
 Route coverage matches what the adapter + pair CLI need across Phase 1 tasks 2–13:
 pair-exchange, whoami, post/patch messages, inbound backfill, PUT commands,
-push agent catalog, create upload URL.
+push agent catalog, create upload URL, plus peer discovery/status/send helpers
+for one-shot a2a smoke tests.
 """
 from __future__ import annotations
 
@@ -240,6 +241,69 @@ class BgosApi:
             "GET", f"/api/v1/peers/{peer_assistant_id}/status",
             assistant_id=caller_assistant_id,
         )
+
+    async def list_peers(self, *, caller_assistant_id: int) -> list[dict]:
+        """GET /api/v1/peers with X-Caller-Assistant-Id.
+
+        The returned rows include `introduced`. Callers must not attempt to
+        create introductions themselves when it is false; user consent lives in
+        BGOS Agent Permissions.
+        """
+        resp = await self._request(
+            "GET", "/api/v1/peers", assistant_id=caller_assistant_id,
+        )
+        return resp if isinstance(resp, list) else []
+
+    async def send_peer(
+        self,
+        *,
+        caller_assistant_id: int,
+        target_assistant_id: int,
+        text: str,
+        parent_message_id: int,
+        wait_for_reply: bool = False,
+        timeout_seconds: int | None = None,
+        turn_state: str | None = None,
+        on_wait_reply_consumed: Any | None = None,
+    ) -> dict:
+        """POST /api/v1/peers/{targetAssistantId}/send.
+
+        `parent_message_id` is required by BGOS and should point to one of the
+        caller agent's visible messages in the parent chat. `timeout_seconds`
+        is client-side clamped to the backend's current max of 50. If
+        `wait_for_reply=True` returns a reply, `on_wait_reply_consumed` is
+        called with the IDs needed to suppress the same reply if it later
+        arrives over WS or REST reconciliation.
+        """
+        body: dict[str, Any] = {
+            "text": text,
+            "parentMessageId": parent_message_id,
+            "waitForReply": bool(wait_for_reply),
+        }
+        if timeout_seconds is not None:
+            body["timeoutSeconds"] = max(1, min(int(timeout_seconds), 50))
+        if turn_state is not None:
+            body["turnState"] = turn_state
+        resp = await self._request(
+            "POST", f"/api/v1/peers/{target_assistant_id}/send",
+            json=body, assistant_id=caller_assistant_id,
+        )
+        if (
+            wait_for_reply
+            and isinstance(resp, dict)
+            and resp.get("status") == "sent"
+            and isinstance(resp.get("reply"), dict)
+            and resp["reply"].get("messageId") is not None
+            and on_wait_reply_consumed is not None
+        ):
+            on_wait_reply_consumed({
+                "conversationId": resp.get("conversationId"),
+                "sideThreadChatId": resp.get("sideThreadChatId"),
+                "sentMessageId": resp.get("messageId"),
+                "returnedReplyMessageId": resp["reply"].get("messageId"),
+                "targetAssistantId": target_assistant_id,
+            })
+        return resp
 
     async def close_peer_conversation(
         self, *, caller_assistant_id: int, peer_assistant_id: int, summary: str | None = None

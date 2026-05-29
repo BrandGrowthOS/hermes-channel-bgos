@@ -250,3 +250,83 @@ async def test_require_pairing_token_when_missing(mock_bgos_server):
     with pytest.raises(RuntimeError, match="pairing token"):
         await api.whoami()
     await api.close()
+
+
+async def test_list_peers_uses_caller_assistant_header(mock_bgos_server):
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("GET", "/api/v1/peers").respond(
+        200, [{"assistantId": 894, "introduced": True}],
+    )
+
+    resp = await api.list_peers(caller_assistant_id=885)
+
+    assert resp == [{"assistantId": 894, "introduced": True}]
+    req = mock_bgos_server.last_request("GET", "/api/v1/peers")
+    assert req.headers["X-BGOS-Pairing"] == "pair_xyz"
+    assert req.headers["X-Caller-Assistant-Id"] == "885"
+    await api.close()
+
+
+async def test_send_peer_clamps_timeout_and_records_blocking_reply(mock_bgos_server):
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("POST", "/api/v1/peers/894/send").respond(
+        200,
+        {
+            "status": "sent",
+            "conversationId": 73,
+            "sideThreadChatId": 953,
+            "messageId": 8868,
+            "reply": {"messageId": 8870, "text": "hello", "fromAssistantId": 894},
+        },
+    )
+    recorded: list[dict] = []
+
+    resp = await api.send_peer(
+        caller_assistant_id=885,
+        target_assistant_id=894,
+        text="hello Athena",
+        parent_message_id=8800,
+        wait_for_reply=True,
+        timeout_seconds=85,
+        turn_state="expecting_reply",
+        on_wait_reply_consumed=recorded.append,
+    )
+
+    assert resp["reply"]["messageId"] == 8870
+    req = mock_bgos_server.last_request("POST", "/api/v1/peers/894/send")
+    assert req.headers["X-Caller-Assistant-Id"] == "885"
+    assert req.json_body == {
+        "text": "hello Athena",
+        "parentMessageId": 8800,
+        "waitForReply": True,
+        "timeoutSeconds": 50,
+        "turnState": "expecting_reply",
+    }
+    assert recorded == [{
+        "conversationId": 73,
+        "sideThreadChatId": 953,
+        "sentMessageId": 8868,
+        "returnedReplyMessageId": 8870,
+        "targetAssistantId": 894,
+    }]
+    await api.close()
+
+
+async def test_send_peer_surfaces_requires_introduction_without_auto_intro(mock_bgos_server):
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("POST", "/api/v1/peers/894/send").respond(
+        200,
+        {"status": "requires_introduction", "conversationId": None},
+    )
+
+    resp = await api.send_peer(
+        caller_assistant_id=885,
+        target_assistant_id=894,
+        text="hello Athena",
+        parent_message_id=8800,
+        wait_for_reply=True,
+    )
+
+    assert resp["status"] == "requires_introduction"
+    assert all("introductions" not in req.path for req in mock_bgos_server.requests)
+    await api.close()

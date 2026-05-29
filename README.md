@@ -26,6 +26,7 @@ Backend dependencies still in flight: `DELETE /api/v1/messages/{id}` (for stream
 - [Manual setup](#manual-setup)
 - [Configuration (env vars)](#configuration-env-vars)
 - [First-time pairing](#first-time-pairing)
+- [Peer-to-peer test/setup checklist](#peer-to-peer-testsetup-checklist)
 - [Bridge-local slash commands](#bridge-local-slash-commands)
 - [Approvals](#approvals)
 - [Troubleshooting](#troubleshooting)
@@ -336,6 +337,57 @@ BGOS_ALLOW_ALL_USERS=true
 4. Open the assistant's chat in the app and send a message. You should see a reply within a few seconds.
 
 ---
+
+## Peer-to-peer test/setup checklist
+
+After installing or updating the plugin, use the BGOS peer endpoints exactly in this order. All calls use the Hermes/BGOS pairing token plus `X-Caller-Assistant-Id` for the agent that is initiating the test.
+
+1. List peers:
+   ```http
+   GET /api/v1/peers
+   X-BGOS-Pairing: <pairing-token>
+   X-Caller-Assistant-Id: <callerAssistantId>
+   ```
+2. Confirm the target assistant exists and has `introduced: true`.
+   - If `introduced: false`, stop. Do **not** create an introduction from the integration. Return `status="requires_introduction"` and tell the user to enable **Agent Permissions** manually in BGOS.
+3. Check presence:
+   ```http
+   GET /api/v1/peers/:targetAssistantId/status
+   X-Caller-Assistant-Id: <callerAssistantId>
+   ```
+   Confirm `online: true` before expecting a one-shot reply.
+4. Send through the peer endpoint, not `/messages`:
+   ```http
+   POST /api/v1/peers/:targetAssistantId/send
+   X-Caller-Assistant-Id: <callerAssistantId>
+   Content-Type: application/json
+
+   {
+     "text": "Peer routing smoke test. Please reply once.",
+     "parentMessageId": 12345,
+     "waitForReply": true,
+     "timeoutSeconds": 50,
+     "turnState": "expecting_reply"
+   }
+   ```
+
+Required send-body rules:
+- `parentMessageId` is mandatory. It must point to one of the caller agent's previous visible messages in the current parent/main chat. BGOS uses it to anchor the side-thread card.
+- `waitForReply` may be `true` or `false`.
+- `timeoutSeconds` is currently capped at **50**. Older examples that mention 85 are wrong. Client helpers clamp to 50 before sending.
+- `turnState` must be one of `expecting_reply`, `more_coming`, or `final`.
+
+If `waitForReply=true`, the response should include both `conversationId` and `reply`. The plugin records `{conversationId, sideThreadChatId, sentMessageId, returnedReplyMessageId, targetAssistantId}` so the same reply can be marked seen and suppressed if it later arrives over WS or polling. This prevents a2a echo loops and ping-pong between two Hermes/BGOS plugins. If `waitForReply=false`, the later peer reply is delivered normally.
+
+Diagnostics if a one-shot test fails:
+1. `GET /api/v1/peers`
+2. Confirm the target exists and `introduced=true`.
+3. `GET /api/v1/peers/:id/status` and confirm `online=true`.
+4. `POST /api/v1/peers/:id/send`.
+5. If `waitForReply=true`, verify the response contains `reply` and `conversationId`.
+6. Inspect the side thread with `GET /api/v1/chats/:id` and `GET /api/v1/chats/:id/messages` using `sideThreadChatId` from the send response.
+
+Security boundary: pairing/integration tokens may read peer and introduction status, but must never create, update, or delete introductions. Only the authenticated user in BGOS should enable Agent Permissions.
 
 ## Bridge-local slash commands
 

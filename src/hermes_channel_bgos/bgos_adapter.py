@@ -128,6 +128,8 @@ _INBOUND_CAMEL_ALIASES: dict[str, str] = {
     "commandName": "command_name",
     "commandArgs": "command_args",
     "replyToId": "reply_to_id",
+    "peerConversationId": "peer_conversation_id",
+    "turnState": "turn_state",
 }
 
 
@@ -544,6 +546,7 @@ class BGOSAdapter(BasePlatformAdapter):
         self._config = bgos_config
         self._api = BgosApi(bgos_config)
         self._state = StateStore()
+        self._load_consumed_peer_wait_replies()
         self._ws: BgosWs | None = None
         self.pairing_id: int | None = None
         # The user who owns this pairing. Populated in connect() from
@@ -875,6 +878,77 @@ class BGOSAdapter(BasePlatformAdapter):
             os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")),
         )
         return hermes_home / "bgos_last_id"
+
+    def _consumed_peer_wait_replies_path(self) -> Path:
+        hermes_home = Path(
+            os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")),
+        )
+        return hermes_home / "bgos_consumed_peer_wait_replies.json"
+
+    def _load_consumed_peer_wait_replies(self) -> None:
+        try:
+            raw = json.loads(self._consumed_peer_wait_replies_path().read_text())
+        except (OSError, ValueError, TypeError):
+            return
+        if isinstance(raw, list):
+            self._state.consumed_peer_wait_replies = [
+                item for item in raw if isinstance(item, dict)
+            ][-200:]
+
+    def _persist_consumed_peer_wait_replies(self) -> None:
+        try:
+            path = self._consumed_peer_wait_replies_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self._state.consumed_peer_wait_replies[-200:]))
+        except OSError:
+            log.warning("could not persist BGOS consumed peer wait replies")
+
+    def _record_consumed_peer_wait_reply(self, receipt: dict) -> None:
+        now = int(time.time())
+        clean = {
+            "conversationId": receipt.get("conversationId"),
+            "sideThreadChatId": receipt.get("sideThreadChatId"),
+            "sentMessageId": receipt.get("sentMessageId"),
+            "returnedReplyMessageId": receipt.get("returnedReplyMessageId"),
+            "targetAssistantId": receipt.get("targetAssistantId"),
+            "createdAt": receipt.get("createdAt") or now,
+        }
+        self._state.consumed_peer_wait_replies.append(clean)
+        self._state.consumed_peer_wait_replies = self._state.consumed_peer_wait_replies[-200:]
+        self._persist_consumed_peer_wait_replies()
+
+    @staticmethod
+    def _int_or_none(value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _is_consumed_peer_wait_reply(self, data: dict) -> bool:
+        msg_id = self._int_or_none(data.get("message_id"))
+        chat_id = self._int_or_none(data.get("chat_id"))
+        reply_to_id = self._int_or_none(data.get("reply_to_id"))
+        conversation_id = self._int_or_none(data.get("peer_conversation_id"))
+        for receipt in list(self._state.consumed_peer_wait_replies):
+            side_thread_chat_id = self._int_or_none(receipt.get("sideThreadChatId"))
+            if side_thread_chat_id is not None and chat_id != side_thread_chat_id:
+                continue
+            receipt_conversation_id = self._int_or_none(receipt.get("conversationId"))
+            if (
+                receipt_conversation_id is not None
+                and conversation_id is not None
+                and conversation_id != receipt_conversation_id
+            ):
+                continue
+            returned_reply_id = self._int_or_none(receipt.get("returnedReplyMessageId"))
+            sent_message_id = self._int_or_none(receipt.get("sentMessageId"))
+            if returned_reply_id is not None and msg_id == returned_reply_id:
+                return True
+            if sent_message_id is not None and reply_to_id == sent_message_id:
+                return True
+        return False
 
     def _load_last_id(self) -> int:
         try:
@@ -2047,6 +2121,19 @@ class BGOSAdapter(BasePlatformAdapter):
         msg_id = data.get("message_id")
         if isinstance(msg_id, int):
             self._save_last_id(msg_id)
+
+        # A blocking peer helper with waitForReply=true has already consumed
+        # this reply from the HTTP response. BGOS may still deliver the same
+        # side-thread message later over WS or REST reconciliation. Mark it
+        # seen, then drop it so two Hermes/BGOS agents do not answer each
+        # other's already-consumed replies forever.
+        if self._is_consumed_peer_wait_reply(data):
+            log.info(
+                "dropping already-consumed peer wait reply chat=%s msg=%s reply_to=%s conv=%s",
+                data.get("chat_id"), msg_id, data.get("reply_to_id"),
+                data.get("peer_conversation_id"),
+            )
+            return
 
         # Bridge-local intercept (Task 9): slash_command messages whose
         # command name is in BRIDGE_LOCAL_COMMANDS are handled by the adapter.

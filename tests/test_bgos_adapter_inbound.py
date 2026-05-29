@@ -336,6 +336,80 @@ async def test_messages_with_files_bypass_batching():
     assert len(received) == 1
 
 
+async def test_wait_for_reply_ws_echo_is_dropped_after_cursor_advance(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    adapter = _make_adapter()
+    adapter._state.set_route(885, "default")
+    adapter._record_consumed_peer_wait_reply({
+        "conversationId": 73,
+        "sideThreadChatId": 953,
+        "sentMessageId": 8868,
+        "returnedReplyMessageId": 8870,
+        "targetAssistantId": 894,
+    })
+    received: list[Any] = []
+    async def capture(event):
+        received.append(event)
+    adapter.handle_message = capture
+    await adapter._handle_inbound({
+        "assistantId": 885,
+        "chatId": 953,
+        "messageId": 8870,
+        "userId": "user_1",
+        "text": "Athena already replied through waitForReply",
+        "messageType": "standard",
+        "replyToId": 8868,
+        "peerConversationId": 73,
+        "turnState": "expecting_reply",
+    })
+    assert received == []
+    assert (tmp_path / "hermes_home" / "bgos_last_id").read_text().strip() == "8870"
+async def test_wait_for_reply_poll_echo_is_dropped_after_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    first = _make_adapter()
+    first._record_consumed_peer_wait_reply({
+        "conversationId": 73,
+        "sideThreadChatId": 953,
+        "sentMessageId": 8868,
+        "returnedReplyMessageId": 8870,
+        "targetAssistantId": 894,
+    })
+    adapter = _make_adapter()
+    adapter._state.set_route(885, "default")
+    received: list[Any] = []
+    async def capture(event):
+        received.append(event)
+    adapter.handle_message = capture
+    await adapter._handle_inbound({
+        "assistant_id": 885,
+        "chat_id": 953,
+        "message_id": 8870,
+        "user_id": "user_1",
+        "text": "replayed reply",
+        "message_type": "standard",
+        "reply_to_id": 8868,
+        "peer_conversation_id": 73,
+    }, batchable=False)
+    assert received == []
+async def test_wait_for_reply_false_peer_reply_still_delivers():
+    adapter = _make_adapter()
+    adapter._state.set_route(885, "default")
+    received: list[Any] = []
+    async def capture(event):
+        received.append(event)
+    adapter.handle_message = capture
+    await adapter._handle_inbound({
+        "assistant_id": 885,
+        "chat_id": 953,
+        "message_id": 8871,
+        "user_id": "user_1",
+        "text": "new async peer turn",
+        "message_type": "standard",
+        "reply_to_id": 8868,
+        "peer_conversation_id": 73,
+    }, batchable=False)
+    assert len(received) == 1
+    assert received[0].text == "new async peer turn"
 async def test_different_chats_batched_independently():
     adapter = _make_adapter()
     adapter._state.set_route(7, "default")
