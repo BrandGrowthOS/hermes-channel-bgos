@@ -10,7 +10,7 @@ import logging as _logging
 import os as _os
 import sys as _sys
 
-__version__ = "0.10.2"
+__version__ = "0.10.3"
 
 
 # Sentinel attribute set on a handler we install so subsequent imports
