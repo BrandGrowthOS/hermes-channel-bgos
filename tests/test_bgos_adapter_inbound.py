@@ -1008,3 +1008,170 @@ async def test_hot_refresh_cooldown_limits_whoami(monkeypatch):
         })
     assert len(calls) == 1  # second inbound's refresh blocked by cooldown
     await adapter._api.close()
+
+
+# ---------------------------------------------------------------------------
+# Server-authoritative chat addressing (2026-05-30 hardening). The adapter
+# must never originate a chat id the agent invented: outbound send/edit/
+# get_chat_info are restricted to chats actually received inbound, and the
+# opaque sessionHandle carried on inbound is round-tripped back instead of a
+# raw chatId. See bgos_adapter.UnknownChatTarget / _resolve_outbound_target.
+# ---------------------------------------------------------------------------
+
+
+async def test_inbound_records_chat_and_session_handle():
+    """An inbound event marks its chat as received and stashes the
+    server-minted sessionHandle keyed by chat."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+
+    async def noop(event):
+        pass
+    adapter.handle_message = noop
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "chat_id": 42,
+        "message_id": 1,
+        "user_id": "u",
+        "text": "hello",
+        "files": [],
+        "message_type": "standard",
+        "sessionHandle": "sh_opaque_abc",
+    })
+    assert adapter._state.has_received_chat(42)
+    assert adapter._state.session_handle_for_chat(42) == "sh_opaque_abc"
+
+
+async def test_inbound_records_chat_without_handle():
+    """Older backends that don't mint a sessionHandle still get the chat
+    recorded (so replies aren't blocked); handle resolution returns None."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+
+    async def noop(event):
+        pass
+    adapter.handle_message = noop
+
+    await adapter._handle_inbound({
+        "assistant_id": 7, "chat_id": 77, "message_id": 1,
+        "user_id": "u", "text": "hi", "files": [], "message_type": "standard",
+    })
+    assert adapter._state.has_received_chat(77)
+    assert adapter._state.session_handle_for_chat(77) is None
+
+
+async def test_inbound_accepts_snake_case_session_handle():
+    """REST backfill uses snake_case `session_handle`; capture it too."""
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+
+    async def noop(event):
+        pass
+    adapter.handle_message = noop
+
+    await adapter._handle_inbound({
+        "assistant_id": 7, "chat_id": 88, "message_id": 1,
+        "user_id": "u", "text": "hi", "files": [], "message_type": "standard",
+        "session_handle": "sh_rest_xyz",
+    })
+    assert adapter._state.session_handle_for_chat(88) == "sh_rest_xyz"
+
+
+async def test_send_rejects_unreceived_chat_without_dispatch(monkeypatch):
+    """send() to a chat the adapter never received inbound is rejected and
+    no POST is attempted (the adapter never originates an invented id)."""
+    adapter = _make_adapter()
+    posted: list[Any] = []
+
+    async def boom_send(**kwargs):
+        posted.append(kwargs)
+        raise AssertionError("must not POST for an unreceived chat")
+
+    monkeypatch.setattr(adapter._api, "post_send_message", boom_send)
+    monkeypatch.setattr(adapter._api, "post_message", boom_send)
+
+    result = await adapter.send(chat_id=99999, content="who am I talking to?")
+    assert result.success is False
+    assert result.error == "unknown_chat_target"
+    assert posted == []
+
+
+async def test_send_round_trips_session_handle(monkeypatch):
+    """When the inbound for a chat carried a sessionHandle, send() forwards
+    it in the outbound POST body (so the server resolves the chat from the
+    opaque handle, not the raw id)."""
+    adapter = _make_adapter()
+    adapter._state.record_inbound_chat(42, "sh_handle_42")
+    captured: dict = {}
+
+    async def fake_post_message(**kwargs):
+        captured.update(kwargs)
+        return {"id": 555}
+
+    # No chat-owner resolution → falls to post_message path.
+    async def no_owner(chat_id):
+        return None
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post_message)
+    monkeypatch.setattr(adapter, "_assistant_id_for_chat", no_owner)
+
+    result = await adapter.send(chat_id=42, content="reply text")
+    assert result.success is True
+    assert captured["session_handle"] == "sh_handle_42"
+    assert captured["chat_id"] == 42
+
+
+async def test_send_received_chat_without_handle_passes_none(monkeypatch):
+    """A received chat with no stashed handle still sends (raw chatId during
+    the rollout window); session_handle is None."""
+    adapter = _make_adapter()
+    adapter._state.record_inbound_chat(42)
+    captured: dict = {}
+
+    async def fake_post_message(**kwargs):
+        captured.update(kwargs)
+        return {"id": 556}
+
+    async def no_owner(chat_id):
+        return None
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post_message)
+    monkeypatch.setattr(adapter, "_assistant_id_for_chat", no_owner)
+
+    result = await adapter.send(chat_id=42, content="reply text")
+    assert result.success is True
+    assert captured["session_handle"] is None
+
+
+async def test_edit_message_rejects_unreceived_chat(monkeypatch):
+    """edit_message() into a chat the adapter never received is rejected and
+    never PATCHes."""
+    adapter = _make_adapter()
+
+    async def boom_patch(*args, **kwargs):
+        raise AssertionError("must not PATCH for an unreceived chat")
+
+    monkeypatch.setattr(adapter._api, "patch_message", boom_patch)
+
+    result = await adapter.edit_message(
+        chat_id=99999, message_id=300, content="updated",
+    )
+    assert result.success is False
+    assert result.error == "unknown_chat_target"
+
+
+async def test_get_chat_info_rejects_unreceived_chat():
+    """get_chat_info() raises for a chat the adapter never received."""
+    from hermes_channel_bgos.bgos_adapter import UnknownChatTarget
+
+    adapter = _make_adapter()
+    with pytest.raises(UnknownChatTarget):
+        await adapter.get_chat_info(99999)
+
+
+async def test_get_chat_info_accepts_received_chat():
+    adapter = _make_adapter()
+    adapter._state.record_inbound_chat(42)
+    info = await adapter.get_chat_info(42)
+    assert info == {"platform": "bgos", "chat_id": 42}

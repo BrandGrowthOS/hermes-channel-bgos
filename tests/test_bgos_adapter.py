@@ -74,6 +74,9 @@ async def test_adapter_send_posts_text_message(mock_bgos_server):
 
     adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     await adapter.connect()
+    # Server-authoritative chat addressing: send() requires chat 11 to have
+    # been received inbound. Seed it as received.
+    adapter._state.record_inbound_chat(11)
     try:
         result = await adapter.send(chat_id=11, content="hello back")
         # SendResult.message_id is str (matches fork's type), SendResult.success
@@ -115,6 +118,9 @@ async def test_adapter_send_uses_send_message_when_chat_owner_resolves(mock_bgos
 
     adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     await adapter.connect()
+    # Server-authoritative chat addressing: send() requires chat 11 to have
+    # been received inbound. Seed it as received.
+    adapter._state.record_inbound_chat(11)
     try:
         result = await adapter.send(chat_id=11, content="re: earlier", reply_to=100)
         assert result.success is True
@@ -137,6 +143,9 @@ async def test_adapter_get_chat_info_returns_minimal(mock_bgos_server):
     )
     adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     await adapter.connect()
+    # Server-authoritative chat addressing: get_chat_info() refuses a chat the
+    # adapter never received inbound. Seed chat 42 as received.
+    adapter._state.record_inbound_chat(42)
     try:
         info = await adapter.get_chat_info(42)
         assert info == {"platform": "bgos", "chat_id": 42}
@@ -168,8 +177,18 @@ async def test_assistant_route_map_is_defensive_copy(mock_bgos_server):
 
 def _make_adapter() -> BGOSAdapter:
     """Lightweight adapter for unit-testing edit/delete/typing without
-    spinning up the mock backend. Tests monkeypatch the api / ws fields."""
-    return BGOSAdapter(BgosConfig(base_url="http://x", pairing_token="pair_xyz"))
+    spinning up the mock backend. Tests monkeypatch the api / ws fields.
+
+    Pre-seeds the chat ids these unit tests address into the adapter's
+    received-chat allow-set. Server-authoritative chat addressing (2026-05-30
+    hardening) makes the adapter reject outbound send/edit to a chat it never
+    received inbound; in production that set is populated by `_handle_inbound`,
+    but these tests call send/edit_message directly, so we seed it here to
+    mirror a legitimately-addressed chat."""
+    adapter = BGOSAdapter(BgosConfig(base_url="http://x", pairing_token="pair_xyz"))
+    for chat_id in (1, 11, 42, 99):
+        adapter._state.record_inbound_chat(chat_id)
+    return adapter
 
 
 async def test_edit_message_calls_patch_message(monkeypatch):
