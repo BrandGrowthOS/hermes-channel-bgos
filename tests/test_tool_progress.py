@@ -129,6 +129,10 @@ async def test_edit_message_first_tool_posts_card(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
     adapter._state.last_user_id_by_chat[42] = "user_abc"
@@ -164,6 +168,10 @@ async def test_edit_message_subsequent_tool_patches_card(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
@@ -200,6 +208,10 @@ async def test_send_first_tool_posts_card(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7001})
 
     try:
@@ -230,6 +242,10 @@ async def test_delete_message_finalizes_card_at_card_id(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/7001").respond(200, {"id": 7001})
     mock_bgos_server.on("DELETE", "/api/v1/messages/7001").respond(204, None)
@@ -261,6 +277,10 @@ async def test_delete_message_finalizes_card(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     mock_bgos_server.on("DELETE", "/api/v1/messages/500").respond(204, None)
@@ -302,6 +322,10 @@ async def test_plain_send_finalizes_active_tool_progress_card(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     # First POST → card creation. Second PATCH → card finalize. Third
     # POST → the plain agent reply. Fourth POST → next turn's fresh card.
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7001})
@@ -341,6 +365,10 @@ async def test_plain_send_no_active_card_is_noop(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9100})
 
     try:
@@ -360,6 +388,10 @@ async def test_edit_message_replaces_not_appends(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
@@ -390,6 +422,10 @@ async def test_concurrent_first_tools_post_only_once(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
@@ -429,6 +465,10 @@ async def test_disconnect_clears_tool_progress_state(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
     adapter._state.last_user_id_by_chat[42] = "user_abc"
@@ -452,6 +492,10 @@ async def test_edit_message_non_tool_text_falls_through(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("PATCH", "/api/v1/messages/500").respond(200, {"id": 500})
     adapter._state.set_route(7, "default")
     adapter._state.last_user_id_by_chat[42] = "user_abc"
@@ -488,6 +532,10 @@ async def test_patch_falls_back_to_pairing_user_id(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
@@ -518,6 +566,10 @@ async def test_per_chat_user_id_wins_over_pairing_user_id(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")
@@ -546,6 +598,10 @@ async def test_finalize_card_falls_back_to_pairing_user_id(mock_bgos_server):
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))
+    # Server-authoritative chat addressing: outbound send/edit require the
+    # target chat to have been received inbound. These tests drive the
+    # tool_progress card on chat 42 directly, so seed it as received.
+    adapter._state.record_inbound_chat(42)
     mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 9001})
     mock_bgos_server.on("PATCH", "/api/v1/messages/9001").respond(200, {"id": 9001})
     adapter._state.set_route(7, "default")

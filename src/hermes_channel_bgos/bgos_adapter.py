@@ -166,6 +166,17 @@ _MDV2_LEAK_RE = re.compile(r"\\([,.!?:;@\-+=|#<>{}])")
 _DEFAULT_MAX_MESSAGE_LENGTH = 10_000
 
 
+class UnknownChatTarget(ValueError):
+    """Raised when an outbound send/edit/get_chat_info targets a chat the
+    adapter never received on an inbound event.
+
+    Server-authoritative chat addressing (2026-05-30 hardening): the adapter
+    must never originate a chat id the agent invented. See
+    `BGOSAdapter._resolve_outbound_target` and
+    docs/bgos-agent-capabilities.md §"Chat addressing".
+    """
+
+
 @dataclass
 class MessageEvent:
     """Inbound user event translated for Hermes's `handle_message`.
@@ -1264,6 +1275,45 @@ class BGOSAdapter(BasePlatformAdapter):
         """
         return _MDV2_LEAK_RE.sub(r"\1", content)
 
+    def _resolve_outbound_target(
+        self, chat_id: int | str,
+    ) -> tuple[int, str | None]:
+        """Validate an agent-supplied outbound `chat_id` and resolve its
+        opaque `sessionHandle`.
+
+        Server-authoritative chat addressing (2026-05-30 hardening): the
+        adapter must NEVER originate a chat id the agent invented. Every
+        outbound `send` / `edit_message` / `get_chat_info` target MUST be a
+        chat the adapter actually received on a prior inbound MessageEvent
+        (tracked in `StateStore.received_chat_ids`). If the agent supplies a
+        chat the adapter never saw, raise `UnknownChatTarget` so the caller
+        rejects the dispatch with a clear error instead of POSTing a guessed
+        id.
+
+        Returns `(chat_key, session_handle)`. When the inbound that seeded
+        this chat carried a `sessionHandle`, it's returned so the outbound
+        POST can send it back (the backend prioritizes `sessionHandle` over a
+        raw `chatId`); otherwise `None` and the raw id is used (still valid
+        during the `ALLOW_RAW_CHATID` rollout window).
+
+        Raises:
+            UnknownChatTarget: `chat_id` isn't a received chat, or isn't a
+                parseable integer.
+        """
+        chat_key = self._int_or_none(chat_id)
+        if chat_key is None:
+            raise UnknownChatTarget(
+                f"refusing outbound to non-integer chat_id={chat_id!r}"
+            )
+        if not self._state.has_received_chat(chat_key):
+            raise UnknownChatTarget(
+                f"refusing outbound to chat_id={chat_key} — the adapter never "
+                "received an inbound event for this chat. Agents must reply to "
+                "a chat they were addressed in (server-authoritative chat "
+                "addressing); inventing or incrementing a chat id is rejected."
+            )
+        return chat_key, self._state.session_handle_for_chat(chat_key)
+
     async def send(
         self,
         chat_id: int | str,
@@ -1301,6 +1351,19 @@ class BGOSAdapter(BasePlatformAdapter):
         from Hermes (a2a side-thread) wins if both are set. See spec
         BGOS/docs/superpowers/specs/2026-05-19-reply-quote-design.md.
         """
+        # Server-authoritative chat addressing: reject up front if the agent
+        # is targeting a chat the adapter never received inbound, and resolve
+        # the opaque sessionHandle to round-trip (see _resolve_outbound_target).
+        # Done before any marker parsing / tool_progress intercept so an
+        # invented chat id can't slip through a side path.
+        try:
+            chat_key, session_handle = self._resolve_outbound_target(chat_id)
+        except UnknownChatTarget as exc:
+            log.warning("send rejected: %s", exc)
+            return SendResult(  # type: ignore[call-arg]
+                success=False, error="unknown_chat_target",
+            )
+
         formatted = self.format_message(content)
         formatted, marker_reply_to = _parse_reply_to_block(formatted)
         cleaned_text, options, render_mode = _parse_buttons_block(formatted)
@@ -1323,7 +1386,7 @@ class BGOSAdapter(BasePlatformAdapter):
         )
         if parsed_tools is not None:
             return await self._handle_tool_progress_edit(
-                int(chat_id), 0, parsed_tools, None,
+                chat_key, 0, parsed_tools, None,
             )
 
         # End-of-turn signal: this send() is delivering a plain agent reply
@@ -1335,7 +1398,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # next batch in the next turn starts a fresh one. No-op when there
         # is no active card.
         try:
-            await self._finalize_tool_progress_card(int(chat_id))
+            await self._finalize_tool_progress_card(chat_key)
         except Exception:
             # Finalization is best-effort — a failure here must not block
             # the actual agent reply. The cache entry is popped before the
@@ -1343,7 +1406,7 @@ class BGOSAdapter(BasePlatformAdapter):
             # NEXT turn starts cleanly.
             log.warning(
                 "tool_progress pre-send finalize failed chat=%s",
-                chat_id, exc_info=True,
+                chat_key, exc_info=True,
             )
 
         chunks = self._chunk_text(cleaned_text)
@@ -1353,7 +1416,6 @@ class BGOSAdapter(BasePlatformAdapter):
         for i, chunk in enumerate(chunks, start=1):
             suffix = f"\n({i}/{total})" if total > 1 else ""
             is_first = (i == 1)
-            chat_key = int(chat_id)
             assistant_id = await self._assistant_id_for_chat(chat_key)
             if assistant_id is not None:
                 resp = await self._api.post_send_message(
@@ -1367,6 +1429,7 @@ class BGOSAdapter(BasePlatformAdapter):
                     reply_to_id=(
                         effective_reply_to if effective_reply_to is not None and is_first else None
                     ),
+                    session_handle=session_handle,
                 )
                 message_obj = resp.get("message") if isinstance(resp, dict) else None
                 message_id = (
@@ -1386,13 +1449,14 @@ class BGOSAdapter(BasePlatformAdapter):
                     reply_to_id=(
                         effective_reply_to if effective_reply_to is not None and is_first else None
                     ),
+                    session_handle=session_handle,
                 )
                 message_id = resp.get("id") if isinstance(resp, dict) else None
             if isinstance(message_id, int):
                 last_message_id = message_id
             last_result = _send_result(message_id=message_id)
-        if isinstance(chat_id, int) and last_message_id is not None:
-            self._state.last_assistant_message_by_chat[chat_id] = last_message_id
+        if last_message_id is not None:
+            self._state.last_assistant_message_by_chat[chat_key] = last_message_id
         return last_result or _send_result(message_id=None)
 
     def _chunk_text(self, text: str) -> list[str]:
@@ -1472,10 +1536,20 @@ class BGOSAdapter(BasePlatformAdapter):
         which matches Telegram's parity behavior (the gateway treats
         progress edits as fire-and-forget).
         """
+        # Server-authoritative chat addressing: refuse to edit into a chat the
+        # adapter never received inbound. PATCH targets a message id, but the
+        # chat scope must still be one the agent was legitimately addressed in.
+        try:
+            chat_key, _ = self._resolve_outbound_target(chat_id)
+        except UnknownChatTarget as exc:
+            log.warning("edit_message rejected: %s", exc)
+            return SendResult(  # type: ignore[call-arg]
+                success=False, error="unknown_chat_target",
+            )
+
         cleaned_text, options, render_mode = _parse_buttons_block(
             self.format_message(content)
         )
-        chat_key = int(chat_id)
         mid_int = int(message_id)
         # Backend's UpdateMessageDto requires userId on PATCH (caught live
         # 2026-05-13: missing userId → 400 "userId should not be empty"
@@ -2182,8 +2256,14 @@ class BGOSAdapter(BasePlatformAdapter):
         """BGOS is DM-only — a chat is its own minimal context. If later
         tasks need real chat metadata (title, participants), we extend this
         to call an endpoint on BGOS. For now, return a minimal stub that
-        satisfies Hermes's contract."""
-        return {"platform": self.platform_name, "chat_id": int(chat_id)}
+        satisfies Hermes's contract.
+
+        Server-authoritative chat addressing: refuse to echo back a chat id
+        the adapter never received inbound, so an agent can't probe for or
+        invent a chat target through this surface (raises UnknownChatTarget).
+        """
+        chat_key, _ = self._resolve_outbound_target(chat_id)
+        return {"platform": self.platform_name, "chat_id": chat_key}
 
     # -------------------------------------------------------------------------
     # Introspection (used by tests + later tasks)
@@ -2255,6 +2335,23 @@ class BGOSAdapter(BasePlatformAdapter):
         msg_id = data.get("message_id")
         if isinstance(msg_id, int):
             self._save_last_id(msg_id)
+
+        # Server-authoritative chat addressing (2026-05-30 hardening).
+        # Remember the chat this inbound targeted so later outbound
+        # send/edit/get_chat_info can validate the agent isn't inventing a
+        # chat id, and stash the opaque `sessionHandle` the backend mints on
+        # every inbound event so replies round-trip it instead of a raw
+        # chatId. Both WS (camelCase `sessionHandle`) and REST
+        # (snake_case `session_handle`) shapes are accepted; the camel→snake
+        # alias table doesn't cover it because the value is passed through
+        # verbatim rather than re-read by field name downstream.
+        inbound_chat_id = self._int_or_none(data.get("chat_id"))
+        if inbound_chat_id is not None:
+            session_handle = data.get("sessionHandle") or data.get("session_handle")
+            self._state.record_inbound_chat(
+                inbound_chat_id,
+                session_handle if isinstance(session_handle, str) else None,
+            )
 
         # A blocking peer helper with waitForReply=true has already consumed
         # this reply from the HTTP response. BGOS may still deliver the same
@@ -2829,6 +2926,20 @@ class BGOSAdapter(BasePlatformAdapter):
         # insurance against future changes).
         if isinstance(message_id, int):
             self._save_last_id(message_id)
+
+        # Server-authoritative chat addressing: a button tap is itself an
+        # inbound interaction on this chat, so record it as received. Without
+        # this, if a click is the first thing the adapter sees on a chat after
+        # a restart (no prior text inbound), the agent's reply would be wrongly
+        # rejected as targeting an un-received chat. inbound_click carries no
+        # sessionHandle today, so the raw chatId is used on reply.
+        click_chat_id = self._int_or_none(chat_id)
+        if click_chat_id is not None:
+            session_handle = data.get("sessionHandle") or data.get("session_handle")
+            self._state.record_inbound_chat(
+                click_chat_id,
+                session_handle if isinstance(session_handle, str) else None,
+            )
 
         # Wrap into a gateway-native MessageEvent when Hermes is installed.
         if _GatewayMessageEvent is not None and _GatewayMessageType is not None:

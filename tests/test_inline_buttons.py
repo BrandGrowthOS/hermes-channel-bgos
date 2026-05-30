@@ -150,6 +150,9 @@ async def test_send_with_buttons_posts_options_and_render_mode(mock_bgos_server)
         BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
     )
     await adapter.connect()
+    # Server-authoritative chat addressing: send() requires chat 11 to have
+    # been received inbound. Seed it as received.
+    adapter._state.record_inbound_chat(11)
     try:
         await adapter.send(
             chat_id=11,
@@ -188,6 +191,9 @@ async def test_send_plain_text_has_no_render_mode(mock_bgos_server):
         BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
     )
     await adapter.connect()
+    # Server-authoritative chat addressing: send() requires chat 11 to have
+    # been received inbound. Seed it as received.
+    adapter._state.record_inbound_chat(11)
     try:
         await adapter.send(chat_id=11, content="Just a plain reply.")
     finally:

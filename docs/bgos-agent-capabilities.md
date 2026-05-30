@@ -237,6 +237,19 @@ Per-plugin wire syntax is in the cheat-sheet below. Spec: `BGOS/docs/superpowers
 - Chat title is user-editable; agents can rename via `PATCH /chats/:id/title` (plugin-specific).
 - **Not supported:** user-side message editing, reactions, stickers, typing indicators on the user side. (Quoted-reply threading is supported — see §9.)
 
+**Chat addressing — server-authoritative (2026-05-30 hardening):**
+
+- The **server** resolves the target chat. An agent NEVER invents, guesses, or increments a chat id.
+- Address a reply ONLY via **(a)** the reply-context of the inbound event you are answering, or **(b)** the opaque **`sessionHandle`** carried on every inbound event / new-session notification. The handle is HMAC-signed and verified + decoded server-side; it is meaningless to any other agent and is non-enumerable. Send it back in the `sessionHandle` field instead of a raw `chatId`.
+- Raw numeric `chatId` is **DEPRECATED**. During the rollout window (`ALLOW_RAW_CHATID=true`) it is still accepted but logged; once plugins ship handle addressing it will be rejected. **Plugins MUST NOT let an agent send to a `chatId`/`assistantId` it didn't receive in a prior inbound event or server-issued handle** — validate agent-supplied ids against the set the adapter actually received before dispatch.
+- The server stamps the sender's user/assistant identity from the authenticated credential. A pairing/agent principal **cannot** persist `sender='user'` (no puppeting the human) and **cannot** claim a `fromAgent` identity that isn't its own registered `agent_peer` or its own assistant — cross-tenant and cross-assistant writes fail-closed at the server.
+
+**Introductions — agent-may-request, user-approves:**
+
+- An agent CANNOT open a peer (agent-to-agent) conversation with an un-introduced sibling. `send_to_peer`/`/peers/:id/send` to a peer with `introduced:false` returns `requires_introduction` — the server gates it; no plugin may bypass this.
+- An agent MAY raise a PENDING introduction request via `POST /api/v1/peers/introductions/request` (`X-Caller-Assistant-Id` header, body `{ targetAssistantId }`; pairing tokens allowed). It surfaces to the **user** to grant or deny — the agent can never create the allow-edge itself.
+- Inline `fromAgent` display-name/avatar renders only when the user has enabled the per-user "allow inline agent identities" toggle (default **off**); otherwise a neutral "Agent" badge is shown. Registered `agent_peer` and own-assistant identities are unaffected.
+
 ---
 
 ## Per-plugin syntax cheat-sheet

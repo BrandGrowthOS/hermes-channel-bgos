@@ -207,6 +207,7 @@ class BgosApi:
         render_mode: str | None = None,
         reply_to_id: int | None = None,
         turn_state: str | None = None,
+        session_handle: str | None = None,
     ) -> dict:
         """POST to /api/v1/send-message.
 
@@ -214,6 +215,12 @@ class BgosApi:
         bridge for kind='a2a' chats, retro-tags replies with peerConversationId,
         rotates turns, and emits inbound_message to the other assistant. This is
         the path used by the working Claude Code plugin.
+
+        `session_handle` is the opaque, server-minted `sessionHandle` carried on
+        the inbound event this message replies to. When present the backend
+        prioritizes it over `chatId` to resolve the target chat
+        (server-authoritative addressing, 2026-05-30 hardening) — we still send
+        `chatId` for the rollout window where raw ids remain accepted.
         """
         body: dict[str, Any] = {
             "chatId": chat_id,
@@ -222,6 +229,8 @@ class BgosApi:
             "sender": sender,
             "messageType": message_type,
         }
+        if session_handle:
+            body["sessionHandle"] = session_handle
         if files:
             body["files"] = files
         if options:
@@ -336,6 +345,7 @@ class BgosApi:
         render_mode: str | None = None,
         reply_to_id: int | None = None,
         tool_progress: dict | None = None,
+        session_handle: str | None = None,
     ) -> dict:
         """POST to /api/v1/messages. Wire format matches backend CreateMessageDto
         (camelCase: chatId, messageType, approvalMeta, renderMode, replyToId).
@@ -349,9 +359,12 @@ class BgosApi:
         tags this message as a reply to a prior message — required in
         agent-to-agent (a2a) side-thread chats so the originator's
         pollForReply() can correlate this assistant message with the inbound
-        peer message that prompted it. Fields not in the backend DTO are
-        silently dropped by the whitelist — we still send them for forward
-        compatibility when the backend extends.
+        peer message that prompted it. `session_handle` is the opaque,
+        server-minted `sessionHandle` from the inbound event being replied to;
+        the backend prioritizes it over `chatId` for chat resolution
+        (server-authoritative addressing, 2026-05-30 hardening). Fields not in
+        the backend DTO are silently dropped by the whitelist — we still send
+        them for forward compatibility when the backend extends.
         """
         body: dict[str, Any] = {
             "chatId": chat_id,
@@ -359,6 +372,8 @@ class BgosApi:
             "sender": sender,
             "messageType": message_type,
         }
+        if session_handle:
+            body["sessionHandle"] = session_handle
         if files:
             body["files"] = files
         if options:
