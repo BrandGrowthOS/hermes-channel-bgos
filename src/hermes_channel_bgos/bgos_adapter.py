@@ -1016,6 +1016,29 @@ class BGOSAdapter(BasePlatformAdapter):
                 return True
         return False
 
+    def _has_pending_peer_wait_marker(self, data: dict) -> bool:
+        """Return True when a helper is actively waiting for this assistant's peer reply.
+
+        A pending marker is written before the blocking peer HTTP request. It
+        does not contain sideThreadChatId/messageId yet, so it is not safe to
+        suppress on its own. It is safe to briefly delay likely peer-wait
+        messages addressed to the caller assistant so the helper can upgrade
+        pending -> concrete receipt before we dispatch to Hermes.
+        """
+        self._refresh_consumed_peer_wait_replies_if_changed()
+        assistant_id = self._int_or_none(data.get("assistant_id"))
+        now = int(time.time())
+        for receipt in list(self._state.consumed_peer_wait_replies):
+            if not receipt.get("pending"):
+                continue
+            created_at = self._int_or_none(receipt.get("createdAt"))
+            if created_at is not None and now - created_at > 60:
+                continue
+            caller_assistant_id = self._int_or_none(receipt.get("callerAssistantId"))
+            if caller_assistant_id is not None and assistant_id == caller_assistant_id:
+                return True
+        return False
+
     @staticmethod
     def _looks_like_peer_wait_reply(data: dict) -> bool:
         return (
@@ -1030,12 +1053,18 @@ class BGOSAdapter(BasePlatformAdapter):
         if not self._looks_like_peer_wait_reply(data):
             return False
         # Cross-process waitForReply helpers can receive the HTTP reply and
-        # persist the consumed receipt within a few milliseconds of this live
-        # gateway receiving the same side-thread message over WS. Give that
-        # external writer a small race window, reload by mtime, then decide.
-        await asyncio.sleep(0.05)
-        self._refresh_consumed_peer_wait_replies_if_changed(force=True)
-        return self._is_consumed_peer_wait_reply(data)
+        # persist the consumed receipt shortly after this live gateway receives
+        # the same side-thread message over WS. If a pending marker exists for
+        # this caller assistant, hold the likely reply briefly and poll for the
+        # concrete returnedReplyMessageId before dispatching it to Hermes.
+        deadline = time.monotonic() + (1.25 if self._has_pending_peer_wait_marker(data) else 0.05)
+        while True:
+            await asyncio.sleep(0.05)
+            self._refresh_consumed_peer_wait_replies_if_changed(force=True)
+            if self._is_consumed_peer_wait_reply(data):
+                return True
+            if time.monotonic() >= deadline:
+                return False
 
     @staticmethod
     def _peer_wait_data_from_event(event: "MessageEvent") -> dict:
@@ -2445,6 +2474,17 @@ class BGOSAdapter(BasePlatformAdapter):
                 getattr(event, "peer_conversation_id", None),
             )
             return
+        peer_wait_data = self._peer_wait_data_from_event(event)
+        if self._has_pending_peer_wait_marker(peer_wait_data):
+            if await self._wait_for_consumed_peer_wait_reply_race(peer_wait_data):
+                log.info(
+                    "dropping peer wait reply at batch flush after pending wait chat=%s msg=%s reply_to=%s conv=%s",
+                    event.chat_id,
+                    event.message_id,
+                    getattr(event, "reply_to_id", None),
+                    getattr(event, "peer_conversation_id", None),
+                )
+                return
 
         # Update the retry cache with the merged text so /retry replays
         # the full message rather than just the last fragment.

@@ -506,6 +506,56 @@ async def test_wait_for_reply_batch_flush_rechecks_late_consumed_receipt(tmp_pat
     assert adapter._state.last_user_text_by_chat.get(960) is None
 
 
+async def test_wait_for_reply_pending_marker_waits_until_concrete_receipt_before_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    helper = _make_adapter()
+    helper._record_consumed_peer_wait_reply({
+        "pending": True,
+        "callerAssistantId": 894,
+        "targetAssistantId": 885,
+        "parentMessageId": 9292,
+    })
+    adapter = _make_adapter()
+    adapter._state.set_route(894, "default")
+    adapter._text_batch_window = 0.05
+    received: list[Any] = []
+
+    async def capture(event):
+        received.append(event)
+
+    adapter.handle_message = capture
+
+    async def helper_writes_concrete_receipt_after_normal_race_window():
+        # The live failure wrote the concrete receipt after the 50ms admission
+        # race and after the short text-batch window, but before an LLM reply
+        # completed. A pending marker must make dispatch wait for this upgrade.
+        await asyncio.sleep(0.35)
+        helper._record_consumed_peer_wait_reply({
+            "conversationId": "88",
+            "sideThreadChatId": 966,
+            "sentMessageId": 9296,
+            "returnedReplyMessageId": 9297,
+            "targetAssistantId": 885,
+        })
+
+    writer = asyncio.create_task(helper_writes_concrete_receipt_after_normal_race_window())
+    await adapter._handle_inbound({
+        "assistant_id": 894,
+        "chat_id": 966,
+        "message_id": 9297,
+        "user_id": "user_1",
+        "text": "ATHENA_JEFF_WAIT_SMOKE_OK_1780142126",
+        "message_type": "standard",
+        "reply_to_id": 9296,
+        "peer_conversation_id": 88,
+        "turn_state": "expecting_reply",
+    })
+    await writer
+    await asyncio.sleep(0.2)
+    assert received == []
+    assert adapter._state.last_user_text_by_chat.get(966) is None
+
+
 async def test_pending_wait_for_reply_marker_alone_does_not_drop_peer_turn(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
     helper = _make_adapter()
