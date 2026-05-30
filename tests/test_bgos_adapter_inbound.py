@@ -459,6 +459,53 @@ async def test_wait_for_reply_echo_waits_for_cross_process_receipt_race(tmp_path
     assert received == []
 
 
+async def test_wait_for_reply_batch_flush_rechecks_late_consumed_receipt(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+    adapter = _make_adapter()
+    adapter._state.set_route(885, "default")
+    adapter._text_batch_window = 0.2
+    receipt_path = tmp_path / "hermes_home" / "bgos_consumed_peer_wait_replies.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    received: list[Any] = []
+
+    async def capture(event):
+        received.append(event)
+
+    adapter.handle_message = capture
+
+    async def helper_writes_receipt_after_enqueue():
+        # Later than _wait_for_consumed_peer_wait_reply_race()'s 0.05s
+        # admission check, but before the text batch flushes. Live smoke tests
+        # showed this exact ordering: the reply entered the batch while only a
+        # pending marker existed, then the concrete receipt persisted before
+        # dispatch.
+        await asyncio.sleep(0.08)
+        receipt_path.write_text(json.dumps([{
+            "conversationId": "79",
+            "sideThreadChatId": 960,
+            "sentMessageId": 9159,
+            "returnedReplyMessageId": 9161,
+            "targetAssistantId": 894,
+        }]))
+
+    writer = asyncio.create_task(helper_writes_receipt_after_enqueue())
+    await adapter._handle_inbound({
+        "assistant_id": 885,
+        "chat_id": 960,
+        "message_id": 9161,
+        "user_id": "user_1",
+        "text": "BGOS waitForReply smoke OK",
+        "message_type": "standard",
+        "reply_to_id": 9159,
+        "peer_conversation_id": 79,
+        "turn_state": "expecting_reply",
+    })
+    await writer
+    await asyncio.sleep(0.25)
+    assert received == []
+    assert adapter._state.last_user_text_by_chat.get(960) is None
+
+
 async def test_pending_wait_for_reply_marker_alone_does_not_drop_peer_turn(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
     helper = _make_adapter()

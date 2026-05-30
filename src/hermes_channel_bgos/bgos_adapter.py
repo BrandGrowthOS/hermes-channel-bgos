@@ -196,6 +196,9 @@ class MessageEvent:
     message_type: str
     command_name: str | None
     command_args: str | None
+    reply_to_id: int | None = None
+    peer_conversation_id: int | None = None
+    turn_state: str | None = None
 
     @classmethod
     def from_ws(cls, data: dict, *, agent_route: str) -> "MessageEvent":
@@ -211,6 +214,9 @@ class MessageEvent:
             message_type=data.get("message_type", "standard"),
             command_name=data.get("command_name"),
             command_args=data.get("command_args"),
+            reply_to_id=data.get("reply_to_id"),
+            peer_conversation_id=data.get("peer_conversation_id"),
+            turn_state=data.get("turn_state"),
         )
 
 try:  # pragma: no cover - exercised only when Hermes is installed
@@ -1030,6 +1036,24 @@ class BGOSAdapter(BasePlatformAdapter):
         await asyncio.sleep(0.05)
         self._refresh_consumed_peer_wait_replies_if_changed(force=True)
         return self._is_consumed_peer_wait_reply(data)
+
+    @staticmethod
+    def _peer_wait_data_from_event(event: "MessageEvent") -> dict:
+        """Reconstruct peer-wait matching fields retained on a queued event.
+
+        Admission-time suppression can miss a cross-process waitForReply receipt
+        that is persisted after the websocket event is enqueued for text
+        batching. Re-checking at flush time needs the original BGOS message
+        identifiers, not just the merged text.
+        """
+        return {
+            "chat_id": getattr(event, "chat_id", None),
+            "message_id": getattr(event, "message_id", None),
+            "reply_to_id": getattr(event, "reply_to_id", None),
+            "peer_conversation_id": getattr(event, "peer_conversation_id", None),
+            "message_type": getattr(event, "message_type", None),
+            "turn_state": getattr(event, "turn_state", None),
+        }
 
     def _load_last_id(self) -> int:
         try:
@@ -2407,6 +2431,21 @@ class BGOSAdapter(BasePlatformAdapter):
             event.chat_id, event.message_id, len(batch["texts"]),
             len(merged), window,
         )
+
+        # Final suppression gate: a waitForReply helper can persist the
+        # concrete consumed reply receipt after _handle_inbound's short race
+        # window but before this text batch flushes. Do not dispatch a queued
+        # side-thread reply that has become consumed while waiting in the batch.
+        if self._is_consumed_peer_wait_reply(self._peer_wait_data_from_event(event)):
+            log.info(
+                "dropping peer wait reply at batch flush chat=%s msg=%s reply_to=%s conv=%s",
+                event.chat_id,
+                event.message_id,
+                getattr(event, "reply_to_id", None),
+                getattr(event, "peer_conversation_id", None),
+            )
+            return
+
         # Update the retry cache with the merged text so /retry replays
         # the full message rather than just the last fragment.
         self._state.last_user_text_by_chat[event.chat_id] = merged
