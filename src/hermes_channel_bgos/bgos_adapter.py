@@ -2563,7 +2563,12 @@ class BGOSAdapter(BasePlatformAdapter):
         BGOS_ALLOW_ALL_USERS=true. Dropped events leave _approval_state
         intact so the authorized user can still resolve.
         """
-        cb = data.get("callback_data", "")
+        # BGOS has delivered callback payloads in both snake_case
+        # (`callback_data`, older webhook/REST shape) and camelCase
+        # (`callbackData`, live WS / inbound_click shape). Approval buttons
+        # must honor both; otherwise the tap falls through as a normal
+        # "Always allow" chat message and the blocking approval times out.
+        cb = data.get("callback_data") or data.get("callbackData") or ""
         user_id_for_authz = data.get("user_id") or data.get("userId")
         if not self._is_callback_user_authorized(user_id_for_authz):
             log.info(
@@ -2715,6 +2720,21 @@ class BGOSAdapter(BasePlatformAdapter):
         button_text = data.get("buttonText") or ""
         callback_data = data.get("callbackData") or ""
         custom_text = data.get("customText")
+
+        # Approval/slash-confirm taps may arrive as `inbound_click` instead of
+        # `callback_result` on some BGOS deployments. Route those through the
+        # same resolver before creating a synthetic user message, otherwise the
+        # agent merely sees button text like "Always allow" while the dangerous
+        # command approval remains blocked until timeout.
+        if _APPROVAL_CALLBACK_RE.match(callback_data) or _SLASH_CONFIRM_CALLBACK_RE.match(callback_data):
+            await self._handle_callback({
+                "callbackData": callback_data,
+                "messageId": message_id,
+                "chatId": chat_id,
+                "userId": user_id,
+                "buttonText": button_text,
+            })
+            return
 
         # The agent's natural view: the user's reply is the button's visible
         # label. `__custom__` sentinels carry the user's typed text — prefer
