@@ -16,8 +16,10 @@ import base64
 import itertools
 import json
 import logging
+import mimetypes
 import os
 import re
+import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,6 +108,176 @@ _INLINE_OPTION_LIMIT = 6
 # we upload via a presigned S3 PUT and reference by s3_key. Mirrors
 # openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
 S3_THRESHOLD = 500 * 1024
+
+# Hard upper bound on a single outbound media file we'll read into memory.
+# The backend caps images at 10 MB and video at 100 MB; we use the video cap
+# as the ceiling so a pathological path can't OOM the gateway process. Files
+# above this are skipped with a warning rather than read.
+_MEDIA_MAX_BYTES = 100 * 1024 * 1024
+
+# Agent-emitted outbound-media marker. The agent writes `MEDIA:/abs/path` on
+# its own line (per PLATFORM_HINTS["bgos"] "Sending files and media") and the
+# adapter turns each into a real BGOS attachment, stripping the marker from
+# the visible text. Anchored at line start (after optional indent) so the
+# token `MEDIA:` appearing mid-sentence is not mistaken for a command. The
+# capture group is the rest of the line (path may contain spaces); trailing
+# whitespace is trimmed by the parser. Case-sensitive `MEDIA:` to match the
+# documented contract exactly.
+_MEDIA_MARKER_RE = re.compile(r"^[ \t]*MEDIA:[ \t]*(\S.*?)[ \t]*$", re.MULTILINE)
+
+# Fenced code-block matcher (``` … ``` or ~~~ … ~~~). `_parse_media_markers`
+# splits on this and scans ONLY the non-fenced segments, so a `MEDIA:` line an
+# agent shows INSIDE a code fence — e.g. documenting the convention to the user
+# — is left intact rather than consumed as a real attachment (which would both
+# eat a non-existent file and mangle the rendered code block).
+_CODE_FENCE_RE = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+
+# MIME types Python's `mimetypes` stdlib doesn't reliably know across the
+# platforms Hermes runs on (notably webp/heic and the OGG/M4A audio family).
+# Mirrors gobot-channel-bgos/src/attachment-bridge.ts `guessMimeType`.
+_EXTRA_MIME_TYPES: dict[str, str] = {
+    ".webp": "image/webp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".svg": "image/svg+xml",
+    ".mov": "video/quicktime",
+    ".m4a": "audio/mp4",
+    ".oga": "audio/ogg",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/opus",
+}
+
+
+def _guess_media_mime(filename: str) -> str:
+    """Best-effort MIME from a filename. Falls back to the stdlib `mimetypes`
+    table, then a small map for types it commonly misses, then the generic
+    `application/octet-stream` (still delivered — renders as a download card).
+    """
+    ext = Path(filename).suffix.lower()
+    if ext in _EXTRA_MIME_TYPES:
+        return _EXTRA_MIME_TYPES[ext]
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or "application/octet-stream"
+
+
+def _classify_media(mime: str) -> dict[str, bool]:
+    """Map a MIME type to BGOS's four boolean attachment-kind flags.
+
+    The BGOS backend stores these verbatim (`is_image = dto.isImage ?? null`
+    — it does NOT derive them from the MIME) and the frontend renders a file
+    as an inline image/video ONLY when `isImage`/`isVideo` is true, else as a
+    generic document card (FileAttachmentDisplay.tsx). Omitting these — as
+    this adapter did before 2026-05-31 — made every agent-sent image land as
+    a non-rendering document. So we must classify on the wire.
+    """
+    m = (mime or "").lower()
+    is_image = m.startswith("image/")
+    is_video = m.startswith("video/")
+    is_audio = m.startswith("audio/")
+    return {
+        "isImage": is_image,
+        "isVideo": is_video,
+        "isAudio": is_audio,
+        # Anything that isn't recognized media is a document — the frontend's
+        # download-card fallback. (Mutually exclusive with the three above.)
+        "isDocument": not (is_image or is_video or is_audio),
+    }
+
+
+def _sniff_image_dimensions(data: bytes) -> tuple[int | None, int | None]:
+    """Best-effort intrinsic (width, height) for the common image formats,
+    dependency-free (no Pillow). Returns (None, None) for anything we can't
+    parse — width/height are optional; the frontend's MediaAlbum falls back to
+    a default aspect, so a miss only costs a slightly-off thumbnail ratio.
+    Fully guarded: any malformed header yields (None, None), never raises.
+    """
+    try:
+        # PNG: 8-byte sig, then IHDR chunk with width/height as big-endian u32.
+        if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+            w, h = struct.unpack(">II", data[16:24])
+            return int(w), int(h)
+        # GIF: 'GIF87a'/'GIF89a' then logical screen width/height little-endian.
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", data[6:10])
+            return int(w), int(h)
+        # JPEG: scan for a Start-Of-Frame (SOFn) marker carrying dimensions.
+        if data[:2] == b"\xff\xd8":
+            i, n = 2, len(data)
+            while i + 9 < n:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                i += 2
+                # SOF0..SOF15 except DHT(C4)/JPG(C8)/DAC(CC) carry frame size.
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">HH", data[i + 3 : i + 7])
+                    return int(w), int(h)
+                if i + 2 > n:
+                    break
+                seg_len = struct.unpack(">H", data[i : i + 2])[0]
+                i += seg_len
+            return None, None
+        # WebP (RIFF container): VP8 (lossy) / VP8L (lossless) / VP8X (extended).
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            fmt = data[12:16]
+            if fmt == b"VP8 ":
+                w = struct.unpack("<H", data[26:28])[0] & 0x3FFF
+                h = struct.unpack("<H", data[28:30])[0] & 0x3FFF
+                return int(w), int(h)
+            if fmt == b"VP8L":
+                b1, b2, b3, b4 = data[21], data[22], data[23], data[24]
+                w = ((b2 & 0x3F) << 8 | b1) + 1
+                h = ((b4 & 0x0F) << 10 | b3 << 2 | (b2 & 0xC0) >> 6) + 1
+                return int(w), int(h)
+            if fmt == b"VP8X":
+                w = (data[24] | data[25] << 8 | data[26] << 16) + 1
+                h = (data[27] | data[28] << 8 | data[29] << 16) + 1
+                return int(w), int(h)
+    except Exception:  # pragma: no cover - defensive; dims are best-effort
+        return None, None
+    return None, None
+
+
+def _parse_media_markers(content: str) -> tuple[str, list[str]]:
+    """Extract `MEDIA:/abs/path` lines from agent text.
+
+    Returns `(cleaned_text, [paths])`. Every marker line is removed from the
+    visible text (collapsing the blank-line noise it leaves behind) and its
+    path collected in order. Paths are returned verbatim — existence, size,
+    and MIME are validated later in `_build_media_attachments`. If no marker
+    matches, returns `(content, [])` unchanged.
+
+    The documented contract (PLATFORM_HINTS["bgos"]) promised these are
+    "Handled natively by the BGOS adapter" — but until 2026-05-31 the adapter
+    never parsed them, so the agent's `MEDIA:` line was posted as literal text
+    and the file was never delivered. This is the parser that makes the
+    promise true.
+    """
+    if not content or "MEDIA:" not in content:
+        return content, []
+    # Split into alternating non-fenced / fenced segments (capturing split →
+    # even indices are outside fences, odd indices are the fences themselves).
+    # Only scan + strip the non-fenced segments so a `MEDIA:` line inside a
+    # ``` block is preserved verbatim.
+    segments = _CODE_FENCE_RE.split(content)
+    paths: list[str] = []
+    for idx in range(0, len(segments), 2):
+        seg = segments[idx]
+        if "MEDIA:" not in seg:
+            continue
+        for m in _MEDIA_MARKER_RE.finditer(seg):
+            p = m.group(1).strip()
+            if p:
+                paths.append(p)
+        segments[idx] = _MEDIA_MARKER_RE.sub("", seg)
+    if not paths:
+        # No real (non-fenced) markers — leave the text exactly as-is so any
+        # in-fence example MEDIA: line renders untouched.
+        return content, []
+    cleaned = "".join(segments)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, paths
 
 
 # camelCase → snake_case aliases for inbound payloads. The BGOS backend's
@@ -1367,6 +1539,11 @@ class BGOSAdapter(BasePlatformAdapter):
         formatted = self.format_message(content)
         formatted, marker_reply_to = _parse_reply_to_block(formatted)
         cleaned_text, options, render_mode = _parse_buttons_block(formatted)
+        # Agent-emitted `MEDIA:/abs/path` lines → real BGOS attachments. The
+        # markers are stripped from the visible text here; the files are built
+        # (read + uploaded) just before the post loop so a tool_progress
+        # short-circuit doesn't pay for disk/network it won't use.
+        cleaned_text, media_paths = _parse_media_markers(cleaned_text)
         effective_reply_to: int | None = (
             int(reply_to) if reply_to is not None else marker_reply_to
         )
@@ -1381,8 +1558,15 @@ class BGOSAdapter(BasePlatformAdapter):
         # Skip when buttons are present — those would be meaningless on
         # a tool_progress card. Spec:
         #   docs/superpowers/specs/2026-05-15-tool-progress-message-type-design.md
+        # Also skip when the reply carries MEDIA: markers: the residual text
+        # of a media reply can coincidentally parse as tool_progress (emoji +
+        # CamelCase), and short-circuiting here would silently drop the
+        # attachment AND the already-stripped marker. A media reply is never a
+        # tool_progress card.
         parsed_tools = (
-            _parse_tool_progress_text(cleaned_text) if not options else None
+            _parse_tool_progress_text(cleaned_text)
+            if not options and not media_paths
+            else None
         )
         if parsed_tools is not None:
             return await self._handle_tool_progress_edit(
@@ -1409,6 +1593,22 @@ class BGOSAdapter(BasePlatformAdapter):
                 chat_key, exc_info=True,
             )
 
+        # Build outbound media (read + inline/S3) now that we know we're
+        # delivering a real reply. Attached to the FIRST chunk only so a
+        # multi-chunk caption doesn't duplicate the files.
+        media_files = (
+            await self._build_media_attachments(media_paths)
+            if media_paths else []
+        )
+        # A media-only reply whose files all failed to attach has nothing to
+        # deliver — don't post an empty bubble.
+        if media_paths and not media_files and not cleaned_text:
+            log.warning(
+                "send: media-only reply but no attachments survived; "
+                "nothing to post (chat=%s)", chat_key,
+            )
+            return _send_result(message_id=None)
+
         chunks = self._chunk_text(cleaned_text)
         last_result: SendResult | None = None
         last_message_id: int | None = None
@@ -1416,6 +1616,7 @@ class BGOSAdapter(BasePlatformAdapter):
         for i, chunk in enumerate(chunks, start=1):
             suffix = f"\n({i}/{total})" if total > 1 else ""
             is_first = (i == 1)
+            files_for_chunk = (media_files or None) if is_first else None
             assistant_id = await self._assistant_id_for_chat(chat_key)
             if assistant_id is not None:
                 resp = await self._api.post_send_message(
@@ -1430,6 +1631,7 @@ class BGOSAdapter(BasePlatformAdapter):
                         effective_reply_to if effective_reply_to is not None and is_first else None
                     ),
                     session_handle=session_handle,
+                    files=files_for_chunk,
                 )
                 message_obj = resp.get("message") if isinstance(resp, dict) else None
                 message_id = (
@@ -1450,6 +1652,7 @@ class BGOSAdapter(BasePlatformAdapter):
                         effective_reply_to if effective_reply_to is not None and is_first else None
                     ),
                     session_handle=session_handle,
+                    files=files_for_chunk,
                 )
                 message_id = resp.get("id") if isinstance(resp, dict) else None
             if isinstance(message_id, int):
@@ -1924,21 +2127,47 @@ class BGOSAdapter(BasePlatformAdapter):
     async def _upload_and_attach(
         self, *, file_bytes: bytes, filename: str, mime: str,
     ) -> dict:
-        """Return a files[] entry ready for POST /messages.
+        """Return a files[] entry ready for POST /messages or /send-message.
 
-        Policy: inline base64 below `S3_THRESHOLD`, presigned S3 PUT above.
-        Keys are camelCase on the wire to match OpenClaw's shape
+        Policy: inline below `S3_THRESHOLD`, presigned S3 PUT above. Keys are
+        camelCase on the wire to match OpenClaw's shape
         (openclaw-channel-bgos/src/types.ts OutboundMessagePayload.files):
         `fileName`, `fileMimeType`, `fileData` (inline), `s3Key` (presigned).
+
+        Two corrections shipped 2026-05-31 (the "agent images don't render"
+        bug):
+
+        1. **Classification flags.** We now stamp `isImage`/`isVideo`/
+           `isAudio`/`isDocument` (+ image `width`/`height`). The backend
+           persists these verbatim and the frontend renders a file as an
+           image ONLY when `isImage` is true — without them every image
+           arrived as a non-rendering document card.
+        2. **Inline as a data URI.** Inline bytes are sent as
+           `data:<mime>;base64,...` rather than bare base64. The `/messages`
+           path stores `fileData` verbatim and the client feeds it straight
+           into `<Image source={{uri}}>`, which needs a real URI — bare
+           base64 won't load. (The `/send-message` path additionally coerces
+           the data URI to S3; both forms render.)
         """
         size = len(file_bytes)
+        flags = _classify_media(mime)
+        entry: dict[str, Any] = {
+            "fileName": filename,
+            "fileMimeType": mime,
+            "size": size,
+            **flags,
+        }
+        if flags["isImage"]:
+            width, height = _sniff_image_dimensions(file_bytes)
+            if width and height:
+                entry["width"] = width
+                entry["height"] = height
+
         if size < S3_THRESHOLD:
-            return {
-                "fileName": filename,
-                "fileMimeType": mime,
-                "size": size,
-                "fileData": base64.b64encode(file_bytes).decode("ascii"),
-            }
+            b64 = base64.b64encode(file_bytes).decode("ascii")
+            entry["fileData"] = f"data:{mime};base64,{b64}"
+            return entry
+
         presigned = await self._api.create_upload_url(
             filename=filename, mime=mime, size=size,
         )
@@ -1952,12 +2181,51 @@ class BGOSAdapter(BasePlatformAdapter):
                 headers={"Content-Type": mime},
             )
             resp.raise_for_status()
-        return {
-            "fileName": filename,
-            "fileMimeType": mime,
-            "size": size,
-            "s3Key": presigned["s3_key"],
-        }
+        entry["s3Key"] = presigned["s3_key"]
+        return entry
+
+    async def _build_media_attachments(self, paths: list[str]) -> list[dict]:
+        """Turn agent-emitted `MEDIA:` paths into `files[]` entries.
+
+        Reads each local file (the agent wrote it to the Hermes host's disk),
+        guesses its MIME from the extension, and runs it through
+        `_upload_and_attach` (inline data URI <500 KB, presigned S3 above).
+        Bad paths (missing, not a file, too large, unreadable, or whose
+        upload fails) are skipped with a warning rather than aborting the
+        whole reply — partial delivery beats a dropped message.
+        """
+        attachments: list[dict] = []
+        for raw_path in paths:
+            try:
+                path = Path(raw_path).expanduser()
+                if not path.is_file():
+                    log.warning("MEDIA: not a file, skipping: %r", raw_path)
+                    continue
+                file_size = path.stat().st_size
+                if file_size <= 0:
+                    log.warning("MEDIA: empty file, skipping: %r", raw_path)
+                    continue
+                if file_size > _MEDIA_MAX_BYTES:
+                    log.warning(
+                        "MEDIA: file %r is %d bytes (> %d cap) — skipping",
+                        raw_path, file_size, _MEDIA_MAX_BYTES,
+                    )
+                    continue
+                # Read off the event loop — a multi-MB read shouldn't stall
+                # streaming edits / typing indicators for other chats.
+                file_bytes = await asyncio.to_thread(path.read_bytes)
+                mime = _guess_media_mime(path.name)
+                attachments.append(
+                    await self._upload_and_attach(
+                        file_bytes=file_bytes, filename=path.name, mime=mime,
+                    )
+                )
+            except Exception:
+                log.warning(
+                    "MEDIA: failed to attach %r — skipping", raw_path,
+                    exc_info=True,
+                )
+        return attachments
 
     async def _send_media(
         self, *, chat_id: int | str, file_bytes: bytes, filename: str,

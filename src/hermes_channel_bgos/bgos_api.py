@@ -478,8 +478,27 @@ class BgosApi:
     async def create_upload_url(
         self, *, filename: str, mime: str, size: int,
     ) -> dict:
-        return await self._request(
+        """Request a presigned S3 PUT URL for an outbound file ≥ S3_THRESHOLD.
+
+        The backend route is `POST /api/v1/files/upload-url` (FileController),
+        NOT under `/integrations/` — the earlier `/api/v1/integrations/files/
+        upload-url` path 404'd, silently breaking every ≥500 KB media send
+        (caught live 2026-05-31: agent's 1.2 MB PNG never delivered). The
+        request DTO (`GetUploadUrlDto`) is camelCase `{fileName, contentType,
+        size}` and the response (`UploadUrlResponseDto`) is `{uploadUrl, key}`
+        — both diverged from the snake_case shape this client used. We send the
+        correct keys and normalize the response back to the `{upload_url,
+        s3_key}` shape the adapter's `_upload_and_attach` consumes, so callers
+        are unaffected.
+        """
+        resp = await self._request(
             "POST",
-            "/api/v1/integrations/files/upload-url",
-            json={"filename": filename, "mime": mime, "size": size},
+            "/api/v1/files/upload-url",
+            json={"fileName": filename, "contentType": mime, "size": size},
         )
+        if not isinstance(resp, dict):
+            raise BgosApiError(502, "bad_upload_url_response", resp)
+        return {
+            "upload_url": resp.get("uploadUrl"),
+            "s3_key": resp.get("key"),
+        }

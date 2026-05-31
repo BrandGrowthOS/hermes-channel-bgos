@@ -112,14 +112,40 @@ BGOS renders five media kinds natively:
 | Audio / voice | OGG, MP3, M4A | 25 MB | Voice bubble with scrubber |
 | Document | PDF, TXT, CSV, DOC/DOCX, XLS/XLSX, PPT/PPTX, JSON, ZIP | 25 MB | Download card with filename + type emoji (📄, 🎵, 🎬) |
 
-**Backend wire (`files[]` on `POST /messages`):**
+**Backend wire (`files[]` on `POST /messages` and `POST /send-message`):**
 ```ts
 files: [
-  { fileName, fileMimeType, fileData?, s3Key?, size }
+  {
+    fileName, fileMimeType, size,
+    fileData?, s3Key?,                          // exactly one — see Policy
+    isImage?, isVideo?, isAudio?, isDocument?,  // REQUIRED for correct render
+    width?, height?,                            // images: intrinsic px (optional)
+  }
 ]
 ```
 
-**Policy:** `fileData` is base64 when the file is < 500 KB; `s3Key` references an S3 object (uploaded via presigned PUT from `POST /integrations/files/upload-url`) otherwise. Each plugin can use whichever makes sense.
+**⚠️ Classification flags are mandatory, not optional.** The backend stores
+`isImage`/`isVideo`/`isAudio`/`isDocument` **verbatim** — it does NOT derive
+them from the MIME type (`row.isImage = dto.isImage ?? null`). The frontend
+renders a file as an inline image/video ONLY when `isImage`/`isVideo` is
+`true`; otherwise it falls back to a generic document card. **A plugin that
+sends an image without `isImage: true` will have it silently render as a
+non-image download card** (this was the live "Hermes images don't show" bug,
+2026-05-31 — and gobot/openclaw share the same latent gap). Derive the flag
+from the MIME family (`image/*` → `isImage`, `video/*` → `isVideo`,
+`audio/*` → `isAudio`, else `isDocument`).
+
+**Policy:**
+- **Inline (< 500 KB):** put the bytes in `fileData` as a **data URI** —
+  `data:<mime>;base64,<payload>`, NOT bare base64. The `/messages` read path
+  returns `fileData` verbatim and the client feeds it straight into an
+  `<Image>` source, which needs a real URI; bare base64 won't load. (The
+  `/send-message` path additionally coerces inline base64/data-URIs to S3.)
+- **Large (≥ 500 KB):** upload via presigned PUT, then reference by `s3Key`.
+  The route is `POST /api/v1/files/upload-url` (FileController) — **not** under
+  `/integrations/` — with request `{ fileName, contentType, size }` and
+  response `{ uploadUrl, key }`. (The old `/integrations/files/upload-url` +
+  snake_case shape 404'd.)
 
 **One message can contain text + multiple files** — the bubble renders all in sequence.
 

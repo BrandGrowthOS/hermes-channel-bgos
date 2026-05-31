@@ -217,17 +217,24 @@ async def test_push_agent_catalog(mock_bgos_server):
 
 
 async def test_create_upload_url_returns_presigned(mock_bgos_server):
+    """The route is `/api/v1/files/upload-url` (FileController) — NOT under
+    `/integrations/` — and speaks camelCase `{fileName, contentType, size}` in,
+    `{uploadUrl, key}` out. `create_upload_url` sends the right keys and
+    normalizes the response to the snake_case `{upload_url, s3_key}` shape its
+    callers consume. The old contract 404'd, breaking every ≥500 KB media send."""
     api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
     mock_bgos_server.on(
-        "POST", "/api/v1/integrations/files/upload-url",
-    ).respond(200, {"upload_url": "https://s3/..", "s3_key": "k/1",
-                    "expires_at": "2099-01-01T00:00:00Z"})
+        "POST", "/api/v1/files/upload-url",
+    ).respond(200, {"uploadUrl": "https://s3/..", "key": "k/1"})
 
     resp = await api.create_upload_url(filename="big.png", mime="image/png", size=1024000)
 
     assert resp["s3_key"] == "k/1"
-    req = mock_bgos_server.last_request("POST", "/api/v1/integrations/files/upload-url")
-    assert req.json_body == {"filename": "big.png", "mime": "image/png", "size": 1024000}
+    assert resp["upload_url"] == "https://s3/.."
+    req = mock_bgos_server.last_request("POST", "/api/v1/files/upload-url")
+    assert req.json_body == {
+        "fileName": "big.png", "contentType": "image/png", "size": 1024000,
+    }
     await api.close()
 
 
