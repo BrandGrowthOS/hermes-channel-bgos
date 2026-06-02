@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 
-from .bgos_api import BgosApi, BgosApiError
+from .bgos_api import BgosApi, BgosApiError, NOT_MODIFIED
 from .bgos_ws import BgosWs
 from .commands_sync import (
     BRIDGE_LOCAL_COMMANDS,
@@ -3272,6 +3272,11 @@ class BGOSAdapter(BasePlatformAdapter):
         except Exception:
             log.exception("backfill fetch failed for since_message_id=%d",
                           last_message_id)
+            return
+        # Conditional-GET fast path: the Stage-3 backend answers an unchanged
+        # poll with a 0-byte 304, surfaced here as the NOT_MODIFIED sentinel.
+        # Nothing to replay — return without touching the cursor (egress fix).
+        if resp is NOT_MODIFIED:
             return
         messages = resp.get("messages") if isinstance(resp, dict) else None
         if not messages:

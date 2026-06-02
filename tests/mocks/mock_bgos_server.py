@@ -46,6 +46,7 @@ class _Response:
     json_body: Any = None
     text_body: str | None = None
     bytes_body: bytes | None = None
+    headers: dict[str, str] | None = None
 
 
 class _RouteBuilder:
@@ -61,9 +62,11 @@ class _RouteBuilder:
         *,
         text: str | None = None,
         data: bytes | None = None,
+        headers: dict[str, str] | None = None,
     ) -> "_RouteBuilder":
         self._server._routes[(self._method, self._path)] = _Response(
             status=status, json_body=json_body, text_body=text, bytes_body=data,
+            headers=headers,
         )
         return self
 
@@ -143,13 +146,20 @@ class MockBgosServer:
                 {"error": "no_mock_route", "method": request.method, "path": request.path},
                 status=501,
             )
+        extra_headers = route.headers or None
         if route.json_body is not None:
-            return web.json_response(route.json_body, status=route.status)
+            return web.json_response(
+                route.json_body, status=route.status, headers=extra_headers,
+            )
         if route.text_body is not None:
-            return web.Response(text=route.text_body, status=route.status)
+            return web.Response(
+                text=route.text_body, status=route.status, headers=extra_headers,
+            )
         if route.bytes_body is not None:
-            return web.Response(body=route.bytes_body, status=route.status)
-        return web.Response(status=route.status)
+            return web.Response(
+                body=route.bytes_body, status=route.status, headers=extra_headers,
+            )
+        return web.Response(status=route.status, headers=extra_headers)
 
     # -------------------------------------------------------------------------
     # Socket.IO helpers
