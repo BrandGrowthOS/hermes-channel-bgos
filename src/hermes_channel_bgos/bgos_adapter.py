@@ -2234,17 +2234,50 @@ class BGOSAdapter(BasePlatformAdapter):
         attach = await self._upload_and_attach(
             file_bytes=file_bytes, filename=filename, mime=mime,
         )
-        resp = await self._api.post_message(
-            chat_id=int(chat_id),
-            text=caption or "",
-            sender="assistant",
-            message_type="standard",
-            files=[attach],
-            reply_to_id=int(reply_to) if reply_to is not None else None,
-        )
-        message_id = resp.get("id") if isinstance(resp, dict) else None
-        if isinstance(chat_id, (int, str)) and isinstance(message_id, int):
-            self._state.last_assistant_message_by_chat[int(chat_id)] = message_id
+        chat_key = int(chat_id)
+        session_handle: str | None = None
+        try:
+            chat_key, session_handle = self._resolve_outbound_target(chat_id)
+        except UnknownChatTarget:
+            # Legacy direct-media helpers were historically allowed to post to
+            # numeric chat ids without prior inbound state. Keep that fallback
+            # for direct callers/tests, while normal gateway delivery has the
+            # state and uses /send-message below.
+            chat_key = int(chat_id)
+        assistant_id = await self._assistant_id_for_chat(chat_key)
+        if assistant_id is not None:
+            resp = await self._api.post_send_message(
+                chat_id=chat_key,
+                assistant_id=assistant_id,
+                text=caption or "",
+                sender="assistant",
+                message_type="standard",
+                has_attachment=True,
+                files=[attach],
+                reply_to_id=int(reply_to) if reply_to is not None else None,
+                session_handle=session_handle,
+            )
+            message_obj = resp.get("message") if isinstance(resp, dict) else None
+            message_id = (
+                message_obj.get("id") if isinstance(message_obj, dict) else resp.get("id") if isinstance(resp, dict) else None
+            )
+        else:
+            resp = await self._api.post_message(
+                chat_id=chat_key,
+                text=caption or "",
+                sender="assistant",
+                message_type="standard",
+                files=[attach],
+                reply_to_id=int(reply_to) if reply_to is not None else None,
+            )
+            message_id = resp.get("id") if isinstance(resp, dict) else None
+        if isinstance(message_id, str):
+            try:
+                message_id = int(message_id)
+            except ValueError:
+                message_id = None
+        if isinstance(message_id, int):
+            self._state.last_assistant_message_by_chat[chat_key] = message_id
         return _send_result(message_id=message_id)
 
     async def send_image(
@@ -2257,39 +2290,186 @@ class BGOSAdapter(BasePlatformAdapter):
         )
 
     async def send_voice(
-        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
-        mime: str, caption: str | None = None,
+        self,
+        chat_id: int | str,
+        audio_path: str | None = None,
+        caption: str | None = None,
+        reply_to: int | str | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        file_bytes: bytes | None = None,
+        filename: str | None = None,
+        mime: str | None = None,
+        audio_duration: float | int | None = None,
+        **kwargs: Any,
     ) -> SendResult:
-        return await self._send_media(
-            chat_id=chat_id, file_bytes=file_bytes,
-            filename=filename, mime=mime, caption=caption,
+        """Send audio as a BGOS voice bubble, not an attachment card.
+
+        Hermes's gateway calls media hooks with the BasePlatformAdapter
+        signature (`audio_path`, `reply_to`, `metadata`). Older unit tests and
+        direct plugin callers used the pre-Hermes BGOS signature
+        (`file_bytes`, `filename`, `mime`). Accept both, then post the
+        message-level audio fields that BGOS's `VoiceMessagePlayer` reads.
+        """
+        if audio_path is not None:
+            path = Path(audio_path).expanduser()
+            file_bytes = await asyncio.to_thread(path.read_bytes)
+            filename = filename or path.name
+            mime = mime or _guess_media_mime(path.name)
+        if not file_bytes:
+            log.warning("send_voice: no audio bytes supplied for chat=%s", chat_id)
+            return _send_result(message_id=None)
+        filename = filename or "voice-message.mp3"
+        mime = mime or _guess_media_mime(filename)
+        if not mime.startswith("audio/"):
+            log.warning(
+                "send_voice: refusing non-audio MIME %r for %s", mime, filename,
+            )
+            return await self._send_media(
+                chat_id=chat_id, file_bytes=file_bytes, filename=filename,
+                mime=mime, caption=caption, reply_to=(int(reply_to) if reply_to is not None else None),
+            )
+
+        try:
+            chat_key, session_handle = self._resolve_outbound_target(chat_id)
+        except UnknownChatTarget as exc:
+            log.warning("send_voice rejected: %s", exc)
+            return SendResult(success=False, error="unknown_chat_target")  # type: ignore[call-arg]
+
+        assistant_id = await self._assistant_id_for_chat(chat_key)
+        if assistant_id is None:
+            log.warning(
+                "send_voice: could not resolve assistant_id for chat=%s; "
+                "falling back to audio attachment card",
+                chat_key,
+            )
+            return await self._send_media(
+                chat_id=chat_key, file_bytes=file_bytes, filename=filename,
+                mime=mime, caption=caption,
+                reply_to=(int(reply_to) if reply_to is not None else None),
+            )
+
+        resp = await self._api.post_send_message(
+            chat_id=chat_key,
+            assistant_id=assistant_id,
+            text=caption or "",
+            sender="assistant",
+            message_type="standard",
+            has_attachment=True,
+            is_audio_message=True,
+            audio_data=base64.b64encode(file_bytes).decode("ascii"),
+            audio_file_name=filename,
+            audio_mime_type=mime,
+            audio_duration=audio_duration,
+            reply_to_id=int(reply_to) if reply_to is not None else None,
+            session_handle=session_handle,
+            files=[],
         )
+        message_obj = resp.get("message") if isinstance(resp, dict) else None
+        message_id = (
+            message_obj.get("id") if isinstance(message_obj, dict) else resp.get("id") if isinstance(resp, dict) else None
+        )
+        if isinstance(message_id, str):
+            try:
+                message_id = int(message_id)
+            except ValueError:
+                message_id = None
+        if isinstance(message_id, int):
+            self._state.last_assistant_message_by_chat[chat_key] = message_id
+        return _send_result(message_id=message_id)
 
     async def send_video(
-        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
-        mime: str, caption: str | None = None,
+        self,
+        chat_id: int | str,
+        video_path: str | None = None,
+        caption: str | None = None,
+        reply_to: int | str | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        file_bytes: bytes | None = None,
+        filename: str | None = None,
+        mime: str | None = None,
+        **kwargs: Any,
     ) -> SendResult:
+        """Send video attachments from either Hermes file-path or raw bytes."""
+        if video_path is not None:
+            path = Path(video_path).expanduser()
+            file_bytes = await asyncio.to_thread(path.read_bytes)
+            filename = filename or path.name
+            mime = mime or _guess_media_mime(path.name)
+        if not file_bytes:
+            log.warning("send_video: no video bytes supplied for chat=%s", chat_id)
+            return _send_result(message_id=None)
         return await self._send_media(
             chat_id=chat_id, file_bytes=file_bytes,
-            filename=filename, mime=mime, caption=caption,
+            filename=filename or "video.mp4", mime=mime or _guess_media_mime(filename or "video.mp4"),
+            caption=caption, reply_to=(int(reply_to) if reply_to is not None else None),
         )
 
     async def send_document(
-        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
-        mime: str, caption: str | None = None,
+        self,
+        chat_id: int | str,
+        file_path: str | None = None,
+        caption: str | None = None,
+        reply_to: int | str | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        file_bytes: bytes | None = None,
+        filename: str | None = None,
+        mime: str | None = None,
+        **kwargs: Any,
     ) -> SendResult:
+        """Send document/download-card attachments.
+
+        Hermes core extracts ``MEDIA:/abs/path`` from final replies, strips the
+        marker from the text, then calls platform adapters as
+        ``send_document(chat_id=..., file_path=..., metadata=...)``. The BGOS
+        adapter's older raw-bytes-only signature raised ``TypeError`` on that
+        call, so the already-stripped marker produced a text-only message and
+        the attachment was silently omitted. Accept both calling conventions.
+        """
+        if file_path is not None:
+            path = Path(file_path).expanduser()
+            file_bytes = await asyncio.to_thread(path.read_bytes)
+            filename = filename or path.name
+            mime = mime or _guess_media_mime(path.name)
+        if not file_bytes:
+            log.warning("send_document: no file bytes supplied for chat=%s", chat_id)
+            return _send_result(message_id=None)
+        filename = filename or "attachment.bin"
+        mime = mime or _guess_media_mime(filename)
         return await self._send_media(
             chat_id=chat_id, file_bytes=file_bytes,
             filename=filename, mime=mime, caption=caption,
+            reply_to=(int(reply_to) if reply_to is not None else None),
         )
 
     async def send_animation(
-        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
-        mime: str, caption: str | None = None,
+        self,
+        chat_id: int | str,
+        animation_path: str | None = None,
+        caption: str | None = None,
+        reply_to: int | str | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        file_bytes: bytes | None = None,
+        filename: str | None = None,
+        mime: str | None = None,
+        **kwargs: Any,
     ) -> SendResult:
+        """Send GIF/animation attachments from either file-path or raw bytes."""
+        if animation_path is not None:
+            path = Path(animation_path).expanduser()
+            file_bytes = await asyncio.to_thread(path.read_bytes)
+            filename = filename or path.name
+            mime = mime or _guess_media_mime(path.name)
+        if not file_bytes:
+            log.warning("send_animation: no animation bytes supplied for chat=%s", chat_id)
+            return _send_result(message_id=None)
         return await self._send_media(
             chat_id=chat_id, file_bytes=file_bytes,
-            filename=filename, mime=mime, caption=caption,
+            filename=filename or "animation.gif", mime=mime or _guess_media_mime(filename or "animation.gif"),
+            caption=caption, reply_to=(int(reply_to) if reply_to is not None else None),
         )
 
     async def send_multiple_images(
@@ -2299,6 +2479,9 @@ class BGOSAdapter(BasePlatformAdapter):
         *,
         caption: str | None = None,
         reply_to: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        human_delay: float | int | None = None,
+        **kwargs: Any,
     ) -> SendResult:
         """Send up to 10 images as a single carousel-rendered message.
 
@@ -2319,7 +2502,24 @@ class BGOSAdapter(BasePlatformAdapter):
             )
             images = images[:10]
         attachments: list[dict] = []
-        for blob, filename, mime in images:
+        for item in images:
+            # Internal tests/direct callers pass (bytes, filename, mime). Hermes
+            # core passes ("file:///abs/path", caption) after extracting image
+            # MEDIA markers. Support both so images do not vanish after the core
+            # strips the marker from the visible response text.
+            if len(item) >= 3 and isinstance(item[0], (bytes, bytearray)):
+                blob = bytes(item[0])
+                filename = str(item[1])
+                mime = str(item[2])
+            else:
+                raw_url = str(item[0])
+                from urllib.parse import unquote, urlparse
+
+                parsed = urlparse(raw_url)
+                path = Path(unquote(parsed.path if parsed.scheme == "file" else raw_url)).expanduser()
+                blob = await asyncio.to_thread(path.read_bytes)
+                filename = path.name
+                mime = _guess_media_mime(filename)
             attachments.append(
                 await self._upload_and_attach(
                     file_bytes=blob, filename=filename, mime=mime,

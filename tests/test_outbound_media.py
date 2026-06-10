@@ -129,17 +129,56 @@ async def test_send_image_presigned_above_threshold(mock_bgos_server):
         await adapter.disconnect()
 
 
-async def test_send_voice_routes_through_same_path(mock_bgos_server):
-    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 702})
+async def test_send_voice_posts_message_level_audio_fields(mock_bgos_server):
+    mock_bgos_server.on("GET", "/api/v1/chats/11").respond(200, {"assistantId": 7})
+    mock_bgos_server.on("POST", "/api/v1/send-message").respond(
+        201, {"message": {"id": 702}},
+    )
     adapter = await _connected_adapter(mock_bgos_server)
+    adapter._state.record_inbound_chat(11)
     try:
         await adapter.send_voice(
             chat_id=11, file_bytes=b"voice-bytes", filename="a.ogg",
             mime="audio/ogg", caption=None,
         )
-        body = mock_bgos_server.last_request("POST", "/api/v1/messages").json_body
-        assert body["files"][0]["fileName"] == "a.ogg"
+        body = mock_bgos_server.last_request("POST", "/api/v1/send-message").json_body
+        assert body["chatId"] == 11
+        assert body["assistantId"] == 7
         assert body["text"] == ""
+        assert body["sender"] == "assistant"
+        assert body["hasAttachment"] is True
+        assert body["isAudioMessage"] is True
+        assert body["audioFileName"] == "a.ogg"
+        assert body["audioMimeType"] == "audio/ogg"
+        assert body["audioData"] == "dm9pY2UtYnl0ZXM="
+        assert "files" not in body
+    finally:
+        await adapter.disconnect()
+
+
+
+
+async def test_send_voice_accepts_hermes_audio_path_signature(mock_bgos_server, tmp_path):
+    mock_bgos_server.on("GET", "/api/v1/chats/11").respond(200, {"assistantId": 7})
+    mock_bgos_server.on("POST", "/api/v1/send-message").respond(
+        201, {"message": {"id": 703}},
+    )
+    audio_path = tmp_path / "reply.mp3"
+    audio_path.write_bytes(b"mp3-bytes")
+
+    adapter = await _connected_adapter(mock_bgos_server)
+    adapter._state.record_inbound_chat(11)
+    try:
+        await adapter.send_voice(
+            chat_id=11,
+            audio_path=str(audio_path),
+            metadata={"thread": "ignored-but-accepted"},
+        )
+        body = mock_bgos_server.last_request("POST", "/api/v1/send-message").json_body
+        assert body["isAudioMessage"] is True
+        assert body["audioFileName"] == "reply.mp3"
+        assert body["audioMimeType"] == "audio/mpeg"
+        assert body["audioData"] == "bXAzLWJ5dGVz"
     finally:
         await adapter.disconnect()
 
@@ -158,6 +197,57 @@ async def test_send_video_document_animation_all_work(mock_bgos_server):
         assert len(posts) == 3
         filenames = [r.json_body["files"][0]["fileName"] for r in posts]
         assert filenames == ["v.mp4", "d.pdf", "g.gif"]
+    finally:
+        await adapter.disconnect()
+
+
+async def test_send_document_accepts_hermes_file_path_signature(mock_bgos_server, tmp_path):
+    """Hermes core dispatches extracted MEDIA: documents with file_path+metadata."""
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 704})
+    doc_path = tmp_path / "agent-upload-key.txt"
+    doc_path.write_text("secret-placeholder", encoding="utf-8")
+
+    adapter = await _connected_adapter(mock_bgos_server)
+    adapter._state.record_inbound_chat(11)
+    try:
+        result = await adapter.send_document(
+            chat_id=11,
+            file_path=str(doc_path),
+            metadata={"notify": True},
+        )
+        assert result.message_id == "704"
+        body = mock_bgos_server.last_request("POST", "/api/v1/messages").json_body
+        assert body["text"] == ""
+        assert body["files"][0]["fileName"] == "agent-upload-key.txt"
+        assert body["files"][0]["fileMimeType"] == "text/plain"
+        assert body["files"][0]["isDocument"] is True
+        assert body["files"][0]["isImage"] is False
+        assert body["files"][0]["fileData"].startswith("data:text/plain;base64,")
+    finally:
+        await adapter.disconnect()
+
+
+async def test_send_multiple_images_accepts_hermes_file_uri_signature(mock_bgos_server, tmp_path):
+    """Hermes core sends image MEDIA markers to send_multiple_images as file:// URIs."""
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 705})
+    img_path = tmp_path / "thumb.png"
+    img_path.write_bytes(_png_bytes(32, 24))
+
+    adapter = await _connected_adapter(mock_bgos_server)
+    adapter._state.record_inbound_chat(11)
+    try:
+        result = await adapter.send_multiple_images(
+            chat_id=11,
+            images=[(f"file://{img_path}", "")],
+            metadata={"notify": True},
+        )
+        assert result.message_id == "705"
+        body = mock_bgos_server.last_request("POST", "/api/v1/messages").json_body
+        assert body["files"][0]["fileName"] == "thumb.png"
+        assert body["files"][0]["fileMimeType"] == "image/png"
+        assert body["files"][0]["isImage"] is True
+        assert body["files"][0]["width"] == 32
+        assert body["files"][0]["height"] == 24
     finally:
         await adapter.disconnect()
 

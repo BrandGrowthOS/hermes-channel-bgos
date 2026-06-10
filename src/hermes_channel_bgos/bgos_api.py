@@ -201,6 +201,12 @@ class BgosApi:
         text: str,
         sender: str = "assistant",
         message_type: str = "standard",
+        has_attachment: bool | None = None,
+        is_audio_message: bool | None = None,
+        audio_data: str | None = None,
+        audio_file_name: str | None = None,
+        audio_mime_type: str | None = None,
+        audio_duration: float | int | None = None,
         files: list[dict] | None = None,
         options: list[dict] | None = None,
         approval_meta: dict | None = None,
@@ -231,6 +237,18 @@ class BgosApi:
         }
         if session_handle:
             body["sessionHandle"] = session_handle
+        if has_attachment is not None:
+            body["hasAttachment"] = has_attachment
+        if is_audio_message is not None:
+            body["isAudioMessage"] = is_audio_message
+        if audio_data is not None:
+            body["audioData"] = audio_data
+        if audio_file_name is not None:
+            body["audioFileName"] = audio_file_name
+        if audio_mime_type is not None:
+            body["audioMimeType"] = audio_mime_type
+        if audio_duration is not None:
+            body["audioDuration"] = audio_duration
         if files:
             body["files"] = files
         if options:
