@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_channel_bgos.bgos_api import BgosApi, BgosApiError
+from hermes_channel_bgos.bgos_api import BgosApi, BgosApiError, NOT_MODIFIED
 from hermes_channel_bgos.config import BgosConfig
 
 
@@ -152,6 +152,56 @@ async def test_fetch_inbound_since_passes_cursor(mock_bgos_server):
     req = mock_bgos_server.last_request("GET", "/api/v1/integrations/inbound")
     assert req.query["since_message_id"] == "1234"
     assert req.headers["X-BGOS-Pairing"] == "pair_xyz"
+    await api.close()
+
+
+async def test_fetch_inbound_no_etag_behaves_like_before(mock_bgos_server):
+    """Egress fix backward-compat: when the backend omits ETag (Stage-2 and
+    older), the conditional GET still returns the full body and never sends
+    If-None-Match — identical to the prior behavior."""
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        200, {"messages": [{"id": 5}]},
+    )
+
+    resp = await api.fetch_inbound_since(1)
+    assert resp == {"messages": [{"id": 5}]}
+    req = mock_bgos_server.last_request("GET", "/api/v1/integrations/inbound")
+    assert "If-None-Match" not in req.headers
+    await api.close()
+
+
+async def test_fetch_inbound_sends_if_none_match_after_etag(mock_bgos_server):
+    """When the backend returns an ETag, the NEXT poll for the same cursor
+    echoes it back via If-None-Match (egress fix Stage-3 conditional GET)."""
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        200, {"messages": []}, headers={"ETag": '"abc123"'},
+    )
+
+    # First call: no prior validator, records the ETag.
+    first = await api.fetch_inbound_since(42)
+    assert first == {"messages": []}
+    req1 = mock_bgos_server.last_request("GET", "/api/v1/integrations/inbound")
+    assert "If-None-Match" not in req1.headers
+
+    # Second call, same cursor: must replay the validator.
+    await api.fetch_inbound_since(42)
+    req2 = mock_bgos_server.last_request("GET", "/api/v1/integrations/inbound")
+    assert req2.headers["If-None-Match"] == '"abc123"'
+    await api.close()
+
+
+async def test_fetch_inbound_304_returns_not_modified(mock_bgos_server):
+    """A 304 surfaces as the NOT_MODIFIED sentinel so the poll loop can skip
+    work entirely (the egress win)."""
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        304, headers={"ETag": '"abc123"'},
+    )
+
+    resp = await api.fetch_inbound_since(42)
+    assert resp is NOT_MODIFIED
     await api.close()
 
 

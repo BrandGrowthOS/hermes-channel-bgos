@@ -36,6 +36,15 @@ class BgosApiError(Exception):
         self.body = body
 
 
+# Sentinel returned by conditional GETs when the server replies 304 Not
+# Modified. Distinct from `None` (which `_request` returns for an empty 2xx
+# body) so callers can tell "nothing changed, skip work" apart from "ok, no
+# content". Egress fix (Stage 4): conditional-GET on the inbound poll lets the
+# Stage-3 backend answer the tight poll loop with a 0-byte 304 instead of
+# re-serializing the message list every few seconds.
+NOT_MODIFIED = object()
+
+
 class BgosApi:
     def __init__(self, config: BgosConfig) -> None:
         self._config = config
@@ -43,6 +52,11 @@ class BgosApi:
             base_url=config.base_url,
             timeout=config.request_timeout_seconds,
         )
+        # Last ETag seen per conditional-GET path, so the next poll can send
+        # `If-None-Match`. In-process only — on restart we simply re-fetch the
+        # full payload once (the backend still returns 200 + body for a missing
+        # / non-matching ETag), so losing this is harmless and backward-safe.
+        self._etag_by_path: dict[str, str] = {}
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -141,6 +155,59 @@ class BgosApi:
                     str(body)[:500],
                 )
             raise BgosApiError(resp.status_code, code, body)
+        if not resp.content:
+            return None
+        return resp.json()
+
+    async def _conditional_get(
+        self,
+        path: str,
+        *,
+        params: Any = None,
+        cache_key: str | None = None,
+    ) -> Any:
+        """GET `path` with `If-None-Match` when we hold an ETag for it.
+
+        Returns the parsed JSON body on a 200 (and records the response's
+        ETag for next time). Returns the `NOT_MODIFIED` sentinel on a 304 so
+        the caller can skip work entirely. Falls back to plain behavior when
+        the server omits ETags — i.e. an old/Stage-2 backend that never sends
+        `ETag` simply keeps answering 200 + full body, exactly as before, so
+        this is safe to ship ahead of the Stage-3 backend.
+
+        `cache_key` defaults to `path`; pass an explicit key when the same path
+        is polled with cursor params that shouldn't share an ETag bucket.
+        """
+        key = cache_key or path
+        headers = self._headers()
+        prev_etag = self._etag_by_path.get(key)
+        if prev_etag:
+            headers["If-None-Match"] = prev_etag
+        resp = await self._client.request(
+            "GET", path, params=params, headers=headers,
+        )
+        if resp.status_code == 304:
+            # Server confirms nothing changed since `prev_etag`. Keep the
+            # cached validator and tell the caller to do nothing.
+            return NOT_MODIFIED
+        if resp.status_code >= 400:
+            content_type = resp.headers.get("content-type", "")
+            if content_type.startswith("application/json"):
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = resp.text
+                code = body.get("error") if isinstance(body, dict) else None
+            else:
+                body = resp.text
+                code = None
+            raise BgosApiError(resp.status_code, code, body)
+        # Record the new validator (drop it if the server stopped sending one).
+        etag = resp.headers.get("ETag")
+        if etag:
+            self._etag_by_path[key] = etag
+        else:
+            self._etag_by_path.pop(key, None)
         if not resp.content:
             return None
         return resp.json()
@@ -461,11 +528,20 @@ class BgosApi:
     # Inbound backfill (reconnect)
     # -------------------------------------------------------------------------
 
-    async def fetch_inbound_since(self, since_message_id: int) -> dict:
-        return await self._request(
-            "GET",
+    async def fetch_inbound_since(self, since_message_id: int) -> Any:
+        """GET /api/v1/integrations/inbound?since_message_id=<cursor>.
+
+        Conditional-GET aware: sends `If-None-Match` when we hold an ETag for
+        this cursor and returns the `NOT_MODIFIED` sentinel on a 304 so the
+        poll loop can skip the no-op replay. Against an older backend that
+        doesn't emit ETags this is identical to the prior behavior (always a
+        200 + full body). The ETag bucket is keyed by cursor so a validator
+        minted for one cursor is never replayed against a different one.
+        """
+        return await self._conditional_get(
             "/api/v1/integrations/inbound",
             params={"since_message_id": since_message_id},
+            cache_key=f"inbound:{since_message_id}",
         )
 
     # -------------------------------------------------------------------------
