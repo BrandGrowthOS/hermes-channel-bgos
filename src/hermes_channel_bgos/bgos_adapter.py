@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -2280,13 +2281,113 @@ class BGOSAdapter(BasePlatformAdapter):
             self._state.last_assistant_message_by_chat[chat_key] = message_id
         return _send_result(message_id=message_id)
 
+    async def _fetch_media_source(
+        self, src: str, filename: str | None = None, mime: str | None = None,
+    ) -> tuple[bytes | None, str, str]:
+        """Resolve a media source — an http(s) URL OR a local/file:// path — to
+        (bytes, filename, mime).
+
+        Hermes's gateway hands `send_image`/`send_animation`/`send_image_file` a
+        URL (markdown image links the agent emitted) or a local path. For http
+        URLs we download + re-upload to BGOS so the asset is owned and
+        persistent (source URLs — fal.media, replicate.delivery — expire and
+        would 404 once the user scrolls back). Local/`file://` paths are read
+        off the event loop. Returns `(None, …)` on any failure (dead link, bad
+        path, empty, or over `_MEDIA_MAX_BYTES`) so delivery degrades gracefully
+        instead of raising.
+        """
+        name = filename or ""
+        resolved_mime = mime or ""
+        try:
+            if re.match(r"^https?://", src, re.IGNORECASE):
+                async with httpx.AsyncClient(
+                    timeout=self._config.request_timeout_seconds,
+                    follow_redirects=True,
+                ) as client:
+                    resp = await client.get(src)
+                    resp.raise_for_status()
+                    data = resp.content
+                ctype = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                name = name or Path(unquote(urlparse(src).path)).name
+                resolved_mime = resolved_mime or ctype
+            else:
+                parsed = urlparse(src)
+                path = Path(
+                    unquote(parsed.path if parsed.scheme == "file" else src)
+                ).expanduser()
+                data = await asyncio.to_thread(path.read_bytes)
+                name = name or path.name
+        except Exception:
+            log.warning("media source fetch failed: %r", src, exc_info=True)
+            return None, name or "download", resolved_mime or "application/octet-stream"
+        if not data:
+            return None, name or "download", resolved_mime or "application/octet-stream"
+        if len(data) > _MEDIA_MAX_BYTES:
+            log.warning(
+                "media source %r is %d bytes (> %d cap) — skipping",
+                src, len(data), _MEDIA_MAX_BYTES,
+            )
+            return None, name or "download", resolved_mime or "application/octet-stream"
+        name = name or "download"
+        resolved_mime = resolved_mime or _guess_media_mime(name)
+        if "." not in name:
+            name += mimetypes.guess_extension(resolved_mime) or ""
+        return data, name, resolved_mime
+
     async def send_image(
-        self, *, chat_id: int | str, file_bytes: bytes, filename: str,
-        mime: str, caption: str | None = None,
+        self, chat_id: int | str, image_url: str | None = None,
+        caption: str | None = None, reply_to: int | str | None = None,
+        metadata: dict[str, Any] | None = None, *,
+        file_bytes: bytes | None = None, filename: str | None = None,
+        mime: str | None = None, **kwargs: Any,
     ) -> SendResult:
+        """Send an image. Hermes's gateway calls
+        ``send_image(chat_id, image_url, …)`` where `image_url` is an http(s)
+        URL (markdown image links the agent emitted) — we download + re-upload
+        to BGOS. The byte form (`file_bytes=`, internal callers + tests) and a
+        local/file:// path are also accepted. `**kwargs` absorbs any future
+        gateway kwarg so this can't regress on an unexpected argument.
+        """
+        if file_bytes is None and image_url:
+            file_bytes, filename, mime = await self._fetch_media_source(
+                image_url, filename, mime,
+            )
+        if not file_bytes:
+            log.warning(
+                "send_image: no image bytes for chat=%s (src=%r)", chat_id, image_url,
+            )
+            return _send_result(message_id=None)
         return await self._send_media(
             chat_id=chat_id, file_bytes=file_bytes,
-            filename=filename, mime=mime, caption=caption,
+            filename=filename or "image.png", mime=mime or "image/png",
+            caption=caption, reply_to=(int(reply_to) if reply_to is not None else None),
+        )
+
+    async def send_image_file(
+        self, chat_id: int | str, image_path: str | None = None,
+        caption: str | None = None, reply_to: int | str | None = None,
+        metadata: dict[str, Any] | None = None, *,
+        file_bytes: bytes | None = None, filename: str | None = None,
+        mime: str | None = None, **kwargs: Any,
+    ) -> SendResult:
+        """Send a LOCAL image file. Matches the gateway's
+        ``send_image_file(chat_id, image_path, …)`` hook. Same fetch+send
+        pipeline as send_image (the source resolver handles plain paths too).
+        """
+        if file_bytes is None and image_path:
+            file_bytes, filename, mime = await self._fetch_media_source(
+                image_path, filename, mime,
+            )
+        if not file_bytes:
+            log.warning(
+                "send_image_file: no image bytes for chat=%s (path=%r)",
+                chat_id, image_path,
+            )
+            return _send_result(message_id=None)
+        return await self._send_media(
+            chat_id=chat_id, file_bytes=file_bytes,
+            filename=filename or "image.png", mime=mime or "image/png",
+            caption=caption, reply_to=(int(reply_to) if reply_to is not None else None),
         )
 
     async def send_voice(
@@ -2452,17 +2553,24 @@ class BGOSAdapter(BasePlatformAdapter):
         reply_to: int | str | None = None,
         metadata: dict[str, Any] | None = None,
         *,
+        animation_url: str | None = None,
         file_bytes: bytes | None = None,
         filename: str | None = None,
         mime: str | None = None,
         **kwargs: Any,
     ) -> SendResult:
-        """Send GIF/animation attachments from either file-path or raw bytes."""
-        if animation_path is not None:
-            path = Path(animation_path).expanduser()
-            file_bytes = await asyncio.to_thread(path.read_bytes)
-            filename = filename or path.name
-            mime = mime or _guess_media_mime(path.name)
+        """Send GIF/animation from a URL, a file-path, or raw bytes.
+
+        Hermes's base contract is ``send_animation(chat_id, animation_url, …)``
+        — but the 2nd positional may be either an http(s) URL or a local path,
+        so we route it through `_fetch_media_source` (which detects and handles
+        both). The `animation_url` kwarg is accepted as an explicit alias.
+        """
+        src = animation_path or animation_url
+        if file_bytes is None and src:
+            file_bytes, filename, mime = await self._fetch_media_source(
+                src, filename, mime,
+            )
         if not file_bytes:
             log.warning("send_animation: no animation bytes supplied for chat=%s", chat_id)
             return _send_result(message_id=None)

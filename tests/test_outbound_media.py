@@ -553,3 +553,154 @@ async def test_send_media_only_all_bad_posts_nothing(monkeypatch):
     result = await adapter.send(chat_id=1, content="MEDIA:/nope/missing.png")
     assert posts == []
     assert result.message_id is None
+
+
+# -----------------------------------------------------------------------------
+# send_image / send_image_file / send_animation — gateway URL+path contract.
+#
+# Hermes's gateway calls send_image(chat_id=…, image_url=<http url>),
+# send_image_file(chat_id=…, image_path=<local>), send_animation(…,
+# animation_url=…). These were byte-only / path-only and dropped markdown
+# http-image links. _fetch_media_source downloads URLs (re-uploaded to BGOS so
+# they outlive the ephemeral source) and reads local/file:// paths.
+# -----------------------------------------------------------------------------
+
+
+class _FakeHttpResp:
+    def __init__(self, content: bytes, ctype: str = "image/png") -> None:
+        self.content = content
+        self.headers = {"content-type": ctype}
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeHttpClient:
+    """Stand-in for httpx.AsyncClient so _fetch_media_source exercises the URL
+    branch without real network. Returns a fixed PNG for any GET."""
+
+    _payload = _png_bytes(40, 30)
+
+    def __init__(self, *a, **k) -> None:
+        pass
+
+    async def __aenter__(self) -> "_FakeHttpClient":
+        return self
+
+    async def __aexit__(self, *a) -> bool:
+        return False
+
+    async def get(self, url: str):
+        return _FakeHttpResp(self._payload, "image/png")
+
+
+async def test_send_image_downloads_url_and_reuploads(monkeypatch):
+    """Gateway form send_image(image_url=http) downloads + re-uploads to BGOS."""
+    adapter = _make_adapter()
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.httpx.AsyncClient", _FakeHttpClient,
+    )
+
+    await adapter.send_image(
+        chat_id=1, image_url="https://fal.media/files/cat.png",
+        caption="a cat", metadata={"platform": "bgos"},
+    )
+    assert len(posts) == 1
+    f = posts[0]["files"][0]
+    assert f["fileName"] == "cat.png"
+    assert f["isImage"] is True
+    assert f["fileData"].startswith("data:image/png;base64,")
+    assert posts[0]["text"] == "a cat"
+
+
+async def test_send_image_byte_form_still_works(monkeypatch):
+    """Internal/byte callers (the pre-Hermes signature) keep working."""
+    adapter = _make_adapter()
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter.send_image(
+        chat_id=1, file_bytes=_png_bytes(8, 8), filename="b.png", mime="image/png",
+    )
+    assert posts[0]["files"][0]["fileName"] == "b.png"
+
+
+async def test_send_image_file_reads_local_path(monkeypatch, tmp_path):
+    """Gateway form send_image_file(image_path=local) reads + posts."""
+    adapter = _make_adapter()
+    img = tmp_path / "local.png"
+    img.write_bytes(_png_bytes(20, 20))
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter.send_image_file(
+        chat_id=1, image_path=str(img), caption="c", metadata={"platform": "bgos"},
+    )
+    assert posts[0]["files"][0]["fileName"] == "local.png"
+    assert posts[0]["files"][0]["isImage"] is True
+    assert posts[0]["text"] == "c"
+
+
+async def test_send_animation_url_downloads(monkeypatch):
+    """send_animation accepts a URL (positional or animation_url=) and downloads."""
+    adapter = _make_adapter()
+    posts = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 2}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.httpx.AsyncClient", _FakeHttpClient,
+    )
+    await adapter.send_animation(chat_id=1, animation_url="https://media.test/loop.gif")
+    assert len(posts) == 1
+    assert posts[0]["files"][0]["fileName"] == "loop.gif"
+
+
+async def test_image_methods_ignore_unknown_gateway_kwargs(monkeypatch, tmp_path):
+    """**kwargs absorbs unexpected gateway kwargs — the exact regression class."""
+    adapter = _make_adapter()
+    img = tmp_path / "k.png"
+    img.write_bytes(_png_bytes(10, 10))
+
+    async def fake_post(**kw):
+        return {"id": 1}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    res = await adapter.send_image_file(
+        chat_id=1, image_path=str(img), reply_to=7,
+        some_future_kwarg="x", thread_id="t1",
+    )
+    assert res.message_id == "1"
+
+
+async def test_send_image_dead_url_is_graceful(monkeypatch):
+    """A dead image URL degrades to a no-op, never raises."""
+    adapter = _make_adapter()
+
+    class _BoomClient(_FakeHttpClient):
+        async def get(self, url: str):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.httpx.AsyncClient", _BoomClient,
+    )
+    res = await adapter.send_image(chat_id=1, image_url="https://dead.link/x.png")
+    assert res.message_id is None
