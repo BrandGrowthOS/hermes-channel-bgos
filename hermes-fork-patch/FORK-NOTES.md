@@ -116,6 +116,8 @@ Both outcomes expected per the README — the shim only resolves once `hermes-ch
 > Updated 2026-04-24 (round 2): Inline buttons now WIRED via `[[BGOS_BUTTONS]]...[[/BGOS_BUTTONS]]` marker block. PLATFORM_HINTS section rewritten from "NOT YET WIRED" to full syntax docs (pipe-separated label|value, max 6, click delivery via `inbound_click` WS event → synthetic user MessageEvent). `ask_user_input` modal is still NOT YET WIRED — documented as a follow-up. Corresponding adapter changes live in vendor pkg v0.3.0; backend change emits `inbound_click` to `assistant:<id>` on every paired-assistant button click.
 >
 > Updated 2026-04-25: Inbound file surfacing now WIRED. Backend `emitInboundMessage` payload's files entries gain `url` (presigned S3 GET, 1h TTL) and `dataUri` (inline base64 for <500KB files). Adapter inlines attachments into the agent-visible text — images as markdown image syntax (vision models pick them up automatically), other files as labeled link lines under `## Attachments from user`. PLATFORM_HINTS "Receiving files from the user" section rewritten to describe the actual surfacing path. Vendor pkg v0.4.0 + backend SendMessageService change ship together.
+>
+> Updated 2026-06-12: PLATFORM_HINTS "Message formatting" line extended for clickable URLs (BGOS PR #310): bare URLs / www. / bare domains / emails now auto-link Telegram-style; masked [text](url) links show an "Open this link?" confirmation with the full URL; URLs in code spans never linkify. Single-line patch edit (hunk counts unchanged — `git am` still applies cleanly). Re-apply the patch on the Hermes fork + restart gateways to push the new hint to live agents.
 
 ### Skipped touch-points summary
 

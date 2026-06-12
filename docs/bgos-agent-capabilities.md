@@ -16,6 +16,12 @@ Agent replies render as markdown via `react-native-markdown-display` in `fronten
 
 **Supported:** `**bold**`, `*italic*`, `` `inline code` ``, ` ```fenced code``` `, `[links](url)`, `#`/`##`/`###` headers, numbered + bulleted lists, `>` blockquotes.
 
+**Links (Telegram-style, since 2026-06-12):**
+- **Bare URLs auto-link.** `https://…`, `www.…`, bare domains (`foo.com/path`, incl. modern TLDs like `.dev`/`.app`), and emails (→ `mailto:`) in plain prose become tappable links — no markdown syntax needed.
+- **Masked links confirm.** A `[text](url)` link whose text differs from the target shows the user an "Open this link?" dialog with the full URL before opening (phishing guard). A bare/auto-linked URL opens directly.
+- **URLs in code stay plain.** Inline code and fenced blocks are never linkified — use code spans when the user should copy a URL rather than open it.
+- **Guidance:** prefer a bare URL when transparency matters (opens in one tap); use `[text](url)` for tidy prose knowing the user will see a confirmation.
+
 **Not yet rendered natively:**
 - Tables (markdown tables don't layout on mobile — not in the rules allowlist)
 - Inline images via `![alt](url)` — use the file-attachment system instead
