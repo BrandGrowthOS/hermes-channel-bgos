@@ -10,15 +10,99 @@ plugin-capable Hermes; the patch stays as a fallback for older installs.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
+import httpx
+
+from .bgos_adapter import (
+    S3_THRESHOLD,
+    _MEDIA_MAX_BYTES,
+    _classify_media,
+    _guess_media_mime,
+    _parse_media_markers,
+)
 from .bgos_api import BgosApi, BgosApiError
 from .config import BgosConfig
 
+log = logging.getLogger(__name__)
+
 _PROD_BASE_URL = "https://api.brandgrowthos.ai"
+_STANDALONE_MEDIA_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
+_STANDALONE_MEDIA_CACHE_DIRS = (
+    "media_cache",
+    "image_cache",
+    "audio_cache",
+    "video_cache",
+    "document_cache",
+    "browser_screenshots",
+    "cache/images",
+    "cache/audio",
+    "cache/videos",
+    "cache/documents",
+    "cache/screenshots",
+)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _standalone_media_allowed_roots() -> list[Path]:
+    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
+    roots = [hermes_home / rel for rel in _STANDALONE_MEDIA_CACHE_DIRS]
+    extra_roots = os.environ.get(_STANDALONE_MEDIA_ALLOW_DIRS_ENV, "")
+    for chunk in extra_roots.split(os.pathsep):
+        for raw_root in chunk.split(","):
+            raw_root = raw_root.strip()
+            if not raw_root:
+                continue
+            root = Path(os.path.expanduser(raw_root))
+            if root.is_absolute():
+                roots.append(root)
+    return roots
+
+
+def _standalone_validate_media_path(raw_path: str) -> Path | None:
+    """Resolve a model-supplied MEDIA path only if it is safe to upload.
+
+    Standalone sends bypass Hermes core's adapter-level media validation, so the
+    plugin repeats the important invariant locally: only files under
+    Hermes-managed media caches or operator-configured ``HERMES_MEDIA_ALLOW_DIRS``
+    may be delivered. Symlinks are resolved before the containment check.
+    """
+    candidate = str(raw_path or "").strip()
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in "`\"'":
+        candidate = candidate[1:-1].strip()
+    candidate = candidate.lstrip("`\"'").rstrip("`\"',.;:)}]")
+    if not candidate:
+        return None
+    expanded = Path(os.path.expanduser(candidate))
+    if not expanded.is_absolute():
+        return None
+    try:
+        resolved = expanded.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    for root in _standalone_media_allowed_roots():
+        try:
+            resolved_root = root.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if _path_is_within(resolved, resolved_root) or resolved == resolved_root:
+            return resolved
+    return None
 
 
 def _secrets_path() -> Path:
@@ -66,6 +150,96 @@ def env_enablement() -> dict | None:
     return seed
 
 
+async def _standalone_build_media_attachments(
+    api: BgosApi,
+    paths: list[str],
+    *,
+    force_document: bool = False,
+) -> list[dict]:
+    """Build BGOS ``files[]`` entries for out-of-process sends.
+
+    Gateway-native assistant replies use ``BGOSAdapter.send()`` for ``MEDIA:``
+    markers. Cron jobs and the generic ``send_message`` tool can bypass the
+    live adapter and call this plugin-level ``standalone_send`` hook instead,
+    so media must be handled here too. Logs only path metadata, never file
+    contents.
+    """
+    attachments: list[dict] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        if raw_path in seen:
+            continue
+        seen.add(raw_path)
+        try:
+            path = _standalone_validate_media_path(raw_path)
+            if path is None:
+                log.warning(
+                    "BGOS standalone MEDIA: path not in media allowlist, skipping: %r",
+                    raw_path,
+                )
+                continue
+            file_size = path.stat().st_size
+            if file_size <= 0:
+                log.warning("BGOS standalone MEDIA: empty file, skipping: %r", raw_path)
+                continue
+            if file_size > _MEDIA_MAX_BYTES:
+                log.warning(
+                    "BGOS standalone MEDIA: file %r is %d bytes (> %d cap) — skipping",
+                    raw_path, file_size, _MEDIA_MAX_BYTES,
+                )
+                continue
+            file_bytes = await asyncio.to_thread(path.read_bytes)
+            if len(file_bytes) > _MEDIA_MAX_BYTES:
+                log.warning(
+                    "BGOS standalone MEDIA: file %r grew to %d bytes (> %d cap) — skipping",
+                    raw_path, len(file_bytes), _MEDIA_MAX_BYTES,
+                )
+                continue
+            mime = _guess_media_mime(path.name)
+            flags = _classify_media(mime)
+            if force_document:
+                flags = {
+                    "isImage": False,
+                    "isVideo": False,
+                    "isAudio": False,
+                    "isDocument": True,
+                }
+            entry: dict[str, Any] = {
+                "fileName": path.name,
+                "fileMimeType": mime,
+                "size": len(file_bytes),
+                **flags,
+            }
+            if mime.startswith("image/"):
+                # Dimensions are best-effort and optional; omit them here to
+                # keep plugin-level sending lightweight. The native adapter
+                # path still sniffs them for image carousels.
+                pass
+            if len(file_bytes) < S3_THRESHOLD:
+                encoded = base64.b64encode(file_bytes).decode("ascii")
+                entry["fileData"] = f"data:{mime};base64,{encoded}"
+            else:
+                presigned = await api.create_upload_url(
+                    filename=path.name, mime=mime, size=len(file_bytes),
+                )
+                async with httpx.AsyncClient(timeout=60) as put_client:
+                    resp = await put_client.put(
+                        presigned["upload_url"],
+                        content=file_bytes,
+                        headers={"Content-Type": mime},
+                    )
+                    resp.raise_for_status()
+                entry["s3Key"] = presigned["s3_key"]
+            attachments.append(entry)
+        except Exception:
+            log.warning(
+                "BGOS standalone MEDIA: failed to attach %r — skipping",
+                raw_path,
+                exc_info=True,
+            )
+    return attachments
+
+
 async def standalone_send(
     pconfig,
     chat_id: str,
@@ -80,8 +254,10 @@ async def standalone_send(
     fail with "No live adapter for platform" — and historically the fork left
     bgos sending unimplemented ("Direct sending not yet implemented for bgos").
 
-    `thread_id` / `media_files` / `force_document` are accepted for signature
-    parity with the registry's sender protocol; BGOS delivers text here.
+    Supports both explicit ``media_files`` from Hermes core and ``MEDIA:/path``
+    marker lines embedded in ``message``. The latter matters because BGOS's
+    platform hint promises MEDIA markers work, while standalone sends bypass
+    the live ``BGOSAdapter.send()`` parser.
     """
     token, base_url = resolve_pairing()
     if not token:
@@ -89,6 +265,19 @@ async def standalone_send(
     api = BgosApi(BgosConfig(base_url=base_url, pairing_token=token))
     try:
         chat_key = int(chat_id)
+        cleaned_message, marker_paths = _parse_media_markers(message)
+        combined_paths = list(media_files or []) + marker_paths
+        attachments = (
+            await _standalone_build_media_attachments(
+                api,
+                combined_paths,
+                force_document=force_document,
+            )
+            if combined_paths else []
+        )
+        if combined_paths and not attachments:
+            return {"error": "bgos standalone send: no attachable media files"}
+
         assistant_id: int | None = None
         try:
             chat = await api.get_chat(chat_key)
@@ -101,16 +290,24 @@ async def standalone_send(
             resp = await api.post_send_message(
                 chat_id=chat_key,
                 assistant_id=assistant_id,
-                text=message,
+                text=cleaned_message,
                 sender="assistant",
                 message_type="standard",
+                has_attachment=True if attachments else None,
+                files=attachments or None,
             )
             msg = resp.get("message") if isinstance(resp, dict) else None
             msg_id = msg.get("id") if isinstance(msg, dict) else None
         else:
             # Legacy fallback. This saves a visible BGOS message, but cannot run
             # the A2A bridge because /messages has no assistantId context.
-            resp = await api.post_message(chat_id=chat_key, text=message)
+            resp = await api.post_message(
+                chat_id=chat_key,
+                text=cleaned_message,
+                sender="assistant",
+                message_type="standard",
+                files=attachments or None,
+            )
             msg_id = resp.get("id") if isinstance(resp, dict) else None
     except BgosApiError as exc:
         return {"error": f"bgos standalone send: HTTP {exc.status}"}

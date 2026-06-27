@@ -1,6 +1,7 @@
 """Tests for the Hermes-plugin registration hooks."""
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -70,6 +71,7 @@ async def test_standalone_send_posts_via_bgos_api(tmp_path, monkeypatch):
         async def post_message(self, *, chat_id, text, **kw):
             captured["chat_id"] = chat_id
             captured["text"] = text
+            captured["kw"] = kw
             return {"id": 4321}
 
         async def close(self):
@@ -82,8 +84,183 @@ async def test_standalone_send_posts_via_bgos_api(tmp_path, monkeypatch):
     assert result["message_id"] == 4321
     assert captured["chat_id"] == 830          # coerced to int
     assert captured["text"] == "scheduled hello"
+    assert captured["kw"]["files"] is None
     assert captured["token"] == "tok"
     assert captured["closed"] is True
+
+
+async def test_standalone_send_extracts_media_marker_and_attaches_document(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("BGOS_API_KEY", "tok")
+    monkeypatch.setenv("BGOS_BACKEND_URL", "http://x")
+
+    media_cache = tmp_path / "media_cache"
+    media_cache.mkdir()
+    doc = media_cache / "agent-upload-key.txt"
+    doc.write_text("secret-placeholder", encoding="utf-8")
+
+    from hermes_channel_bgos import plugin as plugin_mod
+
+    captured = {}
+
+    class FakeApi:
+        def __init__(self, config):
+            captured["token"] = config.pairing_token
+
+        async def get_chat(self, chat_id):
+            captured["get_chat"] = chat_id
+            return {"assistantId": 7}
+
+        async def post_send_message(self, **kw):
+            captured["post_send_message"] = kw
+            return {"message": {"id": 9876}}
+
+        async def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(plugin_mod, "BgosApi", FakeApi)
+
+    result = await plugin_mod.standalone_send(
+        None,
+        "830",
+        f"Here is the file.\nMEDIA:{doc}\n",
+    )
+
+    assert result["success"] is True
+    assert result["message_id"] == 9876
+    body = captured["post_send_message"]
+    assert body["chat_id"] == 830
+    assert body["assistant_id"] == 7
+    assert body["text"] == "Here is the file."
+    assert body["has_attachment"] is True
+    files = body["files"]
+    assert len(files) == 1
+    assert files[0]["fileName"] == "agent-upload-key.txt"
+    assert files[0]["fileMimeType"] == "text/plain"
+    assert files[0]["isDocument"] is True
+    assert files[0]["isImage"] is False
+    data_uri = files[0]["fileData"]
+    assert data_uri.startswith("data:text/plain;base64,")
+    decoded = base64.b64decode(data_uri.split(",", 1)[1]).decode("utf-8")
+    assert decoded == "secret-placeholder"
+    assert captured["closed"] is True
+
+
+async def test_standalone_send_accepts_explicit_media_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("BGOS_API_KEY", "tok")
+    monkeypatch.setenv("BGOS_BACKEND_URL", "http://x")
+
+    media_cache = tmp_path / "media_cache"
+    media_cache.mkdir(exist_ok=True)
+    doc = media_cache / "report.txt"
+    doc.write_text("hello", encoding="utf-8")
+
+    from hermes_channel_bgos import plugin as plugin_mod
+
+    captured = {}
+
+    class FakeApi:
+        def __init__(self, config):
+            pass
+
+        async def get_chat(self, chat_id):
+            return {"assistantId": 7}
+
+        async def post_send_message(self, **kw):
+            captured.update(kw)
+            return {"message": {"id": 9877}}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(plugin_mod, "BgosApi", FakeApi)
+
+    result = await plugin_mod.standalone_send(
+        None,
+        "830",
+        "report attached",
+        media_files=[str(doc)],
+    )
+
+    assert result["success"] is True
+    assert captured["text"] == "report attached"
+    assert captured["files"][0]["fileName"] == "report.txt"
+
+
+async def test_standalone_send_rejects_media_outside_allowlist(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("BGOS_API_KEY", "tok")
+    monkeypatch.setenv("BGOS_BACKEND_URL", "http://x")
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("do-not-send", encoding="utf-8")
+
+    from hermes_channel_bgos import plugin as plugin_mod
+
+    class FakeApi:
+        def __init__(self, config):
+            pass
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(plugin_mod, "BgosApi", FakeApi)
+
+    result = await plugin_mod.standalone_send(
+        None,
+        "830",
+        f"MEDIA:{outside}",
+    )
+
+    assert result == {"error": "bgos standalone send: no attachable media files"}
+
+
+async def test_standalone_send_force_document_overrides_media_flags(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("BGOS_API_KEY", "tok")
+    monkeypatch.setenv("BGOS_BACKEND_URL", "http://x")
+
+    media_cache = tmp_path / "media_cache"
+    media_cache.mkdir(exist_ok=True)
+    png = media_cache / "image.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 8)
+
+    from hermes_channel_bgos import plugin as plugin_mod
+
+    captured = {}
+
+    class FakeApi:
+        def __init__(self, config):
+            pass
+
+        async def get_chat(self, chat_id):
+            return {"assistantId": 7}
+
+        async def post_send_message(self, **kw):
+            captured.update(kw)
+            return {"message": {"id": 9878}}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(plugin_mod, "BgosApi", FakeApi)
+
+    result = await plugin_mod.standalone_send(
+        None,
+        "830",
+        "image as doc",
+        media_files=[str(png)],
+        force_document=True,
+    )
+
+    assert result["success"] is True
+    file_entry = captured["files"][0]
+    assert file_entry["fileMimeType"] == "image/png"
+    assert file_entry["isDocument"] is True
+    assert file_entry["isImage"] is False
+    assert file_entry["isVideo"] is False
+    assert file_entry["isAudio"] is False
 
 
 async def test_standalone_send_errors_when_unpaired(tmp_path, monkeypatch):
