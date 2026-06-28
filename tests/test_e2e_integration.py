@@ -322,6 +322,47 @@ async def test_reconnect_backfill_replays_missed_messages(mock_bgos_server, monk
     assert last_inbound.query["since_message_id"] == "300"
 
 
+async def test_backfill_storm_guard_fast_forwards_without_dispatch(
+    mock_bgos_server, monkeypatch, tmp_path,
+):
+    """A stale cursor must not replay a huge historical BGOS backlog.
+
+    This pins the restart-spam regression: after a restart with an old cursor,
+    BGOS can return many old peer smoke-test messages and slash commands. The
+    adapter should advance the durable cursor to the newest returned id and
+    avoid dispatching them as fresh user turns.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("BGOS_BACKFILL_STORM_LIMIT", "3")
+    mock_bgos_server.on("GET", "/api/v1/integrations/inbound").respond(
+        200,
+        {"messages": [
+            {"id": 401, "chat_id": 11, "text": "old 1",
+             "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+            {"id": 402, "chat_id": 11, "text": "/restart",
+             "user_id": "u", "assistant_id": 7, "message_type": "slash_command"},
+            {"id": 403, "chat_id": 12, "text": "old 3",
+             "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+            {"id": 404, "chat_id": 13, "text": "old 4",
+             "user_id": "u", "assistant_id": 7, "message_type": "standard"},
+        ]},
+    )
+
+    handled: list[MessageEvent] = []
+    adapter = BGOSAdapter(BgosConfig(
+        base_url=mock_bgos_server.url, pairing_token="pair_xyz",
+    ))
+
+    async def fake_handle(event: MessageEvent) -> None:
+        handled.append(event)
+    monkeypatch.setattr(adapter, "handle_message", fake_handle)
+
+    await adapter._run_backfill(300)
+
+    assert handled == []
+    assert (tmp_path / "bgos_last_id").read_text() == "404"
+
+
 async def test_pairing_revoked_mid_session_surfaces_as_401(mock_bgos_server):
     """If the pairing is revoked, the adapter's next whoami returns 401 on
     connect, which propagates out so the caller can clear secrets +

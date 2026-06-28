@@ -948,6 +948,17 @@ class BGOSAdapter(BasePlatformAdapter):
         Propagates `BgosApiError` on failure (notably 401 / PAIRING_REVOKED so
         the caller can clear stored secrets and prompt for re-pair).
         """
+        # Server-authoritative chat addressing rejects any outbound to a chat
+        # the adapter never received inbound (received_chat_ids). The gateway's
+        # restart/shutdown/startup lifecycle notices target the operator-
+        # configured BGOS home channel (env BGOS_HOME_CHANNEL, e.g. 943) — an
+        # id the operator set, NOT one an agent invented — but on a fresh
+        # process received_chat_ids is empty, so the very first home notice
+        # after a restart failed with `unknown_chat_target` (and the gateway
+        # then fell through to the Telegram home only). Seed the configured
+        # home chat as a trusted outbound target so those notices resolve.
+        self._seed_home_channel_target()
+
         me = await self._api.whoami()
         self.pairing_id = me["pairing_id"]
         # Cache the pairing owner's user_id for use as the PATCH /messages
@@ -1109,6 +1120,26 @@ class BGOSAdapter(BasePlatformAdapter):
     # regresses. Read on connect(), written after every successful inbound
     # (both WS live and REST backfill).
     # -------------------------------------------------------------------------
+
+    def _seed_home_channel_target(self) -> None:
+        """Trust the operator-configured BGOS home chat as an outbound target.
+
+        Reads ``BGOS_HOME_CHANNEL`` (the env the gateway uses for cron + the
+        restart/shutdown/startup lifecycle notices) and records it in
+        ``received_chat_ids`` so ``_resolve_outbound_target`` accepts it on a
+        fresh process. Without this, the first lifecycle notice after a restart
+        is rejected with ``unknown_chat_target`` because no inbound has seeded
+        the chat yet. The home id is operator-set (not agent-supplied), so it
+        is safe to trust — this does NOT widen the agent's outbound surface;
+        agents still can only reply to chats they were addressed in.
+        No session handle is seeded (the raw chat id is used for home notices).
+        """
+        raw = os.environ.get("BGOS_HOME_CHANNEL", "").strip()
+        home_id = self._int_or_none(raw)
+        if home_id is None or home_id <= 0:
+            return
+        self._state.record_inbound_chat(home_id, None)
+        log.info("BGOS home channel %d seeded as a trusted outbound target", home_id)
 
     def _last_id_path(self) -> Path:
         hermes_home = Path(
@@ -3657,11 +3688,45 @@ class BGOSAdapter(BasePlatformAdapter):
         messages = resp.get("messages") if isinstance(resp, dict) else None
         if not messages:
             return
+
+        normalized: list[dict[str, Any]] = []
         for msg in messages:
+            if not isinstance(msg, dict):
+                continue
             # Normalize REST → WS field name so _handle_inbound's assumption
             # (data["message_id"]) holds regardless of source.
             if "message_id" not in msg and "id" in msg:
                 msg = {**msg, "message_id": msg["id"]}
+            normalized.append(msg)
+        if not normalized:
+            return
+
+        # Storm guard (2026-06-28): if the durable cursor is missing/stale,
+        # BGOS can return a long historical backlog on gateway startup. Replaying
+        # every old peer smoke-test and restart message re-spams the user and can
+        # re-run commands. A normal short outage should have only a handful of
+        # missed messages; when the backlog exceeds the safety cap, fast-forward
+        # the cursor to the newest returned id and skip dispatch. Operators may
+        # tune/disable via BGOS_BACKFILL_STORM_LIMIT (0 disables the guard).
+        try:
+            storm_limit = int(os.environ.get("BGOS_BACKFILL_STORM_LIMIT", "25"))
+        except ValueError:
+            storm_limit = 25
+        if storm_limit > 0 and len(normalized) > storm_limit:
+            max_id = max(
+                (mid for mid in (self._int_or_none(m.get("message_id")) for m in normalized) if mid is not None),
+                default=last_message_id,
+            )
+            if max_id > last_message_id:
+                self._save_last_id(max_id)
+            log.warning(
+                "BGOS backfill storm guard skipped %d historical messages "
+                "since_message_id=%d and advanced cursor to %d",
+                len(normalized), last_message_id, max_id,
+            )
+            return
+
+        for msg in normalized:
             try:
                 # Backfill is historical replay, not "user typing fast" —
                 # bypass batching so each missed message lands as its own
