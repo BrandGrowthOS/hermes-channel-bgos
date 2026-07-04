@@ -44,6 +44,7 @@ class BgosWs:
         on_callback_result: _Handler,
         on_reconnect: _ReconnectHandler | None = None,
         on_inbound_click: _Handler | None = None,
+        on_voice_rpc: _Handler | None = None,
         reconnection_delay: float = 1.0,
         reconnection_delay_max: float = 30.0,
     ) -> None:
@@ -52,6 +53,7 @@ class BgosWs:
         self._on_callback = on_callback_result
         self._on_reconnect = on_reconnect
         self._on_inbound_click = on_inbound_click
+        self._on_voice_rpc = on_voice_rpc
 
         self._assistants: set[int] = set()
         self._pairing_id: int | None = None
@@ -201,6 +203,20 @@ class BgosWs:
                 await _maybe_await(self._on_inbound_click(data))
             except Exception:
                 log.exception("bgos_ws.on_inbound_click callback failed")
+
+        @self._sio.on("voice_rpc")  # type: ignore[misc]
+        async def _voice_rpc(data: dict) -> None:
+            # Native in-app voice control frames (spec §6.2/§6.3) — the
+            # backend pushes these into the pairing:<id> room. Validation
+            # and op whitelisting happen downstream in
+            # voice_rpc.normalize_voice_rpc; this layer only dispatches.
+            if self._on_voice_rpc is None:
+                log.debug("voice_rpc received but no handler registered")
+                return
+            try:
+                await _maybe_await(self._on_voice_rpc(data))
+            except Exception:
+                log.exception("bgos_ws.on_voice_rpc callback failed")
 
     async def _join_current_rooms(self) -> None:
         if self._pairing_id is not None:

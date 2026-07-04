@@ -545,6 +545,44 @@ class BgosApi:
         )
 
     # -------------------------------------------------------------------------
+    # Native in-app voice (voice_rpc / voice-tasks)
+    # -------------------------------------------------------------------------
+
+    async def post_voice_rpc_ack(self, rpc_id: str) -> Any:
+        """POST /api/v1/integrations/voice-rpc/{rpcId}/ack (pairing-authed).
+
+        Cancels the backend's 1.5 s voice_rpc retry re-emit. Best-effort at
+        the call site: a failed ACK just costs one duplicate frame, which
+        the handler's rpcId dedupe absorbs.
+        """
+        return await self._request(
+            "POST", f"/api/v1/integrations/voice-rpc/{rpc_id}/ack",
+        )
+
+    async def post_voice_rpc_result(self, rpc_id: str, body: dict) -> Any:
+        """POST /api/v1/integrations/voice-rpc/{rpcId}/result (pairing-authed).
+
+        `body` is `{ok:true, payload}` or `{ok:false, error:{code, message}}`
+        — settles the app's held-open mint/consult request (and the
+        dispatch-accept). The backend drops results arriving after its own
+        deadline, hence the inner<outer cap discipline in voice_rpc.py.
+        """
+        return await self._request(
+            "POST", f"/api/v1/integrations/voice-rpc/{rpc_id}/result", json=body,
+        )
+
+    async def post_voice_task_result(self, task_id: str, body: dict) -> Any:
+        """POST /api/v1/integrations/voice-tasks/{taskId}/result.
+
+        Flips the durable voice_tasks row for a detached dispatch run and
+        fans a `voice_task_update` to the user's devices. Dual-auth on the
+        backend; this client uses the pairing lane.
+        """
+        return await self._request(
+            "POST", f"/api/v1/integrations/voice-tasks/{task_id}/result", json=body,
+        )
+
+    # -------------------------------------------------------------------------
     # Commands + agent catalog
     # -------------------------------------------------------------------------
 

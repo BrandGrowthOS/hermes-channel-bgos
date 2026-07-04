@@ -1,0 +1,678 @@
+"""voice_rpc frame handling — the Hermes-adapter side of BGOS's native
+in-app WebRTC voice control plane (spec §6.2, the "Hermes broker").
+
+The BGOS backend pushes `voice_rpc {rpcId, op, assistantId, agentRoute,
+chatId, payload}` frames into the `pairing:<id>` room this adapter's
+Socket.IO client already joined. We ACK immediately (suppresses the
+backend's 1.5 s retry re-emit), run the op, and POST the outcome back
+with the pairing token:
+
+    POST /api/v1/integrations/voice-rpc/:rpcId/result
+        {ok:true, payload} | {ok:false, error:{code, message}}
+
+Ops (all whitelisted in `normalize_voice_rpc` — the OpenClaw G2 lesson:
+every wire shape gets an explicit outcome, never silence):
+
+    mint     → POST https://api.openai.com/v1/realtime/client_secrets
+               directly (key from BGOS_OPENAI_API_KEY / OPENAI_API_KEY in
+               the gateway env). We own the mint, so the agent persona +
+               recent chat context are baked into the session
+               `instructions` → contextInjected:true (the app then skips
+               client-side injection). The session bakes EXACTLY the
+               hermes_agent_consult tool — the app only registers its
+               client-side dispatch/roundtable tools when the mint
+               returned ≥1 baked tool (verified frontend gotcha). 8 s
+               inner cap, under the backend's 10 s mint deadline so our
+               descriptive error always beats the generic timeout.
+    consult  → run a real agent turn through the adapter's normal message
+               pipeline on the SAME session as the BGOS text chat
+               (`bgos:<chat_id>`), so the agent's next text turn remembers
+               the call. The turn's reply is captured off the adapter's
+               outbound send/edit path and returned as `{text}`. 38 s
+               inner cap < the backend's 45 s.
+    dispatch → ACCEPT fast (the backend only waits 10 s for the accept),
+               then run the same brain-turn machinery DETACHED with a
+               10-minute cap and report the outcome to
+               POST /api/v1/integrations/voice-tasks/:taskId/result
+               (retried once — a failed POST must never masquerade as a
+               failed RUN).
+
+Deadline discipline (ported from openclaw-channel-bgos/voice-rpc-handler
+and bgos-claude-plugin/lib/voice-rpc): the daemon's inner cap must stay
+UNDER the backend's, because the backend drops results that arrive after
+its own timeout — a descriptive error that arrives in time always beats
+a better answer that arrives late.
+
+Known v1 limitation (documented in docs/bgos-agent-capabilities.md §11):
+reply capture is per-chat, so when a long detached dispatch and a consult
+overlap on the SAME chat, both resolve off the same turn-chain end and
+the dispatch outcome text can echo the consult answer. The chat itself
+always holds the ground truth (replies are never suppressed).
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+import httpx
+
+log = logging.getLogger(__name__)
+
+
+# The SDP-exchange endpoint for a direct-OpenAI mint (wire contract).
+OFFER_URL = "https://api.openai.com/v1/realtime/calls"
+CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
+
+# Must not collide with the app's client-registered tool names
+# (agent_dispatch / get_task_status / check_agent_status / roundtable_*):
+# the app's tool router relays every OTHER name to the consult endpoint.
+CONSULT_TOOL_NAME = "hermes_agent_consult"
+
+_VALID_OPS = ("mint", "consult", "dispatch")
+
+
+@dataclass(frozen=True)
+class VoiceRpcFrame:
+    rpc_id: str
+    op: str
+    assistant_id: int | str
+    agent_route: str
+    chat_id: int | str | None
+    payload: dict[str, Any]
+
+
+def normalize_voice_rpc(raw: Any) -> VoiceRpcFrame | None:
+    """Validate a voice_rpc control frame. Backend emits camelCase:
+    {rpcId, op, assistantId, agentRoute, chatId, payload}. Ops are
+    WHITELISTED — anything else is dropped here (the backend's own
+    timeout surfaces the failure to the app, so silence for a malformed
+    frame is safe; a well-formed frame with an op we don't serve gets a
+    descriptive error in VoiceRpcHandler.handle instead). Port of the
+    OpenClaw bgos-ws.ts normalizer.
+    """
+    if not isinstance(raw, dict):
+        return None
+    rpc_id = raw.get("rpcId")
+    op = raw.get("op")
+    if not isinstance(rpc_id, str) or not rpc_id:
+        return None
+    if op not in _VALID_OPS:
+        return None
+    assistant_id = raw.get("assistantId")
+    if not isinstance(assistant_id, (int, str)):
+        assistant_id = ""
+    agent_route = raw.get("agentRoute")
+    if not isinstance(agent_route, str):
+        agent_route = ""
+    chat_id = raw.get("chatId")
+    if not isinstance(chat_id, (int, str)):
+        chat_id = None
+    payload = raw.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    return VoiceRpcFrame(
+        rpc_id=rpc_id,
+        op=op,
+        assistant_id=assistant_id,
+        agent_route=agent_route,
+        chat_id=chat_id,
+        payload=payload,
+    )
+
+
+class VoiceRpcError(Exception):
+    """An op failure with a machine-readable code + speakable message."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class VoiceRpcTimeout(VoiceRpcError):
+    """Raised by the adapter's run_brain_turn when the turn blows its
+    deadline. Mapped to op-specific descriptive errors by the handler."""
+
+    def __init__(self, message: str = "agent turn timed out") -> None:
+        super().__init__("BRAIN_TIMEOUT", message)
+
+
+@dataclass(frozen=True)
+class VoiceRpcTiming:
+    """Inner-deadline discipline. Every cap stays UNDER the backend's
+    corresponding deadline so our descriptive error wins the race
+    (backend: mint 10 s, consult 45 s, dispatch-accept 10 s, dispatch
+    reaper 15 min)."""
+
+    mint_timeout: float = 8.0
+    consult_timeout: float = 38.0
+    dispatch_run_timeout: float = 600.0
+    dispatch_result_retry_delay: float = 3.0
+
+
+@dataclass(frozen=True)
+class VoiceConfig:
+    """Mint-time session configuration, resolved from the gateway env by
+    the adapter (see BGOSAdapter._voice_config)."""
+
+    openai_api_key: str
+    model: str
+    voice: str
+    persona: str
+    agent_name: str
+
+
+def load_voice_env() -> tuple[str, str, str]:
+    """(api_key, model, voice) from the gateway process env. The key is
+    the ONE deployment requirement — no key ⇒ mint replies with a clear
+    "voice not configured on this host" error."""
+    key = (
+        os.environ.get("BGOS_OPENAI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or ""
+    ).strip()
+    model = (os.environ.get("BGOS_VOICE_MODEL") or "gpt-realtime-2").strip()
+    voice = (os.environ.get("BGOS_VOICE_VOICE") or "marin").strip()
+    return key, model, voice
+
+
+def load_persona() -> str:
+    """Voice persona text: explicit BGOS_VOICE_PERSONA env wins; otherwise
+    the head of the agent's own SOUL.md ($HERMES_HOME/SOUL.md — the Hermes
+    persona artifact), truncated so mint instructions stay bounded."""
+    explicit = (os.environ.get("BGOS_VOICE_PERSONA") or "").strip()
+    if explicit:
+        return explicit
+    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    soul = hermes_home / "SOUL.md"
+    try:
+        if soul.is_file():
+            return soul.read_text(encoding="utf-8", errors="replace")[:4000].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def normalize_expires_at_seconds(value: Any) -> int | None:
+    """The backend stores `new Date(Number(expiresAt) * 1000)` — the wire
+    unit is epoch SECONDS. OpenAI's client_secrets returns seconds today,
+    but normalize defensively (the OpenClaw lesson: providers have
+    emitted both units historically)."""
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)) or value != value:  # NaN guard
+        return None
+    n = float(value)
+    # ~2286-11-20 in epoch seconds; anything bigger is epoch milliseconds.
+    return int(n / 1000) if n > 10_000_000_000 else int(n)
+
+
+def build_mint_instructions(
+    *, agent_name: str, persona: str, recent_context: str
+) -> str:
+    """Realtime session instructions: persona + the dumb-mouth contract.
+    Hermes turns are fast (typically 2–15 s), so hermes_agent_consult is
+    the PRIMARY brain tool; long multi-step work is biased to
+    agent_dispatch (registered client-side by the app)."""
+    name = agent_name.strip() or "the agent"
+    parts: list[str] = [
+        f"You are {name}, speaking with your user on a live voice call.",
+    ]
+    if persona.strip():
+        parts.append(persona.strip())
+    parts.append(
+        "Personality: warm, capable, concise. Answer in one to three short "
+        "sentences unless asked for more. Never mention being an AI model "
+        f'or a "realtime voice"; you ARE {name}.'
+    )
+    parts.append(
+        "You are the VOICE of the agent, not its brain. The real agent — a "
+        "Hermes session with your user's full memory, files, and tools — is "
+        "reachable through your tools:\n"
+        "- Handle greetings, chit-chat, and anything answerable from this "
+        "conversation DIRECTLY. No tools for small talk.\n"
+        f"- Use {CONSULT_TOOL_NAME} for anything that needs the agent's real "
+        "memory, knowledge, files, or tools. Verbally acknowledge first — "
+        "it takes a few seconds — then relay the answer naturally.\n"
+        "- For long-running or multi-step work (research, builds, anything "
+        "that changes state and takes minutes), PREFER agent_dispatch: "
+        "verbally acknowledge what you are kicking off, dispatch it, and "
+        "the result is announced when ready.\n"
+        "- If a consult fails or times out, say the agent is still working "
+        "on it and will follow up in the chat — never leave silence.\n"
+        "- Speak results naturally; keep technical detail light unless asked."
+    )
+    ctx = recent_context.strip()
+    if ctx:
+        parts.append(
+            "Recent conversation with your user (for continuity):\n" + ctx[:20_000]
+        )
+    return "\n\n".join(parts)
+
+
+def build_consult_tool_definition() -> dict[str, Any]:
+    """The consult tool baked into the realtime session at mint. Mirrors
+    the backend's VoiceToolCallDto args shape. The mint MUST bake ≥1 tool:
+    the app only registers its client-side dispatch/roundtable tools when
+    the daemon-baked tools array is non-empty."""
+    return {
+        "type": "function",
+        "name": CONSULT_TOOL_NAME,
+        "description": (
+            "Ask the agent's real brain (the live Hermes session) anything "
+            "needing its memory, knowledge, files, or tools. Takes several "
+            "seconds; verbally acknowledge first. For long multi-step work "
+            "use agent_dispatch instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question, self-contained and specific.",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional call context that helps answer.",
+                },
+                "responseStyle": {
+                    "type": "string",
+                    "description": 'Optional style hint, e.g. "one sentence".',
+                },
+            },
+            "required": ["question"],
+        },
+    }
+
+
+def build_consult_turn_text(
+    *, question: str, context: str, response_style: str
+) -> str:
+    """The `[voice consult]` message dispatched into the agent's own
+    session (spec §6.2: consult messages are prefixed so the agent knows
+    the modality). The reply is captured off the outbound path AND lands
+    in the chat as a normal message — nothing is ever lost."""
+    parts = [
+        "[voice consult] Your user is asking you LIVE on a voice call:\n"
+        f'"{question}"'
+    ]
+    if context:
+        parts.append(f"Call context: {context}")
+    if response_style:
+        parts.append(f"Answer style: {response_style}")
+    parts.append(
+        "Your reply will be SPOKEN to them on the call. Answer in 1-3 short, "
+        "speakable sentences — plain prose, no markdown, no headers, no code "
+        "blocks, no links. Do NOT use tools unless the question strictly "
+        "requires them; you have ~30 seconds."
+    )
+    return "\n\n".join(parts)
+
+
+def build_dispatch_turn_text(*, question: str, context: str, task_id: str) -> str:
+    """The `[voice dispatch]` message for an async task kicked off from a
+    live call. The run is detached — the call is NOT waiting on it — so
+    the agent can take its time; the outcome summary is announced on the
+    call (if still open) and posted to the user's Work Stream."""
+    parts = [
+        "[voice dispatch] While on a voice call, your user asked you to do "
+        f"this task (voice task {task_id}):\n"
+        f'"{question}"'
+    ]
+    if context:
+        parts.append(f"Call context: {context}")
+    parts.append(
+        "Do the work now. When you are done, reply with a short spoken-style "
+        "summary of the outcome (1-6 sentences, plain prose — it will be "
+        "read aloud to your user and posted to their Work Stream)."
+    )
+    return "\n\n".join(parts)
+
+
+# ── handler ─────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class VoiceRpcDeps:
+    """Injected adapter surface. Keeps this module unit-testable without a
+    BGOSAdapter (mirrors the DI design of bgos-claude-plugin/lib/voice-rpc).
+
+    post_ack / post_result hit the pairing-authed voice-rpc REST routes;
+    post_voice_task_result hits the voice-tasks result route (dual-auth on
+    the backend; we use the pairing lane). run_brain_turn dispatches one
+    real agent turn through the adapter's message pipeline and returns the
+    reply text (raises VoiceRpcError on timeout/failure). voice_config
+    resolves the mint config for one assistant.
+    """
+
+    post_ack: Callable[[str], Awaitable[Any]]
+    post_result: Callable[[str, dict], Awaitable[Any]]
+    post_voice_task_result: Callable[[str, dict], Awaitable[Any]]
+    run_brain_turn: Callable[[int | str, str, float], Awaitable[str]]
+    voice_config: Callable[[int | str], VoiceConfig]
+    # Injectable HTTP POST for tests: (url, headers, json, timeout) →
+    # (status_code, decoded_json_or_text). Defaults to httpx.
+    http_post_json: (
+        Callable[[str, dict, dict, float], Awaitable[tuple[int, Any]]] | None
+    ) = None
+    timing: VoiceRpcTiming = field(default_factory=VoiceRpcTiming)
+
+
+async def _default_http_post_json(
+    url: str, headers: dict, json_body: dict, timeout: float
+) -> tuple[int, Any]:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, headers=headers, json=json_body)
+        try:
+            return resp.status_code, resp.json()
+        except ValueError:
+            return resp.status_code, resp.text
+
+
+class VoiceRpcHandler:
+    """Runs voice_rpc frames against the local Hermes brain. One instance
+    per adapter; all state is in-process (the backend's re-emit/timeout
+    machinery is the durability layer)."""
+
+    def __init__(self, deps: VoiceRpcDeps) -> None:
+        self._deps = deps
+        self._timing = deps.timing
+        # Guards against duplicate frames for the same rpcId — the backend
+        # re-emits once when its ACK doesn't land within 1.5 s, and a
+        # consult dispatched twice would run two real agent turns.
+        self._in_flight: set[str] = set()
+        # Dedupe detached dispatch runs by taskId (a re-emitted frame
+        # carries a new rpcId only on backend restart; the taskId is the
+        # durable key).
+        self._dispatch_in_flight: set[str] = set()
+
+    async def handle(self, frame: VoiceRpcFrame) -> None:
+        if not frame or not frame.rpc_id:
+            return
+        if frame.rpc_id in self._in_flight:
+            log.info("voice_rpc duplicate frame ignored rpc=%s", frame.rpc_id)
+            return
+        self._in_flight.add(frame.rpc_id)
+        try:
+            # ACK is best-effort: a failed ACK only costs one retry-emit
+            # (which the in-flight guard absorbs); it must not abort the op.
+            try:
+                await self._deps.post_ack(frame.rpc_id)
+            except Exception as exc:
+                log.warning(
+                    "voice_rpc ack failed (non-fatal) rpc=%s: %s",
+                    frame.rpc_id, exc,
+                )
+
+            if frame.op == "mint":
+                payload = await self._mint(frame)
+            elif frame.op == "consult":
+                payload = await self._consult(frame)
+            elif frame.op == "dispatch":
+                # ACCEPT fast — the backend only waits 10 s for this result
+                # — and only START the detached run once the accept has
+                # actually been delivered, so a failed accept (the backend
+                # flips the row to error + tells the user) never leaves a
+                # ghost run executing real side effects behind a visible
+                # failure. (OpenClaw G2 semantics.)
+                task_id = frame.payload.get("taskId")
+                if not isinstance(task_id, str) or not task_id:
+                    raise VoiceRpcError(
+                        "BAD_DISPATCH", "dispatch payload missing taskId"
+                    )
+                await self._post_result(
+                    frame.rpc_id,
+                    {"ok": True, "payload": {"accepted": True, "taskId": task_id}},
+                )
+                asyncio.get_running_loop().create_task(
+                    self._run_dispatch(frame, task_id)
+                )
+                return
+            else:  # pragma: no cover - normalizer whitelists; defensive
+                raise VoiceRpcError(
+                    "UNSUPPORTED_OP", f"unsupported voice_rpc op: {frame.op}"
+                )
+            await self._post_result(frame.rpc_id, {"ok": True, "payload": payload})
+        except Exception as exc:
+            code = exc.code if isinstance(exc, VoiceRpcError) else "ADAPTER_ERROR"
+            await self._post_result(
+                frame.rpc_id,
+                {"ok": False, "error": {"code": code, "message": str(exc)}},
+            )
+        finally:
+            self._in_flight.discard(frame.rpc_id)
+
+    # ── mint ────────────────────────────────────────────────────────────────
+
+    async def _mint(self, frame: VoiceRpcFrame) -> dict[str, Any]:
+        cfg = self._deps.voice_config(frame.assistant_id)
+        if not cfg.openai_api_key:
+            raise VoiceRpcError(
+                "VOICE_NOT_CONFIGURED",
+                "voice is not configured on this agent host: set "
+                "BGOS_OPENAI_API_KEY (an OpenAI API key with Realtime "
+                "access) in the Hermes gateway environment and restart "
+                "the gateway",
+            )
+        recent_context = frame.payload.get("recentContext")
+        if not isinstance(recent_context, str):
+            recent_context = ""
+        instructions = build_mint_instructions(
+            agent_name=cfg.agent_name,
+            persona=cfg.persona,
+            recent_context=recent_context,
+        )
+        body = {
+            "expires_after": {"anchor": "created_at", "seconds": 600},
+            "session": {
+                "type": "realtime",
+                "model": cfg.model,
+                "instructions": instructions,
+                "tools": [build_consult_tool_definition()],
+                "audio": {
+                    # Input transcription is REQUIRED: the app builds the
+                    # call transcript (posted back into the chat) from
+                    # realtime transcription events. Server VAD gives
+                    # natural turn-taking. (Both live-verified against the
+                    # GA client_secrets contract, 2026-07-05.)
+                    "input": {
+                        "transcription": {"model": "gpt-4o-mini-transcribe"},
+                        "turn_detection": {"type": "server_vad"},
+                    },
+                    "output": {"voice": cfg.voice},
+                },
+            },
+        }
+        post = self._deps.http_post_json or _default_http_post_json
+        try:
+            status, data = await asyncio.wait_for(
+                post(
+                    CLIENT_SECRETS_URL,
+                    {
+                        "Authorization": f"Bearer {cfg.openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    body,
+                    self._timing.mint_timeout,
+                ),
+                timeout=self._timing.mint_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise VoiceRpcError("MINT_FAILED", "OpenAI mint timed out") from None
+        except VoiceRpcError:
+            raise
+        except Exception as exc:
+            raise VoiceRpcError("MINT_FAILED", f"OpenAI mint failed: {exc}") from exc
+        if status < 200 or status >= 300:
+            raise VoiceRpcError(
+                "MINT_FAILED",
+                f"OpenAI client_secrets HTTP {status}: {str(data)[:200]}",
+            )
+        client_secret = data.get("value") if isinstance(data, dict) else None
+        if not isinstance(client_secret, str) or not client_secret:
+            raise VoiceRpcError(
+                "MINT_FAILED", "OpenAI client_secrets returned no secret value"
+            )
+        expires_at = normalize_expires_at_seconds(
+            data.get("expires_at") if isinstance(data, dict) else None
+        )
+        return {
+            "provider": "openai",
+            "transport": "webrtc",
+            "clientSecret": client_secret,
+            "offerUrl": OFFER_URL,
+            "model": cfg.model,
+            "voice": cfg.voice,
+            "expiresAt": expires_at
+            if expires_at is not None
+            else int(time.time()) + 600,
+            # Context + persona ride the session instructions above — the
+            # app must NOT inject recentContext again client-side.
+            "contextInjected": True,
+        }
+
+    # ── consult ─────────────────────────────────────────────────────────────
+
+    async def _consult(self, frame: VoiceRpcFrame) -> dict[str, Any]:
+        payload = frame.payload
+        call_id = payload.get("callId")
+        name = payload.get("name")
+        if not call_id or not name:
+            raise VoiceRpcError("BAD_CONSULT", "consult payload missing callId/name")
+        args = payload.get("args")
+        args = args if isinstance(args, dict) else {}
+        question = args.get("question")
+        question = question.strip() if isinstance(question, str) else ""
+        if not question:
+            raise VoiceRpcError("BAD_CONSULT", "consult args missing question")
+        context = args.get("context")
+        context = context.strip() if isinstance(context, str) else ""
+        response_style = args.get("responseStyle")
+        response_style = (
+            response_style.strip() if isinstance(response_style, str) else ""
+        )
+        if frame.chat_id is None:
+            raise VoiceRpcError("BAD_CONSULT", "consult frame carries no chatId")
+
+        cfg = self._deps.voice_config(frame.assistant_id)
+        turn_text = build_consult_turn_text(
+            question=question, context=context, response_style=response_style
+        )
+        try:
+            # Belt + braces: run_brain_turn enforces the same deadline
+            # internally; wait_for guarantees the wall-clock cap even if a
+            # deps implementation misbehaves.
+            text = await asyncio.wait_for(
+                self._deps.run_brain_turn(
+                    frame.chat_id, turn_text, self._timing.consult_timeout
+                ),
+                timeout=self._timing.consult_timeout,
+            )
+        except (asyncio.TimeoutError, VoiceRpcTimeout):
+            raise VoiceRpcError(
+                "CONSULT_TIMEOUT",
+                f"{cfg.agent_name} is still working on it — the answer "
+                "will arrive in the chat.",
+            ) from None
+        text = (text or "").strip()
+        if not text:
+            raise VoiceRpcError(
+                "EMPTY_REPLY",
+                f"{cfg.agent_name} finished the turn without a speakable reply",
+            )
+        return {"text": text}
+
+    # ── dispatch (detached) ─────────────────────────────────────────────────
+
+    async def _run_dispatch(self, frame: VoiceRpcFrame, task_id: str) -> None:
+        if task_id in self._dispatch_in_flight:
+            log.info("voice dispatch duplicate ignored task=%s", task_id)
+            return
+        self._dispatch_in_flight.add(task_id)
+        try:
+            # Phase 1 — the run. Its failure is a genuine DISPATCH_FAILED.
+            result_payload: dict[str, Any] | None = None
+            run_message = ""
+            try:
+                args = frame.payload.get("args")
+                args = args if isinstance(args, dict) else {}
+                question = args.get("question")
+                question = question.strip() if isinstance(question, str) else ""
+                if not question:
+                    raise VoiceRpcError(
+                        "BAD_DISPATCH", "dispatch args missing question"
+                    )
+                context = args.get("context")
+                context = context.strip() if isinstance(context, str) else ""
+                if frame.chat_id is None:
+                    raise VoiceRpcError(
+                        "BAD_DISPATCH", "dispatch frame carries no chatId"
+                    )
+                turn_text = build_dispatch_turn_text(
+                    question=question, context=context, task_id=task_id
+                )
+                text = await asyncio.wait_for(
+                    self._deps.run_brain_turn(
+                        frame.chat_id,
+                        turn_text,
+                        self._timing.dispatch_run_timeout,
+                    ),
+                    timeout=self._timing.dispatch_run_timeout,
+                )
+                text = (text or "").strip()
+                if not text:
+                    raise VoiceRpcError(
+                        "EMPTY_REPLY", "the task run produced no summary"
+                    )
+                result_payload = {"text": text}
+            except Exception as exc:
+                run_message = str(exc) or exc.__class__.__name__
+            # Phase 2 — the report. A failed POST must never masquerade as
+            # a failed RUN (that would discard a genuine result forever,
+            # since the backend row only flips once); retry once, then give
+            # up loudly and let the backend's stale-running reaper close
+            # the row.
+            body: dict[str, Any] = (
+                {"ok": True, "payload": result_payload}
+                if result_payload is not None
+                else {
+                    "ok": False,
+                    "error": {"code": "DISPATCH_FAILED", "message": run_message},
+                }
+            )
+            try:
+                await self._deps.post_voice_task_result(task_id, body)
+            except Exception:
+                await asyncio.sleep(self._timing.dispatch_result_retry_delay)
+                try:
+                    await self._deps.post_voice_task_result(task_id, body)
+                except Exception as post_exc:
+                    log.error(
+                        "voice dispatch result post failed twice — giving up "
+                        "task=%s: %s", task_id, post_exc,
+                    )
+                    return
+            log.info(
+                "voice dispatch %s task=%s",
+                "completed" if result_payload is not None else "failed",
+                task_id,
+            )
+        finally:
+            self._dispatch_in_flight.discard(task_id)
+
+    # ── result post ─────────────────────────────────────────────────────────
+
+    async def _post_result(self, rpc_id: str, body: dict[str, Any]) -> None:
+        try:
+            await self._deps.post_result(rpc_id, body)
+        except Exception as exc:
+            # Nothing else we can do — the backend's own timeout surfaces
+            # the failure to the app.
+            log.error("voice_rpc result post failed rpc=%s: %s", rpc_id, exc)

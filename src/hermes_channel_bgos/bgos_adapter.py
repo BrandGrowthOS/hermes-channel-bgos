@@ -38,6 +38,16 @@ from .commands_sync import (
 from .agents import enumerate_agents_from_env
 from .config import BgosConfig
 from .state_store import StateStore
+from .voice_rpc import (
+    VoiceConfig,
+    VoiceRpcDeps,
+    VoiceRpcError,
+    VoiceRpcHandler,
+    VoiceRpcTimeout,
+    load_persona,
+    load_voice_env,
+    normalize_voice_rpc,
+)
 
 try:  # pragma: no cover - exercised only when Hermes is installed
     from tools.approval import resolve_gateway_approval  # type: ignore
@@ -337,6 +347,25 @@ _MDV2_LEAK_RE = re.compile(r"\\([,.!?:;@\-+=|#<>{}])")
 # messages get split into (1/N) chunks. Tests can override via
 # adapter._max_message_length on the instance.
 _DEFAULT_MAX_MESSAGE_LENGTH = 10_000
+
+
+@dataclass
+class _VoiceTurnWaiter:
+    """Reply-capture slot for one in-flight voice brain turn (consult or
+    detached dispatch). `latest` is the newest outbound reply text seen on
+    this chat since `dispatched_at` — under streaming, mid-stream partials
+    keep superseding each other until the final edit lands, and the waiter
+    only resolves at turn end (or after the settle window), so the last
+    capture is the full reply."""
+
+    dispatched_at: float
+    latest_ts: float | None = None
+    latest_text: str | None = None
+
+    def offer(self, ts: float, text: str) -> None:
+        if ts >= self.dispatched_at:
+            self.latest_ts = ts
+            self.latest_text = text
 
 
 class UnknownChatTarget(ValueError):
@@ -825,6 +854,22 @@ class BGOSAdapter(BasePlatformAdapter):
         self._scope_refresh_cooldown: float = float(
             os.environ.get("BGOS_SCOPE_REFRESH_COOLDOWN", "10")
         )
+        # Native in-app voice (voice_rpc — spec §6.2). The handler is
+        # constructed lazily on the first frame; per-chat waiter lists hold
+        # the reply-capture slots for in-flight consult/dispatch brain
+        # turns (see run_voice_brain_turn). Voice frames also spawn
+        # fire-and-forget tasks tracked in _voice_tasks so exceptions are
+        # retrieved and a slow op can't block the WS event loop.
+        self._voice_rpc: VoiceRpcHandler | None = None
+        self._voice_waiters: dict[int, list[_VoiceTurnWaiter]] = {}
+        self._voice_tasks: set[asyncio.Task] = set()
+        # Poll cadence for turn-completion detection, and the quiet window
+        # after the last captured reply that resolves a turn when session
+        # tracking is unavailable. The settle window MUST exceed the
+        # streaming edit throttle (1.5 s) or a mid-stream pause would
+        # resolve a consult with a partial preview.
+        self._voice_turn_poll_seconds: float = 0.2
+        self._voice_settle_seconds: float = 2.5
 
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
@@ -934,6 +979,7 @@ class BGOSAdapter(BasePlatformAdapter):
             on_callback_result=self._handle_callback,
             on_reconnect=self._on_reconnect,
             on_inbound_click=self._handle_inbound_click,
+            on_voice_rpc=self._handle_voice_rpc,
         )
         if self.pairing_id is not None:
             self._ws.bind_pairing(self.pairing_id)
@@ -1394,6 +1440,16 @@ class BGOSAdapter(BasePlatformAdapter):
         self._tool_progress_tools_by_chat.clear()
         self._tool_progress_preview_to_chat.clear()
         self._tool_progress_lock_by_chat.clear()
+        # Cancel in-flight voice_rpc op tasks (mint/consult/dispatch). Same
+        # snapshot-then-cancel pattern; the backend's own timeouts surface
+        # the abort to the app as a failed op.
+        voice_tasks = [t for t in self._voice_tasks if not t.done()]
+        for task in voice_tasks:
+            task.cancel()
+        if voice_tasks:
+            await asyncio.gather(*voice_tasks, return_exceptions=True)
+        self._voice_tasks.clear()
+        self._voice_waiters.clear()
         if self._poll_task is not None:
             self._poll_task.cancel()
             self._poll_task = None
@@ -1661,6 +1717,12 @@ class BGOSAdapter(BasePlatformAdapter):
             last_result = _send_result(message_id=message_id)
         if last_message_id is not None:
             self._state.last_assistant_message_by_chat[chat_key] = last_message_id
+            # Voice reply capture: a real agent reply (tool_progress and
+            # media-only paths never reach here with text) posted while a
+            # voice brain turn is pending on this chat is (also) the
+            # consult/dispatch answer. Never suppressed — the chat keeps
+            # the ground truth; the waiter just records the text.
+            self._offer_voice_reply(chat_key, cleaned_text)
         return last_result or _send_result(message_id=None)
 
     def _chunk_text(self, text: str) -> list[str]:
@@ -1779,6 +1841,12 @@ class BGOSAdapter(BasePlatformAdapter):
             return await self._handle_tool_progress_edit(
                 chat_key, mid_int, parsed_tools, user_id,
             )
+        # Voice reply capture (streaming path): the gateway's stream
+        # consumer delivers the reply as a preview send + progressive
+        # edits — the LAST edit before turn end carries the full text.
+        # Offer every non-tool-progress edit; the waiter's latest-wins
+        # semantics + turn-end resolution discard the partials.
+        self._offer_voice_reply(chat_key, cleaned_text)
         now = asyncio.get_running_loop().time()
         last = self._last_edit_at.get(chat_key, 0.0)
         elapsed = now - last
@@ -3601,3 +3669,255 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._handle_inbound(msg, batchable=False)
             except Exception:
                 log.exception("backfill replay failed for message=%s", msg)
+
+    # -------------------------------------------------------------------------
+    # Native in-app voice (voice_rpc — spec §6.2, the Hermes broker)
+    # -------------------------------------------------------------------------
+
+    def _offer_voice_reply(self, chat_key: int, text: str) -> None:
+        """Record an outbound agent reply for any voice brain turns pending
+        on this chat. Called from the real-reply tails of send() and
+        edit_message() — tool_progress and media-only paths never reach
+        those hooks with text. Cheap no-op when no voice turn is pending
+        (the overwhelmingly common case)."""
+        waiters = self._voice_waiters.get(chat_key)
+        if not waiters or not text or not text.strip():
+            return
+        ts = time.monotonic()
+        cleaned = text.strip()
+        for waiter in waiters:
+            waiter.offer(ts, cleaned)
+
+    async def _handle_voice_rpc(self, data: dict) -> None:
+        """WS `voice_rpc` frame entry point. Normalizes (op whitelist —
+        malformed frames are dropped; the backend's own timeout surfaces
+        the failure to the app) and runs the op on a fire-and-forget task
+        so a slow mint/consult can never block the Socket.IO event loop."""
+        frame = normalize_voice_rpc(data)
+        if frame is None:
+            log.warning("dropping malformed voice_rpc frame: %s", data)
+            return
+        # Server-authoritative chat addressing: the frame arrived over the
+        # authenticated pairing WS, so its chatId is backend-originated —
+        # record it as received exactly like an inbound event. Without
+        # this, a voice call opened before any text message in the chat
+        # would have every consult reply rejected as UnknownChatTarget.
+        chat_key = self._int_or_none(frame.chat_id)
+        if chat_key is not None:
+            self._state.record_inbound_chat(chat_key, None)
+        log.info(
+            "voice_rpc frame op=%s rpc=%s assistant=%s chat=%s",
+            frame.op, frame.rpc_id, frame.assistant_id, frame.chat_id,
+        )
+        task = asyncio.create_task(self._voice_handler().handle(frame))
+        self._voice_tasks.add(task)
+        task.add_done_callback(self._voice_tasks.discard)
+
+    def _voice_handler(self) -> VoiceRpcHandler:
+        """Lazily construct the VoiceRpcHandler wired to this adapter."""
+        if self._voice_rpc is None:
+            self._voice_rpc = VoiceRpcHandler(
+                VoiceRpcDeps(
+                    post_ack=self._api.post_voice_rpc_ack,
+                    post_result=self._api.post_voice_rpc_result,
+                    post_voice_task_result=self._api.post_voice_task_result,
+                    run_brain_turn=self.run_voice_brain_turn,
+                    voice_config=self._voice_config,
+                )
+            )
+        return self._voice_rpc
+
+    def _voice_config(self, assistant_id: int | str) -> VoiceConfig:
+        """Resolve the mint-time voice config for one assistant from the
+        gateway env (key/model/voice), the persona artifact (SOUL.md or
+        BGOS_VOICE_PERSONA), and the agent catalog (display name)."""
+        key, model, voice = load_voice_env()
+        return VoiceConfig(
+            openai_api_key=key,
+            model=model,
+            voice=voice,
+            persona=load_persona(),
+            agent_name=self._voice_agent_display_name(assistant_id),
+        )
+
+    def _voice_agent_display_name(self, assistant_id: int | str) -> str:
+        """Best-effort display name for the voice persona: the agent
+        catalog entry matching this assistant's route, else the route
+        itself title-cased, else a generic fallback."""
+        aid = self._int_or_none(assistant_id)
+        route = self._state.get_route(aid) if aid is not None else None
+        if route:
+            for entry in self._enumerate_agents():
+                if entry.get("agent_route") == route and entry.get("name"):
+                    return str(entry["name"])
+            return route.replace("-", " ").replace("_", " ").title()
+        return "the agent"
+
+    async def run_voice_brain_turn(
+        self, chat_id: int | str, text: str, deadline_seconds: float,
+    ) -> str:
+        """Run ONE real agent turn for a voice consult/dispatch and return
+        the reply text.
+
+        Mechanics: the turn is dispatched through the exact pipeline a
+        normal inbound BGOS message takes (`handle_message` on the SAME
+        session key `bgos:<chat_id>` — the agent's next text turn
+        remembers the call, spec §6.2), and the reply is captured off the
+        adapter's own outbound path (send/edit hooks → _offer_voice_reply)
+        rather than intercepted: the answer also lands in the chat as a
+        normal message, so nothing is ever lost to a timeout.
+
+        Resolution: `handle_message` returns immediately (the gateway
+        spawns a background task per turn), so completion is detected by
+        polling the gateway's own per-session activity guard
+        (`_active_sessions[session_key]`, live for the whole turn chain
+        including queued follow-ups) — when the chain goes inactive, the
+        newest captured reply is the answer. When session tracking is
+        unavailable (older gateway, tests), a quiet-window fallback
+        resolves after `_voice_settle_seconds` without a newer capture —
+        the window exceeds the 1.5 s streaming-edit throttle so a
+        mid-stream pause can't resolve a partial preview.
+
+        Raises VoiceRpcTimeout when `deadline_seconds` elapses first, and
+        VoiceRpcError("EMPTY_REPLY") when the turn ends with no visible
+        reply.
+        """
+        chat_key = self._int_or_none(chat_id)
+        if chat_key is None:
+            raise VoiceRpcTimeout(f"invalid voice chat id: {chat_id!r}")
+        self._state.record_inbound_chat(chat_key, None)
+        waiter = _VoiceTurnWaiter(dispatched_at=time.monotonic())
+        self._voice_waiters.setdefault(chat_key, []).append(waiter)
+        try:
+            source = await self._dispatch_voice_turn(chat_key, text)
+            session_key = self._voice_session_key(source)
+            deadline = time.monotonic() + max(1.0, deadline_seconds)
+            seen_active = False
+            empty_grace_until: float | None = None
+            while time.monotonic() < deadline:
+                await asyncio.sleep(self._voice_turn_poll_seconds)
+                active = self._voice_turn_active(session_key)
+                if active is True:
+                    seen_active = True
+                    empty_grace_until = None
+                    continue
+                now = time.monotonic()
+                if active is False and seen_active:
+                    # Turn chain ended. The newest capture is the reply;
+                    # give in-flight offers one short beat before calling
+                    # the turn empty.
+                    if waiter.latest_text is not None:
+                        return waiter.latest_text
+                    if empty_grace_until is None:
+                        empty_grace_until = now + 1.0
+                        continue
+                    if now >= empty_grace_until:
+                        raise VoiceRpcError(
+                            "EMPTY_REPLY",
+                            "the agent finished the turn without a visible reply",
+                        )
+                    continue
+                # Session tracking unavailable (active is None) or the turn
+                # ran between polls: resolve once a captured reply has been
+                # quiet for the settle window.
+                if (
+                    waiter.latest_text is not None
+                    and waiter.latest_ts is not None
+                    and (now - waiter.latest_ts) >= self._voice_settle_seconds
+                ):
+                    return waiter.latest_text
+            raise VoiceRpcTimeout(
+                f"agent turn exceeded {deadline_seconds:.0f}s deadline"
+            )
+        finally:
+            lst = self._voice_waiters.get(chat_key)
+            if lst is not None:
+                try:
+                    lst.remove(waiter)
+                except ValueError:
+                    pass
+                if not lst:
+                    self._voice_waiters.pop(chat_key, None)
+
+    async def _dispatch_voice_turn(self, chat_key: int, text: str) -> Any:
+        """Dispatch one synthetic agent turn into the message pipeline.
+        Mirrors _handle_inbound's gateway-event wrap. Returns the gateway
+        SessionSource when Hermes is installed (used for session-key
+        computation), else None (tests / mock path)."""
+        user_id = self.pairing_user_id or None
+        if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
+            try:
+                source = self.build_source(  # type: ignore[attr-defined]
+                    chat_id=str(chat_key), user_id=user_id,
+                )
+            except AttributeError:
+                source = None
+            if source is not None:
+                gateway_event = _GatewayMessageEvent(
+                    text=text,
+                    message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
+                    source=source,
+                    # No BGOS message backs this turn — message_id must stay
+                    # None so the gateway's reply-anchor helper doesn't tag
+                    # the reply with a bogus replyToId (backend would 400).
+                    message_id=None,
+                    raw_message=None,
+                    # Voice turns carry no platform user auth context when
+                    # the pairing owner is unknown; mark internal so the
+                    # fork's auth gate lets them through (same treatment as
+                    # REST backfill entries).
+                    internal=user_id is None,
+                )
+                await self.handle_message(gateway_event)
+                return source
+        event = MessageEvent(
+            platform="bgos",
+            chat_id=chat_key,
+            message_id=0,
+            user_id=user_id or "",
+            assistant_id=self._state.assistant_id_by_chat.get(chat_key, 0),
+            agent_route="",
+            text=text,
+            files=[],
+            message_type="standard",
+            command_name=None,
+            command_args=None,
+        )
+        await self.handle_message(event)
+        return None
+
+    def _voice_session_key(self, source: Any) -> str | None:
+        """Compute the gateway session key for a dispatched voice turn the
+        same way handle_message does, so turn-completion polling watches
+        the right `_active_sessions` entry. None when the gateway (or its
+        build_session_key helper) is unavailable — callers fall back to
+        the settle-window heuristic."""
+        if source is None:
+            return None
+        try:  # pragma: no cover - requires a Hermes install
+            from gateway.platforms.base import build_session_key  # type: ignore
+        except ImportError:
+            return None
+        try:  # pragma: no cover - requires a Hermes install
+            extra = getattr(getattr(self, "config", None), "extra", None) or {}
+            getter = extra.get if isinstance(extra, dict) else lambda *_: None
+            return build_session_key(
+                source,
+                group_sessions_per_user=getter("group_sessions_per_user", True),
+                thread_sessions_per_user=getter("thread_sessions_per_user", False),
+            )
+        except Exception:
+            log.debug("voice session-key computation failed", exc_info=True)
+            return None
+
+    def _voice_turn_active(self, session_key: str | None) -> bool | None:
+        """Whether the gateway's per-session activity guard shows a live
+        turn (chain) for `session_key`. None = tracking unavailable
+        (no session key, or the base class doesn't expose
+        _active_sessions — e.g. the test mock)."""
+        if not session_key:
+            return None
+        sessions = getattr(self, "_active_sessions", None)
+        if not isinstance(sessions, dict):
+            return None
+        return session_key in sessions
