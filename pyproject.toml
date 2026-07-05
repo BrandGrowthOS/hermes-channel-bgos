@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-channel-bgos"
-version = "0.14.1"
+version = "0.16.0"
 description = "BGOS channel adapter for Hermes (vendor plugin; companion to a thin private fork of NousResearch/hermes-agent)"
 readme = "README.md"
 requires-python = ">=3.11"

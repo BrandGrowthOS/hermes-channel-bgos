@@ -54,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -195,6 +196,46 @@ def load_persona() -> str:
     except OSError:
         pass
     return ""
+
+
+# Per-assistant voice settings from the app (BGOS assistant voice menu),
+# riding the mint frame as payload.voiceConfig. Everything optional — the
+# host env config (BGOS_VOICE_VOICE / BGOS_VOICE_PERSONA / SOUL.md) is the
+# fallback ONLY. Bounds mirror the backend coercion
+# (backend/src/services/voice-settings.ts) and OpenAI's GA limits:
+# speed 0.25–1.5 (session.audio.output.speed).
+VOICE_SPEED_MIN = 0.25
+VOICE_SPEED_MAX = 1.5
+VOICE_INSTRUCTIONS_MAX = 2000
+_VOICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.IGNORECASE)
+
+
+def normalize_voice_config(raw: Any) -> dict[str, Any]:
+    """Sanitize payload.voiceConfig from the wire. Defensive twin of the
+    backend's buildMintVoiceConfig — the backend already coerces, but the
+    daemon must never trust the wire (junk voice → dropped, out-of-range
+    speed → clamped, oversized instructions → capped). Returns {} when
+    nothing usable is present."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    voice = raw.get("voice")
+    if isinstance(voice, str) and _VOICE_ID_RE.match(voice.strip()):
+        out["voice"] = voice.strip().lower()
+    speed = raw.get("speed")
+    if isinstance(speed, str):
+        try:
+            speed = float(speed)
+        except ValueError:
+            speed = None
+    if isinstance(speed, (int, float)) and speed == speed:  # NaN guard
+        out["speed"] = round(
+            min(VOICE_SPEED_MAX, max(VOICE_SPEED_MIN, float(speed))), 2
+        )
+    instructions = raw.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        out["instructions"] = instructions.strip()[:VOICE_INSTRUCTIONS_MAX]
+    return out
 
 
 def normalize_expires_at_seconds(value: Any) -> int | None:
@@ -464,9 +505,15 @@ class VoiceRpcHandler:
         recent_context = frame.payload.get("recentContext")
         if not isinstance(recent_context, str):
             recent_context = ""
+        # Per-assistant voice settings from the app (v0.16.0): voice + speed
+        # + persona instructions override the host env / SOUL.md config; the
+        # env is the fallback ONLY when the app sent nothing.
+        voice_config = normalize_voice_config(frame.payload.get("voiceConfig"))
+        voice = voice_config.get("voice") or cfg.voice
+        persona = voice_config.get("instructions") or cfg.persona
         instructions = build_mint_instructions(
             agent_name=cfg.agent_name,
-            persona=cfg.persona,
+            persona=persona,
             recent_context=recent_context,
         )
         body = {
@@ -486,7 +533,17 @@ class VoiceRpcHandler:
                         "transcription": {"model": "gpt-4o-mini-transcribe"},
                         "turn_detection": {"type": "server_vad"},
                     },
-                    "output": {"voice": cfg.voice},
+                    # Only carries speed when the app configured it —
+                    # omitting preserves the exact pre-feature request
+                    # shape (OpenAI default 1.0).
+                    "output": {
+                        "voice": voice,
+                        **(
+                            {"speed": voice_config["speed"]}
+                            if "speed" in voice_config
+                            else {}
+                        ),
+                    },
                 },
             },
         }
@@ -529,7 +586,10 @@ class VoiceRpcHandler:
             "clientSecret": client_secret,
             "offerUrl": OFFER_URL,
             "model": cfg.model,
-            "voice": cfg.voice,
+            # Echo what was APPLIED (app settings win over env) — the app's
+            # in-call gear shows this as the active voice.
+            "voice": voice,
+            **({"speed": voice_config["speed"]} if "speed" in voice_config else {}),
             "expiresAt": expires_at
             if expires_at is not None
             else int(time.time()) + 600,

@@ -30,6 +30,7 @@ from hermes_channel_bgos.voice_rpc import (
     load_voice_env,
     normalize_expires_at_seconds,
     normalize_voice_rpc,
+    normalize_voice_config,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -256,6 +257,79 @@ async def test_mint_maps_openai_response_to_wire_contract() -> None:
     assert "Athena" in session["instructions"]
     assert "A calm strategist." in session["instructions"]
     assert "KC: hi" in session["instructions"]
+
+
+def test_normalize_voice_config_sanitizes_the_wire() -> None:
+    assert normalize_voice_config(None) == {}
+    assert normalize_voice_config("cedar") == {}
+    assert normalize_voice_config([]) == {}
+    assert normalize_voice_config(
+        {"voice": " Cedar ", "speed": 1.2, "instructions": " hi "}
+    ) == {"voice": "cedar", "speed": 1.2, "instructions": "hi"}
+    # Junk voice dropped, out-of-range speed clamped to OpenAI's 0.25–1.5.
+    assert normalize_voice_config({"voice": "x; DROP", "speed": 99}) == {
+        "speed": 1.5
+    }
+    assert normalize_voice_config({"speed": "0.01"}) == {"speed": 0.25}
+    capped = normalize_voice_config({"instructions": "x" * 5000})
+    assert len(capped["instructions"]) == 2000
+
+
+async def test_mint_applies_voice_config_and_echoes_it() -> None:
+    """Per-assistant settings (payload.voiceConfig) override the env config;
+    the applied voice/speed are echoed so the in-call gear shows the truth."""
+    fake = FakeDeps()
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(
+        frame(
+            "mint",
+            payload={
+                "recentContext": "KC: hi",
+                "voiceConfig": {
+                    "voice": "cedar",
+                    "speed": 1.25,
+                    "instructions": "Dry humor, two sentences max.",
+                },
+            },
+        )
+    )
+    _, body = fake.results[0]
+    assert body["ok"] is True
+    assert body["payload"]["voice"] == "cedar"
+    assert body["payload"]["speed"] == 1.25
+    _, _, req = fake.openai_requests[0]
+    session = req["session"]
+    assert session["audio"]["output"]["voice"] == "cedar"
+    assert session["audio"]["output"]["speed"] == 1.25
+    # App persona REPLACES the env/SOUL persona (env is the fallback only).
+    assert "Dry humor" in session["instructions"]
+    assert "A calm strategist." not in session["instructions"]
+
+
+async def test_mint_without_voice_config_keeps_pre_feature_shape() -> None:
+    fake = FakeDeps()
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(frame("mint", payload={"recentContext": ""}))
+    _, body = fake.results[0]
+    assert body["payload"]["voice"] == "marin"
+    assert "speed" not in body["payload"]
+    _, _, req = fake.openai_requests[0]
+    assert req["session"]["audio"]["output"] == {"voice": "marin"}
+
+
+async def test_mint_with_junk_voice_config_degrades_to_env() -> None:
+    fake = FakeDeps()
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(
+        frame(
+            "mint",
+            payload={"recentContext": "", "voiceConfig": {"voice": "!!", "speed": "junk"}},
+        )
+    )
+    _, body = fake.results[0]
+    assert body["ok"] is True
+    _, _, req = fake.openai_requests[0]
+    assert req["session"]["audio"]["output"] == {"voice": "marin"}
 
 
 async def test_mint_without_api_key_is_descriptive_not_silent() -> None:
