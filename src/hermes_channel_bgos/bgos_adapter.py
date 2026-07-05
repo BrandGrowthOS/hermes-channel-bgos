@@ -940,10 +940,14 @@ class BGOSAdapter(BasePlatformAdapter):
     # Lifecycle (abstract on BasePlatformAdapter)
     # -------------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def connect(self, is_reconnect: bool = False) -> bool:
         """Fetch pairing scope, build route map, open the Socket.IO connection,
         and push the agent catalog so the BGOS Integrations UI shows the
         available-to-bind agents.
+
+        `is_reconnect` is accepted for compatibility with current Hermes gateway
+        lifecycle calls; BGOS reconnect behavior is handled internally by this
+        adapter/Socket.IO client.
 
         Propagates `BgosApiError` on failure (notably 401 / PAIRING_REVOKED so
         the caller can clear stored secrets and prompt for re-pair).
