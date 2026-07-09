@@ -15,6 +15,7 @@ import pytest
 from hermes_channel_bgos.voice_rpc import (
     CLIENT_SECRETS_URL,
     CONSULT_TOOL_NAME,
+    CONTINUATION_BRIEF,
     OFFER_URL,
     VoiceConfig,
     VoiceRpcDeps,
@@ -657,11 +658,13 @@ async def test_mint_instructions_carry_intent_only_brief_rule() -> None:
 
 async def test_consult_turn_text_carries_continuation_brief() -> None:
     text = build_consult_turn_text(question="q", context="", response_style="")
+    assert CONTINUATION_BRIEF in text
     assert "Reuse those results" in text
     assert "re-check only what changed" in text
 
 
 async def test_dispatch_turn_text_carries_continuation_brief() -> None:
     text = build_dispatch_turn_text(question="q", context="", task_id="t1")
+    assert CONTINUATION_BRIEF in text
     assert "Reuse those results" in text
     assert "re-check only what changed" in text
