@@ -638,3 +638,30 @@ async def test_load_voice_env_precedence(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("BGOS_VOICE_MODEL", "gpt-realtime-3")
     monkeypatch.setenv("BGOS_VOICE_VOICE", "cedar")
     assert load_voice_env() == ("sk-bgos", "gpt-realtime-3", "cedar")
+
+
+# quick-wins prompt pack (Iris 514)
+
+
+async def test_mint_instructions_carry_truthfulness_contract() -> None:
+    text = build_mint_instructions(agent_name="Jeff", persona="", recent_context="")
+    assert "Truthfulness contract: NEVER invent" in text
+    assert "still in progress" in text
+
+
+async def test_mint_instructions_carry_intent_only_brief_rule() -> None:
+    text = build_mint_instructions(agent_name="Jeff", persona="", recent_context="")
+    assert "intent and desired outcome" in text
+    assert "stale mechanics mislead it" in text
+
+
+async def test_consult_turn_text_carries_continuation_brief() -> None:
+    text = build_consult_turn_text(question="q", context="", response_style="")
+    assert "Reuse those results" in text
+    assert "re-check only what changed" in text
+
+
+async def test_dispatch_turn_text_carries_continuation_brief() -> None:
+    text = build_dispatch_turn_text(question="q", context="", task_id="t1")
+    assert "Reuse those results" in text
+    assert "re-check only what changed" in text

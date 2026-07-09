@@ -255,6 +255,16 @@ def normalize_expires_at_seconds(value: Any) -> int | None:
     return int(n / 1000) if n > 10_000_000_000 else int(n)
 
 
+# Continuation brief (Iris 514): consult/dispatch turns land in the agent's
+# OWN session, which may already hold earlier voice-run results. Telling the
+# brain so makes repeat asks dramatically faster (reuse, don't redo).
+CONTINUATION_BRIEF = (
+    "This session may contain your earlier runs of similar work from this "
+    "call. Reuse those results where they still apply and re-check only "
+    "what changed instead of starting over."
+)
+
+
 def build_mint_instructions(
     *, agent_name: str, persona: str, recent_context: str
 ) -> str:
@@ -289,6 +299,19 @@ def build_mint_instructions(
         "- If a consult fails or times out, say the agent is still working "
         "on it and will follow up in the chat — never leave silence.\n"
         "- Speak results naturally; keep technical detail light unless asked."
+    )
+    parts.append(
+        "Truthfulness contract: NEVER invent, guess, or embellish the "
+        "results of the agent's work. Only report an outcome you actually "
+        "received from a tool result or an announcement on this call. If "
+        "you do not have the result yet, say the work is still in progress "
+        "and check its status before speaking about it."
+    )
+    parts.append(
+        "When you consult or dispatch, phrase the brief as the user's "
+        "intent and desired outcome, in their own words. Never include "
+        "mechanics from earlier runs (tool names, file paths, step-by-step "
+        "how-to); the agent owns its tools and stale mechanics mislead it."
     )
     ctx = recent_context.strip()
     if ctx:
@@ -348,6 +371,7 @@ def build_consult_turn_text(
         parts.append(f"Call context: {context}")
     if response_style:
         parts.append(f"Answer style: {response_style}")
+    parts.append(CONTINUATION_BRIEF)
     parts.append(
         "Your reply will be SPOKEN to them on the call. Answer in 1-3 short, "
         "speakable sentences — plain prose, no markdown, no headers, no code "
@@ -369,6 +393,7 @@ def build_dispatch_turn_text(*, question: str, context: str, task_id: str) -> st
     ]
     if context:
         parts.append(f"Call context: {context}")
+    parts.append(CONTINUATION_BRIEF)
     parts.append(
         "Do the work now. When you are done, reply with a short spoken-style "
         "summary of the outcome (1-6 sentences, plain prose — it will be "

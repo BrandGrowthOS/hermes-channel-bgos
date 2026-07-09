@@ -33,6 +33,9 @@ def test_resolve_pairing_env_wins(tmp_path, monkeypatch):
 def test_resolve_pairing_none_when_unpaired(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("BGOS_API_KEY", raising=False)
+    # A developer shell may carry BGOS_BACKEND_URL; without this delenv the
+    # prod-default assertion below fails on such hosts (CI never sets it).
+    monkeypatch.delenv("BGOS_BACKEND_URL", raising=False)
     token, base_url = resolve_pairing()
     assert token is None
     assert base_url == "https://api.brandgrowthos.ai"  # prod default
