@@ -17,6 +17,7 @@ import pytest
 from hermes_channel_bgos.voice_rpc import (
     CLIENT_SECRETS_URL,
     CONSULT_TOOL_NAME,
+    NO_AUTOSPEAK_GUARD,
     OFFER_URL,
     VoiceConfig,
     VoiceRpcDeps,
@@ -247,6 +248,8 @@ async def test_mint_maps_openai_response_to_wire_contract() -> None:
     assert url == CLIENT_SECRETS_URL
     assert headers["Authorization"] == "Bearer sk-test-not-a-real-key"
     session = req["session"]
+    assert len(fake.openai_requests) == 1
+    assert set(req) == {"expires_after", "session"}
     assert session["type"] == "realtime"
     assert session["model"] == "gpt-realtime-2"
     assert session["audio"]["output"]["voice"] == "marin"
@@ -260,6 +263,13 @@ async def test_mint_maps_openai_response_to_wire_contract() -> None:
     assert "Athena" in session["instructions"]
     assert "A calm strategist." in session["instructions"]
     assert "KC: hi" in session["instructions"]
+    # Mint only configures an idle session. It never creates a response or
+    # injects recent chat as a conversation item for the model to answer.
+    assert "response.create" not in json.dumps(req)
+    assert "conversation.item" not in json.dumps(req)
+    assert "KC: hi" not in json.dumps(
+        {key: value for key, value in session.items() if key != "instructions"}
+    )
 
 
 def test_redact_voice_rpc_for_log_keeps_envelope_and_drops_payload_values() -> None:
@@ -682,6 +692,10 @@ async def test_dispatch_dedupes_by_task_id() -> None:
 
 
 async def test_mint_instructions_compose_all_blocks() -> None:
+    assert NO_AUTOSPEAK_GUARD == (
+        "Do not speak until the user speaks first. Prior messages are context only, "
+        "do not respond to them; wait for the user's first utterance."
+    )
     text = build_mint_instructions(
         agent_name="Athena",
         persona="Sharp, kind, allergic to fluff.",
@@ -691,13 +705,16 @@ async def test_mint_instructions_compose_all_blocks() -> None:
     assert "Sharp, kind, allergic to fluff." in text
     assert CONSULT_TOOL_NAME in text
     assert "agent_dispatch" in text
+    assert "BACKGROUND ONLY" in text
     assert "KC: status?" in text
+    assert text.endswith(NO_AUTOSPEAK_GUARD)
 
 
 async def test_mint_instructions_omit_empty_blocks() -> None:
     text = build_mint_instructions(agent_name="", persona="", recent_context="")
     assert "the agent" in text
-    assert "Recent conversation" not in text
+    assert "BACKGROUND ONLY" not in text
+    assert text.endswith(NO_AUTOSPEAK_GUARD)
 
 
 async def test_consult_tool_definition_matches_dto_shape() -> None:
@@ -726,7 +743,7 @@ async def test_load_voice_env_precedence(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("BGOS_VOICE_VOICE", raising=False)
     key, model, voice = load_voice_env()
     assert key == ""
-    assert model == "gpt-realtime-2"
+    assert model == "gpt-realtime-2.1"
     assert voice == "marin"
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-general")

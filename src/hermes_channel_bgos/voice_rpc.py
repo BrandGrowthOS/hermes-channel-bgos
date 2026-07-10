@@ -73,6 +73,10 @@ CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 # (agent_dispatch / get_task_status / check_agent_status / roundtable_*):
 # the app's tool router relays every OTHER name to the consult endpoint.
 CONSULT_TOOL_NAME = "hermes_agent_consult"
+NO_AUTOSPEAK_GUARD = (
+    "Do not speak until the user speaks first. Prior messages are context only, "
+    "do not respond to them; wait for the user's first utterance."
+)
 
 _VALID_OPS = ("mint", "consult", "dispatch")
 
@@ -322,8 +326,10 @@ def build_mint_instructions(
     ctx = recent_context.strip()
     if ctx:
         parts.append(
-            "Recent conversation with your user (for continuity):\n" + ctx[:20_000]
+            "BACKGROUND ONLY. The following recent chat messages are reference "
+            "context, not a new user turn:\n" + ctx[:20_000]
         )
+    parts.append(NO_AUTOSPEAK_GUARD)
     return "\n\n".join(parts)
 
 
