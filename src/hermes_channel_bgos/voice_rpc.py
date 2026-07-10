@@ -209,6 +209,46 @@ def load_persona() -> str:
     return ""
 
 
+# ONE shared total-instructions budget (Iris G4): persona + recent context +
+# the owner memory head fit in ~14k chars. When over, memory is trimmed FIRST
+# (then recent context); the fixed voice contract is never trimmed.
+AGGREGATE_INSTRUCTIONS_BUDGET = 14_000
+# Per-source cap on the owner memory head before the aggregate trim.
+VOICE_MEMORY_MAX = 8_000
+# Hermes home memory files read into the voice memory head, in order.
+_VOICE_MEMORY_FILES = ("USER.md", "MEMORY.md")
+
+
+def load_voice_memory() -> str:
+    """Owner memory head (Iris G4): the head of the agent's own USER.md +
+    MEMORY.md ($HERMES_HOME), or an explicit BGOS_VOICE_MEMORY_FILE. Owner-only
+    by construction (the backend refuses non-owner mints). Best-effort: a
+    missing file contributes nothing, so a home with no memory is
+    byte-identical to the pre-feature mint. Set BGOS_VOICE_MEMORY=off to
+    disable entirely."""
+    if (os.environ.get("BGOS_VOICE_MEMORY") or "").strip().lower() == "off":
+        return ""
+    explicit = (os.environ.get("BGOS_VOICE_MEMORY_FILE") or "").strip()
+    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    paths = (
+        [Path(explicit)]
+        if explicit
+        else [hermes_home / name for name in _VOICE_MEMORY_FILES]
+    )
+    chunks: list[str] = []
+    for path in paths:
+        try:
+            if path.is_file():
+                body = path.read_text(encoding="utf-8", errors="replace").strip()
+                if body:
+                    chunks.append(body)
+        except OSError:
+            continue
+        if len("\n\n".join(chunks)) >= VOICE_MEMORY_MAX:
+            break
+    return "\n\n".join(chunks)[:VOICE_MEMORY_MAX]
+
+
 # Per-assistant voice settings from the app (BGOS assistant voice menu),
 # riding the mint frame as payload.voiceConfig. Everything optional — the
 # host env config (BGOS_VOICE_VOICE / BGOS_VOICE_PERSONA / SOUL.md) is the
@@ -285,6 +325,7 @@ def build_mint_instructions(
     persona: str,
     recent_context: str,
     require_dispatch_confirm: bool = False,
+    memory: str = "",
 ) -> str:
     """Realtime session instructions: persona + the dumb-mouth contract.
     Hermes turns are fast (typically 2–15 s), so hermes_agent_consult is
@@ -349,12 +390,36 @@ def build_mint_instructions(
             "they decline, call confirm_dispatch with approve:false. Never "
             "invent a confirmation the user did not give."
         )
-    ctx = recent_context.strip()
-    if ctx:
-        parts.append(
-            "Recent conversation with your user (for continuity):\n" + ctx[:20_000]
+    # Owner memory head + recent conversation share the remaining aggregate
+    # budget (G4), memory trimmed FIRST so the live conversation wins.
+    core = "\n\n".join(parts)
+    mem_label = "Owner memory (profile, active projects, shorthand):\n"
+    ctx_label = "Recent conversation with your user (for continuity):\n"
+    mem = (memory or "").strip()[:VOICE_MEMORY_MAX]
+    ctx = recent_context.strip()[:20_000]
+    sep = 2  # len("\n\n")
+    core_cost = len(core)
+    ctx_block_cost = sep + len(ctx_label) + len(ctx) if ctx else 0
+    if core_cost + ctx_block_cost > AGGREGATE_INSTRUCTIONS_BUDGET:
+        mem = ""
+        if ctx:
+            room = AGGREGATE_INSTRUCTIONS_BUDGET - core_cost - sep - len(ctx_label)
+            ctx = ctx[:room] if room > 0 else ""
+    elif mem:
+        mem_room = (
+            AGGREGATE_INSTRUCTIONS_BUDGET
+            - core_cost
+            - ctx_block_cost
+            - sep
+            - len(mem_label)
         )
-    return "\n\n".join(parts)
+        mem = mem[:mem_room] if mem_room > 0 else ""
+    out = [core]
+    if mem:
+        out.append(mem_label + mem)
+    if ctx:
+        out.append(ctx_label + ctx)
+    return "\n\n".join(out)
 
 
 def build_consult_tool_definition() -> dict[str, Any]:
@@ -591,6 +656,9 @@ class VoiceRpcHandler:
             recent_context=recent_context,
             require_dispatch_confirm=voice_config.get("requireDispatchConfirm")
             is True,
+            # Owner memory head (G4): read the Hermes home memory files.
+            # Owner-only by construction (backend refuses non-owner mints).
+            memory=load_voice_memory(),
         )
         body = {
             "expires_after": {"anchor": "created_at", "seconds": 600},
