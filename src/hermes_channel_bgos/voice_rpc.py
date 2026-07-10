@@ -205,7 +205,7 @@ def load_voice_env() -> tuple[str, str, str]:
         or os.environ.get("OPENAI_API_KEY")
         or ""
     ).strip()
-    model = (os.environ.get("BGOS_VOICE_MODEL") or "gpt-realtime-2").strip()
+    model = (os.environ.get("BGOS_VOICE_MODEL") or "gpt-realtime-2.1").strip()
     voice = (os.environ.get("BGOS_VOICE_VOICE") or "marin").strip()
     return key, model, voice
 
