@@ -56,6 +56,7 @@ from .voice_rpc import (
     load_require_confirmed_dispatch,
     load_voice_env,
     normalize_voice_rpc,
+    redact_voice_rpc_for_log,
 )
 
 try:  # pragma: no cover - exercised only when Hermes is installed
@@ -4719,7 +4720,10 @@ class BGOSAdapter(BasePlatformAdapter):
         so a slow mint/consult can never block the Socket.IO event loop."""
         frame = normalize_voice_rpc(data)
         if frame is None:
-            log.warning("dropping malformed voice_rpc frame: %s", data)
+            log.warning(
+                "dropping malformed voice_rpc frame: %s",
+                redact_voice_rpc_for_log(data),
+            )
             return
         # Server-authoritative chat addressing: the frame arrived over the
         # authenticated pairing WS, so its chatId is backend-originated —

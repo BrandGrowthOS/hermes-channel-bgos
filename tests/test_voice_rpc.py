@@ -7,6 +7,8 @@ adapter integration lives in test_voice_adapter.py.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +35,7 @@ from hermes_channel_bgos.voice_rpc import (
     normalize_expires_at_seconds,
     normalize_voice_rpc,
     normalize_voice_config,
+    redact_voice_rpc_for_log,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -263,6 +266,32 @@ async def test_mint_maps_openai_response_to_wire_contract() -> None:
     assert "KC: hi" in session["instructions"]
 
 
+def test_redact_voice_rpc_for_log_keeps_envelope_and_drops_payload_values() -> None:
+    out = redact_voice_rpc_for_log(
+        {
+            "rpcId": "rpc-1",
+            "op": "mint",
+            "assistantId": 894,
+            "chatId": 830,
+            "payload": {"openaiApiKey": "sk-secret", "recentContext": "KC: hi"},
+        }
+    )
+    assert "sk-secret" not in out
+    assert "KC: hi" not in out
+    # Still diagnosable: envelope + the payload's key NAMES.
+    assert "rpc-1" in out and "mint" in out and "894" in out
+    assert "openaiApiKey" in out and "recentContext" in out
+
+
+def test_redact_voice_rpc_for_log_survives_junk_frames() -> None:
+    assert redact_voice_rpc_for_log(None) == "<non-dict NoneType>"
+    assert redact_voice_rpc_for_log("nope") == "<non-dict str>"
+    # A non-dict payload must not be rendered by value either.
+    assert "sk-secret" not in redact_voice_rpc_for_log(
+        {"op": "mint", "payload": "sk-secret"}
+    )
+
+
 def test_normalize_voice_config_sanitizes_the_wire() -> None:
     assert normalize_voice_config(None) == {}
     assert normalize_voice_config("cedar") == {}
@@ -345,6 +374,75 @@ async def test_mint_without_api_key_is_descriptive_not_silent() -> None:
     assert body["error"]["code"] == "VOICE_NOT_CONFIGURED"
     assert "BGOS_OPENAI_API_KEY" in body["error"]["message"]
     assert fake.openai_requests == []
+
+
+# ── per-user OpenAI key (BGOS billing/security) ──────────────────────────────
+# The BGOS backend rides the CALLER's own key on the mint frame as
+# payload.openaiApiKey so a call spends THEIR OpenAI credits, never this
+# gateway host's owner key. The host env key stays a fallback for a standalone
+# host not driven by the BGOS backend.
+
+
+async def test_mint_prefers_the_callers_own_key_over_the_host_env() -> None:
+    fake = FakeDeps(api_key="sk-host-env-owner-key")
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(
+        frame("mint", payload={"openaiApiKey": "sk-caller-own-key"})
+    )
+    _, body = fake.results[0]
+    assert body["ok"] is True
+    _url, headers, _req = fake.openai_requests[0]
+    assert headers["Authorization"] == "Bearer sk-caller-own-key"
+
+
+async def test_mint_falls_back_to_the_host_env_key_when_the_frame_has_none() -> None:
+    """Backward compat: a standalone host, or a backend that predates the
+    per-user key, still mints on the gateway's own env key."""
+    fake = FakeDeps(api_key="sk-host-env-owner-key")
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(frame("mint", payload={"recentContext": ""}))
+    _, body = fake.results[0]
+    assert body["ok"] is True
+    _url, headers, _req = fake.openai_requests[0]
+    assert headers["Authorization"] == "Bearer sk-host-env-owner-key"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None, 123, {"k": "v"}])
+async def test_mint_treats_a_blank_or_non_string_caller_key_as_unset(blank) -> None:
+    """A whitespace-only or non-string frame key must not shadow the env
+    fallback, and must never reach OpenAI as a literal Bearer value."""
+    fake = FakeDeps(api_key="sk-host-env-owner-key")
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(frame("mint", payload={"openaiApiKey": blank}))
+    _, body = fake.results[0]
+    assert body["ok"] is True
+    _url, headers, _req = fake.openai_requests[0]
+    assert headers["Authorization"] == "Bearer sk-host-env-owner-key"
+
+
+async def test_mint_with_neither_caller_key_nor_env_key_is_descriptive() -> None:
+    fake = FakeDeps(api_key="")
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(frame("mint", payload={"openaiApiKey": "  "}))
+    _, body = fake.results[0]
+    assert body["ok"] is False
+    assert body["error"]["code"] == "VOICE_NOT_CONFIGURED"
+    assert fake.openai_requests == []
+
+
+async def test_mint_never_logs_or_returns_the_callers_key(caplog) -> None:
+    """The raw key arrived over the authed pairing WS room. It goes to
+    OpenAI's client_secrets endpoint and nowhere else: not the logs, not the
+    RPC result body the app reads."""
+    secret = "sk-caller-super-secret-value"
+    caplog.set_level(logging.DEBUG)
+    fake = FakeDeps(api_key="")
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(frame("mint", payload={"openaiApiKey": secret}))
+    _, body = fake.results[0]
+    assert body["ok"] is True
+    assert secret not in json.dumps(body)
+    assert secret not in caplog.text
 
 
 async def test_mint_maps_openai_http_error() -> None:
