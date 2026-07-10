@@ -828,3 +828,26 @@ async def test_load_voice_memory_reads_home_files_and_kill_switch(
     # Kill switch.
     monkeypatch.setenv("BGOS_VOICE_MEMORY", "off")
     assert load_voice_memory() == ""
+
+
+async def test_g4_safe_default_memory_less_keeps_full_context() -> None:
+    text = build_mint_instructions(
+        agent_name="Jeff",
+        persona="",
+        recent_context="C" * 18000,
+        memory="",
+    )
+    # No memory => no aggregate trim => full context survives.
+    assert text.count("C") >= 18000
+
+
+async def test_g4_context_trim_keeps_most_recent_tail() -> None:
+    context = "OLDEST" + "x" * 14000 + "NEWEST"
+    text = build_mint_instructions(
+        agent_name="Jeff",
+        persona="",
+        recent_context=context,
+        memory="M" * 2000,
+    )
+    assert "NEWEST" in text
+    assert "OLDEST" not in text

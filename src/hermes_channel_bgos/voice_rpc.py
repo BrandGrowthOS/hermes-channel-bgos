@@ -396,24 +396,31 @@ def build_mint_instructions(
     mem_label = "Owner memory (profile, active projects, shorthand):\n"
     ctx_label = "Recent conversation with your user (for continuity):\n"
     mem = (memory or "").strip()[:VOICE_MEMORY_MAX]
-    ctx = recent_context.strip()[:20_000]
+    # recent_context is built most-recent-LAST, so keep its TAIL when trimming.
+    ctx = recent_context.strip()[-20_000:]
     sep = 2  # len("\n\n")
-    core_cost = len(core)
-    ctx_block_cost = sep + len(ctx_label) + len(ctx) if ctx else 0
-    if core_cost + ctx_block_cost > AGGREGATE_INSTRUCTIONS_BUDGET:
-        mem = ""
-        if ctx:
-            room = AGGREGATE_INSTRUCTIONS_BUDGET - core_cost - sep - len(ctx_label)
-            ctx = ctx[:room] if room > 0 else ""
-    elif mem:
-        mem_room = (
-            AGGREGATE_INSTRUCTIONS_BUDGET
-            - core_cost
-            - ctx_block_cost
-            - sep
-            - len(mem_label)
-        )
-        mem = mem[:mem_room] if mem_room > 0 else ""
+    # Safe default: with NO memory head, leave recent context at its pre-feature
+    # 20k slice and skip the aggregate trim, so a memory-less agent mints
+    # byte-identically to before this feature.
+    if mem:
+        core_cost = len(core)
+        ctx_block_cost = sep + len(ctx_label) + len(ctx) if ctx else 0
+        if core_cost + ctx_block_cost > AGGREGATE_INSTRUCTIONS_BUDGET:
+            mem = ""
+            if ctx:
+                room = (
+                    AGGREGATE_INSTRUCTIONS_BUDGET - core_cost - sep - len(ctx_label)
+                )
+                ctx = ctx[-room:] if room > 0 else ""
+        else:
+            mem_room = (
+                AGGREGATE_INSTRUCTIONS_BUDGET
+                - core_cost
+                - ctx_block_cost
+                - sep
+                - len(mem_label)
+            )
+            mem = mem[:mem_room] if mem_room > 0 else ""
     out = [core]
     if mem:
         out.append(mem_label + mem)
