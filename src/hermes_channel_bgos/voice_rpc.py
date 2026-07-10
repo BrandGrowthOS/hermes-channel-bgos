@@ -165,6 +165,10 @@ class VoiceConfig:
     voice: str
     persona: str
     agent_name: str
+    # Confirm gate belt (Iris G5): reject dispatch frames lacking
+    # confirmed:true. Default off; the backend-side gate is the primary
+    # enforcement and now sends confirmed:true on every forwarded dispatch.
+    require_confirmed_dispatch: bool = False
 
 
 def load_voice_env() -> tuple[str, str, str]:
@@ -179,6 +183,13 @@ def load_voice_env() -> tuple[str, str, str]:
     model = (os.environ.get("BGOS_VOICE_MODEL") or "gpt-realtime-2").strip()
     voice = (os.environ.get("BGOS_VOICE_VOICE") or "marin").strip()
     return key, model, voice
+
+
+def load_require_confirmed_dispatch() -> bool:
+    """The BGOS_REQUIRE_CONFIRMED_DISPATCH belt (Iris G5). Exact-string
+    'true' like the other cross-plugin boolean gates; default off so an
+    unset env preserves current accept-all behavior."""
+    return (os.environ.get("BGOS_REQUIRE_CONFIRMED_DISPATCH") or "") == "true"
 
 
 def load_persona() -> str:
@@ -235,6 +246,9 @@ def normalize_voice_config(raw: Any) -> dict[str, Any]:
     instructions = raw.get("instructions")
     if isinstance(instructions, str) and instructions.strip():
         out["instructions"] = instructions.strip()[:VOICE_INSTRUCTIONS_MAX]
+    # Coerce defensively (never trust the wire): boolean True or string 'true'.
+    if raw.get("requireDispatchConfirm") in (True, "true"):
+        out["requireDispatchConfirm"] = True
     return out
 
 
@@ -266,7 +280,11 @@ CONTINUATION_BRIEF = (
 
 
 def build_mint_instructions(
-    *, agent_name: str, persona: str, recent_context: str
+    *,
+    agent_name: str,
+    persona: str,
+    recent_context: str,
+    require_dispatch_confirm: bool = False,
 ) -> str:
     """Realtime session instructions: persona + the dumb-mouth contract.
     Hermes turns are fast (typically 2–15 s), so hermes_agent_consult is
@@ -313,6 +331,16 @@ def build_mint_instructions(
         "mechanics from earlier runs (tool names, file paths, step-by-step "
         "how-to); the agent owns its tools and stale mechanics mislead it."
     )
+    if require_dispatch_confirm:
+        parts.append(
+            "Dispatch confirmation is ON for this agent: agent_dispatch "
+            "STAGES a proposal instead of starting work. Read the staged "
+            "brief back to the user in one short sentence and ask for their "
+            "go-ahead. Only after the user clearly confirms on their next "
+            "turn, call confirm_dispatch with the task id from the ack. If "
+            "they decline, call confirm_dispatch with approve:false. Never "
+            "invent a confirmation the user did not give."
+        )
     ctx = recent_context.strip()
     if ctx:
         parts.append(
@@ -493,6 +521,19 @@ class VoiceRpcHandler:
                     raise VoiceRpcError(
                         "BAD_DISPATCH", "dispatch payload missing taskId"
                     )
+                # Confirm gate belt (Iris G5): pre-accept, so the backend
+                # gets an explicit descriptive rejection on the rpc result
+                # route. Coerce defensively (True or 'true').
+                cfg = self._deps.voice_config(frame.assistant_id)
+                if cfg.require_confirmed_dispatch and frame.payload.get(
+                    "confirmed"
+                ) not in (True, "true"):
+                    raise VoiceRpcError(
+                        "DISPATCH_UNCONFIRMED",
+                        f"unconfirmed dispatch rejected (task={task_id}): "
+                        "BGOS_REQUIRE_CONFIRMED_DISPATCH is on and the "
+                        "payload lacks confirmed:true",
+                    )
                 await self._post_result(
                     frame.rpc_id,
                     {"ok": True, "payload": {"accepted": True, "taskId": task_id}},
@@ -540,6 +581,8 @@ class VoiceRpcHandler:
             agent_name=cfg.agent_name,
             persona=persona,
             recent_context=recent_context,
+            require_dispatch_confirm=voice_config.get("requireDispatchConfirm")
+            is True,
         )
         body = {
             "expires_after": {"anchor": "created_at", "seconds": 600},

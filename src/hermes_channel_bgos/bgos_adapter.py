@@ -45,6 +45,7 @@ from .voice_rpc import (
     VoiceRpcHandler,
     VoiceRpcTimeout,
     load_persona,
+    load_require_confirmed_dispatch,
     load_voice_env,
     normalize_voice_rpc,
 )
@@ -3807,6 +3808,7 @@ class BGOSAdapter(BasePlatformAdapter):
             voice=voice,
             persona=load_persona(),
             agent_name=self._voice_agent_display_name(assistant_id),
+            require_confirmed_dispatch=load_require_confirmed_dispatch(),
         )
 
     def _voice_agent_display_name(self, assistant_id: int | str) -> str:

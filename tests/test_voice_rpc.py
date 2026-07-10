@@ -28,6 +28,7 @@ from hermes_channel_bgos.voice_rpc import (
     build_consult_turn_text,
     build_dispatch_turn_text,
     build_mint_instructions,
+    load_require_confirmed_dispatch,
     load_voice_env,
     normalize_expires_at_seconds,
     normalize_voice_rpc,
@@ -57,6 +58,7 @@ class FakeDeps:
     openai_body: Any = None
     openai_requests: list[tuple[str, dict, dict]] = field(default_factory=list)
     api_key: str = "sk-test-not-a-real-key"
+    require_confirmed_dispatch: bool = False
 
     def to_deps(self, timing: VoiceRpcTiming | None = None) -> VoiceRpcDeps:
         async def post_ack(rpc_id: str) -> None:
@@ -87,6 +89,7 @@ class FakeDeps:
                 voice="marin",
                 persona="A calm strategist.",
                 agent_name="Athena",
+                require_confirmed_dispatch=self.require_confirmed_dispatch,
             )
 
         async def http_post_json(url, headers, json_body, timeout):
@@ -668,3 +671,78 @@ async def test_dispatch_turn_text_carries_continuation_brief() -> None:
     assert CONTINUATION_BRIEF in text
     assert "Reuse those results" in text
     assert "re-check only what changed" in text
+
+
+# confirm-before-dispatch gate (Iris G5, wave 2)
+
+
+async def test_load_require_confirmed_dispatch_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BGOS_REQUIRE_CONFIRMED_DISPATCH", raising=False)
+    assert load_require_confirmed_dispatch() is False
+    monkeypatch.setenv("BGOS_REQUIRE_CONFIRMED_DISPATCH", "true")
+    assert load_require_confirmed_dispatch() is True
+    monkeypatch.setenv("BGOS_REQUIRE_CONFIRMED_DISPATCH", "1")
+    assert load_require_confirmed_dispatch() is False
+
+
+async def test_gate_off_unconfirmed_dispatch_accepted() -> None:
+    fake = FakeDeps()
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(frame("dispatch", payload=dispatch_payload()))
+    await _drain_tasks()
+    assert fake.results[0][1]["ok"] is True
+
+
+async def test_gate_on_unconfirmed_dispatch_rejected_pre_accept() -> None:
+    fake = FakeDeps(require_confirmed_dispatch=True)
+    handler = VoiceRpcHandler(fake.to_deps())
+    await handler.handle(frame("dispatch", payload=dispatch_payload()))
+    await _drain_tasks()
+    _, body = fake.results[0]
+    assert body["ok"] is False
+    assert body["error"]["code"] == "DISPATCH_UNCONFIRMED"
+    assert fake.task_results == []
+    assert fake.brain_calls == []
+
+
+async def test_gate_on_confirmed_dispatch_accepted() -> None:
+    for confirmed in (True, "true"):
+        fake = FakeDeps(require_confirmed_dispatch=True)
+        handler = VoiceRpcHandler(fake.to_deps())
+        payload = dispatch_payload()
+        payload["confirmed"] = confirmed
+        await handler.handle(frame("dispatch", payload=payload))
+        await _drain_tasks()
+        assert fake.results[0][1]["ok"] is True, f"confirmed={confirmed!r}"
+
+
+async def test_mint_instructions_carry_propose_first_contract_only_when_on() -> None:
+    on = build_mint_instructions(
+        agent_name="Jeff",
+        persona="",
+        recent_context="",
+        require_dispatch_confirm=True,
+    )
+    assert "Dispatch confirmation is ON" in on
+    assert "STAGES a proposal" in on
+    assert "confirm_dispatch" in on
+    off = build_mint_instructions(agent_name="Jeff", persona="", recent_context="")
+    assert "Dispatch confirmation is ON" not in off
+
+
+async def test_normalize_voice_config_picks_up_require_dispatch_confirm() -> None:
+    assert (
+        normalize_voice_config({"requireDispatchConfirm": True}).get(
+            "requireDispatchConfirm"
+        )
+        is True
+    )
+    assert (
+        normalize_voice_config({"requireDispatchConfirm": "true"}).get(
+            "requireDispatchConfirm"
+        )
+        is True
+    )
+    assert "requireDispatchConfirm" not in normalize_voice_config({"voice": "marin"})
