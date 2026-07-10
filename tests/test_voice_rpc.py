@@ -757,3 +757,97 @@ async def test_mint_instructions_carry_welcome_back_ceremony() -> None:
     assert "skip the greeting ceremony" in text
     assert "by name" in text
     assert "never a robotic" in text
+
+
+# owner memory head + aggregate budget (Iris G4, wave 2)
+
+
+async def test_mint_includes_owner_memory_head_when_present() -> None:
+    text = build_mint_instructions(
+        agent_name="Jeff",
+        persona="",
+        recent_context="",
+        memory='Owner tz Asia/Dubai. Project: the launch. "the usual" = Thu 9am.',
+    )
+    assert "Owner memory" in text
+    assert "Asia/Dubai" in text
+
+
+async def test_mint_no_memory_head_byte_identical_when_empty() -> None:
+    with_empty = build_mint_instructions(
+        agent_name="Jeff", persona="", recent_context="", memory=""
+    )
+    without = build_mint_instructions(
+        agent_name="Jeff", persona="", recent_context=""
+    )
+    assert "Owner memory" not in with_empty
+    assert with_empty == without
+
+
+async def test_aggregate_budget_trims_memory_first() -> None:
+    from hermes_channel_bgos.voice_rpc import AGGREGATE_INSTRUCTIONS_BUDGET
+
+    text = build_mint_instructions(
+        agent_name="Jeff",
+        persona="",
+        recent_context="C" * 13000,
+        memory="M" * 8000,
+    )
+    assert len(text) <= AGGREGATE_INSTRUCTIONS_BUDGET
+    assert text.count("C") > text.count("M")
+
+
+async def test_context_alone_over_budget_drops_memory() -> None:
+    from hermes_channel_bgos.voice_rpc import AGGREGATE_INSTRUCTIONS_BUDGET
+
+    text = build_mint_instructions(
+        agent_name="Jeff",
+        persona="",
+        recent_context="C" * 20000,
+        memory="M" * 4000,
+    )
+    assert len(text) <= AGGREGATE_INSTRUCTIONS_BUDGET
+    assert "Owner memory" not in text
+
+
+async def test_load_voice_memory_reads_home_files_and_kill_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from hermes_channel_bgos.voice_rpc import load_voice_memory
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("BGOS_VOICE_MEMORY", raising=False)
+    monkeypatch.delenv("BGOS_VOICE_MEMORY_FILE", raising=False)
+    # No files yet.
+    assert load_voice_memory() == ""
+    (tmp_path / "USER.md").write_text("Owner is Kc, tz Asia/Dubai.")
+    (tmp_path / "MEMORY.md").write_text("Active project: the launch.")
+    mem = load_voice_memory()
+    assert "Asia/Dubai" in mem
+    assert "the launch" in mem
+    # Kill switch.
+    monkeypatch.setenv("BGOS_VOICE_MEMORY", "off")
+    assert load_voice_memory() == ""
+
+
+async def test_g4_safe_default_memory_less_keeps_full_context() -> None:
+    text = build_mint_instructions(
+        agent_name="Jeff",
+        persona="",
+        recent_context="C" * 18000,
+        memory="",
+    )
+    # No memory => no aggregate trim => full context survives.
+    assert text.count("C") >= 18000
+
+
+async def test_g4_context_trim_keeps_most_recent_tail() -> None:
+    context = "OLDEST" + "x" * 14000 + "NEWEST"
+    text = build_mint_instructions(
+        agent_name="Jeff",
+        persona="",
+        recent_context=context,
+        memory="M" * 2000,
+    )
+    assert "NEWEST" in text
+    assert "OLDEST" not in text
