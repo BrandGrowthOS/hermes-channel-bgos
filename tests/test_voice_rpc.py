@@ -746,3 +746,14 @@ async def test_normalize_voice_config_picks_up_require_dispatch_confirm() -> Non
         is True
     )
     assert "requireDispatchConfirm" not in normalize_voice_config({"voice": "marin"})
+
+
+# welcome-back ceremony (Iris G2, wave 2)
+
+
+async def test_mint_instructions_carry_welcome_back_ceremony() -> None:
+    text = build_mint_instructions(agent_name="Jeff", persona="", recent_context="")
+    assert "Welcome-back ceremony" in text
+    assert "skip the greeting ceremony" in text
+    assert "by name" in text
+    assert "never a robotic" in text
