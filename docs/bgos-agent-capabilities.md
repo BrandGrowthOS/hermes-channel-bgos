@@ -1,5 +1,7 @@
 # BGOS Agent-Facing Capabilities, Canonical
 
+> **Served-canon note (since 2026-07-11).** The machine-readable canon that daemons actually consume now lives in the BGOS backend at `backend/src/integrations/capability-canon.ts` and is served per channel at `GET /api/v1/integrations/capabilities?channel=<x>`. Every plugin fetches it at connect and injects the returned `text`, falling back to its bundled frozen copy (here that is `BGOS_PLATFORM_HINT` in `src/hermes_channel_bgos/plugin.py`) only when the endpoint is unreachable. THIS markdown file is the human-readable MIRROR of the served canon: it stays the full reference, and a backend drift-guard test keeps the two in step. When you change a capability, edit the served canon AND this mirror in the same PR.
+
 **This file is the single source of truth** for what BGOS's frontend/backend expose to an agent connected through any channel plugin. Every plugin (Claude Code MCP, Hermes, OpenClaw, future) keeps its own agent-facing docs in sync with this one.
 
 **Update workflow:** When a BGOS frontend feature changes (new message_type, new field on an existing DTO, new UI affordance, new limit), edit THIS file first. Then sync every plugin's agent-facing docs to match. See the "Propagation to plugins" section at the bottom for the exact checklist.
