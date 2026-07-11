@@ -1,0 +1,1972 @@
+- generic [ref=e17]:
+  - generic [ref=e18]:
+    - generic [ref=e19]:
+      - generic [ref=e21] [cursor=pointer]: ☰
+      - img [ref=e23] [cursor=pointer]
+      - generic [ref=e27] [cursor=pointer]: ←
+      - generic [ref=e29] [cursor=pointer]: →
+    - generic [ref=e30]:
+      - generic [ref=e32] [cursor=pointer]: —
+      - generic [ref=e34] [cursor=pointer]: □
+      - generic [ref=e36] [cursor=pointer]: ✕
+  - generic [ref=e43]:
+    - generic [ref=e45]:
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - img [ref=e48]
+          - generic [ref=e56]: BGOS
+        - generic [ref=e57] [cursor=pointer]:
+          - img [ref=e58]
+          - generic [ref=e68]: Command Center
+        - generic [ref=e69] [cursor=pointer]:
+          - img [ref=e70]
+          - generic [ref=e72]: Chats
+        - generic [ref=e73] [cursor=pointer]:
+          - img [ref=e74]
+          - generic [ref=e78]: Meetings
+        - generic [ref=e79] [cursor=pointer]:
+          - img [ref=e80]
+          - generic [ref=e82]: Saved
+      - generic [ref=e84]:
+        - generic [ref=e86]: Agents
+        - generic [ref=e87]:
+          - generic [ref=e90]:
+            - generic [ref=e91] [cursor=pointer]:
+              - img [ref=e95]
+              - generic [ref=e97]: David
+            - img [ref=e100] [cursor=pointer]
+          - generic [ref=e106]:
+            - generic [ref=e107] [cursor=pointer]:
+              - img [ref=e111]
+              - generic [ref=e113]: Ava
+            - img [ref=e116] [cursor=pointer]
+          - generic [ref=e122]:
+            - generic [ref=e123] [cursor=pointer]:
+              - img [ref=e127]
+              - generic [ref=e129]: n8n Guru
+            - img [ref=e132] [cursor=pointer]
+          - generic [ref=e138]:
+            - generic [ref=e139] [cursor=pointer]:
+              - img [ref=e143]
+              - generic [ref=e145]: Mario
+            - img [ref=e148] [cursor=pointer]
+          - generic [ref=e154]:
+            - generic [ref=e155] [cursor=pointer]:
+              - img [ref=e159]
+              - generic [ref=e161]: Nicole
+            - img [ref=e164] [cursor=pointer]
+          - generic [ref=e170]:
+            - generic [ref=e171] [cursor=pointer]:
+              - img [ref=e175]
+              - generic [ref=e177]: Hades
+            - img [ref=e180] [cursor=pointer]
+          - generic [ref=e186]:
+            - generic [ref=e187] [cursor=pointer]:
+              - img [ref=e191]
+              - generic [ref=e193]: Guardian Jeff
+            - img [ref=e196] [cursor=pointer]
+          - generic [ref=e202]:
+            - generic [ref=e203] [cursor=pointer]:
+              - img [ref=e207]
+              - generic [ref=e209]: Even R Guru
+            - img [ref=e212] [cursor=pointer]
+          - generic [ref=e218]:
+            - generic [ref=e219] [cursor=pointer]:
+              - img [ref=e223]
+              - generic [ref=e225]: Vihan
+            - img [ref=e228] [cursor=pointer]
+          - generic [ref=e234]:
+            - generic [ref=e235] [cursor=pointer]:
+              - img [ref=e239]
+              - generic [ref=e241]: Autonomee
+            - img [ref=e244] [cursor=pointer]
+          - generic [ref=e250]:
+            - generic [ref=e251] [cursor=pointer]:
+              - img [ref=e255]
+              - generic [ref=e257]: BGOS Newsletter
+            - img [ref=e260] [cursor=pointer]
+          - generic [ref=e266]:
+            - generic [ref=e267] [cursor=pointer]:
+              - img [ref=e271]
+              - generic [ref=e273]: Ramy
+            - img [ref=e276] [cursor=pointer]
+          - generic [ref=e282]:
+            - generic [ref=e283] [cursor=pointer]:
+              - img [ref=e287]
+              - generic [ref=e289]: Echo
+            - img [ref=e292] [cursor=pointer]
+          - generic [ref=e298]:
+            - generic [ref=e299] [cursor=pointer]:
+              - img [ref=e303]
+              - generic [ref=e305]: Ava n8n
+            - img [ref=e308] [cursor=pointer]
+          - generic [ref=e314]:
+            - generic [ref=e319] [cursor=pointer]: Mark
+            - img [ref=e322] [cursor=pointer]
+          - generic [ref=e328]:
+            - generic [ref=e333] [cursor=pointer]: Erika
+            - img [ref=e336] [cursor=pointer]
+        - generic [ref=e342] [cursor=pointer]: Recents
+      - generic [ref=e343] [cursor=pointer]:
+        - generic [ref=e344]: +
+        - generic [ref=e345]: New assistant
+      - generic [ref=e346] [cursor=pointer]:
+        - generic [ref=e347]: 💡
+        - generic [ref=e348]: Share feedback
+      - generic [ref=e350]:
+        - generic [ref=e351] [cursor=pointer]:
+          - img [ref=e354]
+          - generic [ref=e355]:
+            - generic [ref=e356]: Kc Chaanine
+            - generic [ref=e357]: Free Plan
+        - img [ref=e359] [cursor=pointer]
+        - img [ref=e365] [cursor=pointer]
+    - generic [ref=e376]:
+      - generic [ref=e378] [cursor=pointer]:
+        - generic [ref=e379]: Guardian Jeff
+        - img [ref=e381]
+      - generic [ref=e384]:
+        - generic [ref=e30753] [cursor=pointer]:
+          - generic [ref=e30756]: ⚡ Interrupting current task. I'll respond to your message shortly.
+          - generic [ref=e30757]:
+            - img [ref=e30759]
+            - img [ref=e30763]
+        - generic [ref=e30771] [cursor=pointer]:
+          - generic [ref=e30773]: "[TEST E msg 2/3] second piece"
+          - generic [ref=e30774]:
+            - generic [ref=e30776]: 3:45 PM
+            - img [ref=e30778]
+            - img [ref=e30782]
+            - img [ref=e30786]
+        - generic [ref=e30792] [cursor=pointer]:
+          - generic [ref=e30795]: first piece received.
+          - generic [ref=e30796]:
+            - img [ref=e30798]
+            - img [ref=e30802]
+        - generic [ref=e30568] [cursor=pointer]:
+          - generic [ref=e30570]: "[TEST E msg 1/3] first piece"
+          - generic [ref=e30571]:
+            - generic [ref=e30573]: 3:45 PM
+            - img [ref=e30575]
+            - img [ref=e30579]
+            - img [ref=e30583]
+        - generic [ref=e30589] [cursor=pointer]:
+          - generic [ref=e30592]: "💾 Self-improvement review: User profile updated"
+          - img [ref=e30595]
+        - generic [ref=e30601] [cursor=pointer]:
+          - generic [ref=e30604]: ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAEND_OF_PAYLOAD
+          - img [ref=e30607]
+        - generic [ref=e29772] [cursor=pointer]:
+          - generic [ref=e29775]: "💻 terminal: \"python3 -c \"import sys; sys.stdout.wr...\""
+          - img [ref=e29778]
+        - generic [ref=e29784] [cursor=pointer]:
+          - generic [ref=e29787]: ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB END_OF_PAYLOAD
+          - img [ref=e29790]
+        - generic [ref=e28976] [cursor=pointer]:
+          - generic [ref=e28979]: "💻 terminal: \"python3 -c \"import sys; sys.stdout.wr...\""
+          - img [ref=e28982]
+        - generic [ref=e28988] [cursor=pointer]:
+          - generic [ref=e28991]: Executing the exact payload generator now and I’ll return its stdout raw.
+          - img [ref=e28994]
+        - generic [ref=e25167] [cursor=pointer]:
+          - generic [ref=e25170]: ⚡ Interrupting current task. I'll respond to your message shortly.
+          - generic [ref=e25171]:
+            - img [ref=e25173]
+            - img [ref=e25177]
+        - generic [ref=e25185] [cursor=pointer]:
+          - generic [ref=e25187]:
+            - generic [ref=e25189]: "[TEST D simpler] Jeff — please interrupt the previous request and instead do this single shell command:"
+            - generic [ref=e25191]: python3 -c "import sys; sys.stdout.write('AB' * 5600); sys.stdout.write('\\nEND_OF_PAYLOAD\\n')"
+            - generic [ref=e25193]: That prints exactly 11,200 chars of “AB” + a sentinel. Just send the raw stdout back to me. The point is to test long-message chunking, not essay generation.
+          - generic [ref=e25194]:
+            - generic [ref=e25196]: 3:43 PM
+            - img [ref=e25198]
+            - img [ref=e25202]
+            - img [ref=e25206]
+        - generic [ref=e25212] [cursor=pointer]:
+          - generic [ref=e25216]:
+            - generic [ref=e25217]:
+              - generic [ref=e25218]: "10."
+              - generic [ref=e25220]: "Rocket.Chat: Rocket.Chat is an open-source messaging platform designed for self-hosted team chat, omnichannel support, and integrations."
+            - generic [ref=e25221]:
+              - generic [ref=e25222]: "11."
+              - generic [ref=e25224]: "Zulip: Zulip is a team chat system that organizes conversations into streams and topics for high-signal asynchronous discussion."
+            - generic [ref=e25225]:
+              - generic [ref=e25226]: "12."
+              - generic [ref=e25228]: "Google Chat: Google Chat is Google Workspace’s business messaging platform for direct messages, spaces, threaded conversations, and app bots."
+            - generic [ref=e25229]:
+              - generic [ref=e25230]: "13."
+              - generic [ref=e25232]: "Facebook Messenger: Facebook Messenger is Meta’s consumer messaging platform for personal conversations, business pages, bots, and social messaging."
+            - generic [ref=e25233]:
+              - generic [ref=e25234]: "14."
+              - generic [ref=e25236]: "Instagram Direct: Instagram Direct is Instagram’s private messaging system for conversations around profiles, stories, reels, and creator interactions."
+            - generic [ref=e25237]:
+              - generic [ref=e25238]: "15."
+              - generic [ref=e25240]: "iMessage: iMessage is Apple’s messaging service for texts, media, group chats, reactions, and device-native encrypted communication."
+            - generic [ref=e25241]:
+              - generic [ref=e25242]: "16."
+              - generic [ref=e25244]: "SMS: SMS is the traditional cellular text messaging protocol used for short plain-text messages across mobile networks."
+            - generic [ref=e25245]:
+              - generic [ref=e25246]: "17."
+              - generic [ref=e25248]: "MMS: MMS extends SMS with support for images, audio, video, and richer media attachments over mobile carrier infrastructure."
+            - generic [ref=e25249]:
+              - generic [ref=e25250]: "18."
+              - generic [ref=e25252]: "RCS: RCS is a modern carrier messaging standard that adds typing indicators, read receipts, media sharing, and business messaging features."
+            - generic [ref=e25253]:
+              - generic [ref=e25254]: "19."
+              - generic [ref=e25256]: "WeChat: WeChat is a Chinese super-app combining messaging, payments, mini-programs, social feeds, and business communication."
+            - generic [ref=e25257]:
+              - generic [ref=e25258]: "20."
+              - generic [ref=e25260]: "WeCom: WeCom is Tencent’s enterprise messaging and collaboration platform connected to the broader WeChat ecosystem."
+            - generic [ref=e25261]:
+              - generic [ref=e25262]: "21."
+              - generic [ref=e25264]: "DingTalk: DingTalk is Alibaba’s enterprise collaboration platform for workplace chat, attendance, approvals, meetings, and organizational workflows."
+            - generic [ref=e25265]:
+              - generic [ref=e25266]: "22."
+              - generic [ref=e25268]: "Feishu: Feishu is ByteDance’s productivity suite combining chat, documents, calendars, video meetings, and workplace automation."
+            - generic [ref=e25269]:
+              - generic [ref=e25270]: "23."
+              - generic [ref=e25272]: "Lark: Lark is the international version of Feishu, offering team chat, docs, meetings, calendars, and integrated collaboration tools."
+            - generic [ref=e25273]:
+              - generic [ref=e25274]: "24."
+              - generic [ref=e25276]: "LINE: LINE is a messaging platform popular in Japan, Taiwan, and Thailand, with stickers, official accounts, payments, and bots."
+            - generic [ref=e25277]:
+              - generic [ref=e25278]: "25."
+              - generic [ref=e25280]: "Viber: Viber is a messaging and calling platform supporting private chats, communities, stickers, and business messaging."
+            - generic [ref=e25281]:
+              - generic [ref=e25282]: "26."
+              - generic [ref=e25284]: "Skype: Skype is a long-running communication platform for chat, voice calls, video calls, and international calling."
+            - generic [ref=e25285]:
+              - generic [ref=e25286]: "27."
+              - generic [ref=e25288]: "Snapchat: Snapchat is a camera-first social messaging platform built around disappearing messages, stories, lenses, and visual communication."
+            - generic [ref=e25289]:
+              - generic [ref=e25290]: "28."
+              - generic [ref=e25292]: "TikTok Direct Messages: TikTok Direct Messages allow users to share videos, chat privately, and communicate within the TikTok social graph."
+            - generic [ref=e25293]:
+              - generic [ref=e25294]: "29."
+              - generic [ref=e25296]: "X Direct Messages: X Direct Messages provide private conversations on the X platform, including text, media, links, and group chats."
+            - generic [ref=e25297]:
+              - generic [ref=e25298]: "30."
+              - generic [ref=e25300]: "Reddit Chat: Reddit Chat enables direct and group messaging between Reddit users alongside subreddit-based public discussion."
+            - generic [ref=e25301]:
+              - generic [ref=e25302]: "31."
+              - generic [ref=e25304]: "Guilded: Guilded is a community chat platform similar to Discord, with servers, channels, calendars, forums, and gaming-oriented features."
+            - generic [ref=e25305]:
+              - generic [ref=e25306]: "32."
+              - generic [ref=e25308]: "Steam Chat: Steam Chat is Valve’s messaging system for gamers, supporting friends lists, groups, voice chat, and game-related presence."
+            - generic [ref=e25309]:
+              - generic [ref=e25310]: "33."
+              - generic [ref=e25312]: "Battle.net Chat: Battle.net Chat is Blizzard’s messaging layer for friends, groups, and game-connected communication across Blizzard titles."
+            - generic [ref=e25313]:
+              - generic [ref=e25314]: "34."
+              - generic [ref=e25316]: "PlayStation Messages: PlayStation Messages support communication between PlayStation Network users for gaming coordination and social chat."
+            - generic [ref=e25317]:
+              - generic [ref=e25318]: "35."
+              - generic [ref=e25320]: "Xbox Chat: Xbox Chat provides messaging, parties, voice communication, and social features across Xbox consoles and Microsoft gaming services."
+            - generic [ref=e25321]:
+              - generic [ref=e25322]: "36."
+              - generic [ref=e25324]: "Twitch Chat: Twitch Chat is a live-streaming chat system where viewers interact with streamers, moderators, bots, and communities in real time."
+            - generic [ref=e25325]:
+              - generic [ref=e25326]: "37."
+              - generic [ref=e25328]: "YouTube Live Chat: YouTube Live Chat lets viewers participate in real-time conversations during live streams and premieres."
+            - generic [ref=e25329]:
+              - generic [ref=e25330]: "38."
+              - generic [ref=e25332]: "Kick Chat: Kick Chat is a live-streaming chat system used for audience participation, moderation, and streamer-community interaction."
+            - generic [ref=e25333]:
+              - generic [ref=e25334]: "39."
+              - generic [ref=e25336]: "IRC: IRC is a classic real-time text chat protocol built around networks, channels, nicknames, and lightweight clients."
+            - generic [ref=e25337]:
+              - generic [ref=e25338]: "40."
+              - generic [ref=e25340]: "XMPP: XMPP is an extensible messaging protocol used for federated chat, presence, pubsub, and custom real-time applications."
+            - generic [ref=e25341]:
+              - generic [ref=e25342]: "41."
+              - generic [ref=e25344]: "Mastodon Direct Mentions: Mastodon direct-style conversations use ActivityPub visibility controls to send limited-audience messages across federated servers."
+            - generic [ref=e25345]:
+              - generic [ref=e25346]: "42."
+              - generic [ref=e25348]: "Bluesky Chat: Bluesky Chat provides private messaging capabilities within the Bluesky social network and its decentralized identity ecosystem."
+            - generic [ref=e25349]:
+              - generic [ref=e25350]: "43."
+              - generic [ref=e25352]: "LinkedIn Messaging: LinkedIn Messaging supports professional direct communication, recruiting outreach, business networking, and company interactions."
+            - generic [ref=e25353]:
+              - generic [ref=e25354]: "44."
+              - generic [ref=e25356]: "Workplace from Meta: Workplace is Meta’s enterprise collaboration platform combining familiar social features with workplace chat and groups."
+            - generic [ref=e25357]:
+              - generic [ref=e25358]: "45."
+              - generic [ref=e25360]: "Zoom Team Chat: Zoom Team Chat is Zoom’s persistent messaging product integrated with meetings, channels, contacts, and files."
+            - generic [ref=e25361]:
+              - generic [ref=e25362]: "46."
+              - generic [ref=e25364]: "Cisco Webex Messaging: Cisco Webex Messaging provides enterprise chat spaces, direct messages, meetings, calling, and compliance-oriented collaboration."
+            - generic [ref=e25365]:
+              - generic [ref=e25366]: "47."
+              - generic [ref=e25368]: "Twist: Twist is an asynchronous team messaging platform designed around threads, channels, and calmer workplace communication."
+            - generic [ref=e25369]:
+              - generic [ref=e25370]: "48."
+              - generic [ref=e25372]: "Chanty: Chanty is a team chat platform offering channels, direct messages, task management, calls, and collaboration features."
+            - generic [ref=e25373]:
+              - generic [ref=e25374]: "49."
+              - generic [ref=e25376]: "Flock: Flock is a business messaging platform with channels, direct messages, productivity integrations, video calls, and shared workflows."
+            - generic [ref=e25377]:
+              - generic [ref=e25378]: "50."
+              - generic [ref=e25380]: "Basecamp Campfire: Basecamp Campfire is a simple team chat feature inside Basecamp for project-oriented real-time discussion and coordination. (3/3)"
+          - img [ref=e25383]
+        - generic [ref=e25389] [cursor=pointer]:
+          - generic [ref=e25392]:
+            - generic [ref=e25394]: "WebSocket feels like a live wire. After the handshake, both sides can send messages without creating a new HTTP request each time. For inbound dispatch, this means the platform can push a message to the adapter the moment it arrives. Latency is usually low because there is no polling interval. The adapter does not need to ask “anything new?” every few seconds. It simply listens. This is especially useful for interactive chat agents, typing indicators, streaming responses, presence updates, reaction events, and any system where immediacy matters. WebSocket also supports bidirectional control flows naturally: the client can send acknowledgements, heartbeats, subscription changes, or command replies over the same connection."
+            - generic [ref=e25396]: Long-polling, by contrast, is a disciplined loop of temporary waits. The adapter sends an HTTP request such as “give me updates after id 7307.” If there are updates, the server returns them immediately. If not, the server holds the request open for a while. When the request returns, the adapter processes the response and sends another request. Latency can still be quite good, because the request is often already open when a message arrives. However, there is usually more overhead than WebSocket because each cycle involves HTTP request headers, response headers, connection management unless keep-alive is used, and application logic to reissue the next poll. Long-polling is simpler to deploy through old proxies and strict corporate networks, but it can be less elegant for high-frequency event streams.
+            - generic [ref=e25398]: The biggest operational difference is connection lifecycle. WebSockets require a stable long-lived connection. This can be fragile in environments with load balancers, reverse proxies, NAT timeouts, mobile networks, idle connection limits, or Cloudflare-style tunnel behavior. A WebSocket adapter must implement heartbeats, ping/pong handling, reconnect backoff, subscription restoration, and replay after reconnect. When it works, it is efficient and responsive. When it fails silently, the adapter can appear connected while receiving nothing unless heartbeat logic detects the dead connection. Good WebSocket clients treat disconnects as normal, not exceptional.
+            - generic [ref=e25400]: Long-polling embraces disconnection as part of the design. Every request ends. Timeouts are expected. The adapter loops. If one request fails, the next can succeed. This makes long-polling robust in many plain HTTP environments. It is easier to inspect with curl, easier to pass through proxies, and often easier to reason about in logs because each poll has a start, end, status code, and response body. The downside is that the adapter must be careful not to create duplicate concurrent polls for the same cursor. Two overlapping polls can return the same event, which makes monotonic cursor filtering essential.
+            - generic [ref=e25402]: From a server-resource perspective, WebSockets and long-polling stress different parts of the system. WebSocket uses one long-lived connection per client. That consumes connection state, memory, and file descriptors, but avoids repeated HTTP parsing. Long-polling uses many requests over time. Each waiting request also consumes server resources, but the connection is periodically released and recreated. At small scale, either is fine. At large scale, WebSocket infrastructure must be tuned for many concurrent open sockets, while long-polling infrastructure must be tuned for high request churn and many pending HTTP requests. Neither is automatically superior; the best choice depends on platform architecture.
+            - generic [ref=e25404]: "Inbound dispatch semantics also differ. With WebSocket, events arrive as a stream. The adapter often receives a sequence of frames and must parse them continuously. If the connection drops, the adapter must know where to resume. Some platforms provide sequence numbers and resume tokens. Others simply require the client to reconnect and fetch missed events through a REST endpoint. With long-polling, resumption is built into the request model: “give me events after cursor X.” The cursor is part of every request. That makes recovery explicit. However, if the adapter uses the wrong cursor, or fails to persist it, long-polling can repeatedly deliver the same events."
+            - generic [ref=e25406]: Latency patterns are different too. WebSocket tends to have low and consistent latency while connected. Long-polling can also be low latency if the server responds immediately when events arrive, but there may be edge cases where latency equals the gap between polls. If the adapter uses short REST polling rather than true long-polling, such as checking every five seconds, then average latency may be around half the interval and worst-case latency around the full interval. That cadence can be visible to users. If an adapter sends a reset acknowledgement every five seconds, it may indicate a REST poll loop repeatedly treating an old message as new. WebSocket failures can also lead to fallback polling, and that fallback can reveal cursor bugs.
+            - generic [ref=e25408]: Backpressure is another consideration. In WebSocket systems, messages can arrive faster than the adapter can process them. The client needs buffering, flow control, or a strategy for pausing reads. If the adapter processes one message by invoking a long-running agent turn, it must not block the socket reader entirely or it may miss heartbeats and get disconnected. A common architecture is to have a lightweight socket reader enqueue events, while workers process them separately. In long-polling, backpressure is often naturally tied to the polling loop. If processing takes time before the next poll, the adapter slows its intake. That can be simpler, though it may increase latency for subsequent messages.
+            - generic [ref=e25410]: Ordering behaves differently depending on platform guarantees. A WebSocket stream often preserves event order within one connection, but reconnects can introduce gaps or replay. Long-polling often returns batches ordered by id, but overlapping requests or pagination can complicate ordering. In both cases, the adapter should treat platform ordering guarantees as useful but not sufficient. It should use message ids, cursors, and idempotency checks. Transport order is not the same as application delivery correctness.
+            - generic [ref=e25412]: Failure visibility is also different. WebSocket failures may appear as disconnect events, heartbeat timeouts, close codes, or stalled reads. Debugging often involves checking ping intervals, proxy idle timeouts, TLS termination, and reconnect logs. Long-polling failures appear as HTTP status codes, timeouts, malformed responses, or repeated empty polls. Debugging often involves inspecting request parameters, cursor state, response bodies, and rate limits. WebSocket bugs can feel like “nothing is arriving.” Long-polling bugs can feel like “the same thing keeps arriving.” Both require careful logging.
+            - generic [ref=e25414]: Security and authentication patterns can differ as well. WebSockets often authenticate during handshake using headers, cookies, or query tokens, then keep that authenticated channel open. Token rotation can be awkward if the connection lives longer than the token. Long-polling authenticates each request, which naturally picks up refreshed tokens but increases repeated auth overhead. WebSocket can be more efficient; long-polling can be simpler to integrate with standard HTTP middleware.
+            - generic [ref=e25416]: "For a chat adapter, the choice is rarely absolute. A robust adapter may support both. WebSocket can be the primary path for real-time delivery, while long-polling or REST fetch can be the recovery path after reconnect. Long-polling can be the default for platforms that do not support push streams. Webhooks are another alternative, where the platform calls the adapter instead of the adapter calling the platform. Each transport needs the same higher-level discipline: durable cursors, duplicate suppression, scoped conversation identity, error handling, and clear acknowledgement rules."
+            - generic [ref=e25418]: The essential difference is that WebSocket is continuous and event-driven, while long-polling is iterative and request-driven. WebSocket optimizes for immediacy and efficient bidirectional communication, at the cost of maintaining a fragile persistent connection. Long-polling optimizes for compatibility and explicit recovery, at the cost of request churn and potential polling cadence artifacts. For inbound message dispatch, either can be reliable if implemented carefully. Neither can save an adapter that lacks durable cursor management. Transport moves bytes; the adapter’s delivery semantics come from how it records, filters, acknowledges, and dispatches those bytes as messages.
+            - generic [ref=e25419]:
+              - generic [ref=e25420]:
+                - generic [ref=e25421]: "3."
+                - generic [ref=e25423]: Fifty example chat-platform names with one-sentence descriptions each
+              - generic [ref=e25424]:
+                - generic [ref=e25425]: "4."
+                - generic [ref=e25427]: "Telegram: Telegram is a cloud-based messaging platform popular for bots, channels, groups, and fast cross-device synchronization."
+              - generic [ref=e25428]:
+                - generic [ref=e25429]: "5."
+                - generic [ref=e25431]: "Discord: Discord is a community-focused chat platform with servers, channels, threads, voice rooms, bots, and rich real-time interactions."
+              - generic [ref=e25432]:
+                - generic [ref=e25433]: "6."
+                - generic [ref=e25435]: "Slack: Slack is a workplace collaboration platform organized around teams, channels, direct messages, workflow automation, and app integrations."
+              - generic [ref=e25436]:
+                - generic [ref=e25437]: "7."
+                - generic [ref=e25439]: "Microsoft Teams: Microsoft Teams is an enterprise communication platform combining chat, meetings, files, calendars, and Microsoft 365 integration."
+              - generic [ref=e25440]:
+                - generic [ref=e25441]: "8."
+                - generic [ref=e25443]: "WhatsApp: WhatsApp is a widely used mobile messaging platform offering encrypted personal chats, groups, voice calls, and business messaging APIs."
+              - generic [ref=e25444]:
+                - generic [ref=e25445]: "9."
+                - generic [ref=e25447]: "Signal: Signal is a privacy-focused messaging application known for end-to-end encryption, minimal metadata, and secure group communication."
+              - generic [ref=e25448]:
+                - generic [ref=e25449]: "10."
+                - generic [ref=e25451]: "Matrix: Matrix is an open protocol for decentralized real-time communication, supporting federated chat rooms, bridges, and encrypted messaging."
+              - generic [ref=e25452]:
+                - generic [ref=e25453]: "11."
+                - generic [ref=e25455]: "Element: Element is a popular Matrix client that provides secure team chat, rooms, spaces, and cross-platform messaging."
+              - generic [ref=e25456]:
+                - generic [ref=e25457]: "12."
+                - generic [ref=e25459]: "Mattermost: Mattermost is a self-hostable team collaboration platform often used by engineering, security, and operations teams."
+            - generic [ref=e25461]: (2/3)
+          - img [ref=e25464]
+        - generic [ref=e25470] [cursor=pointer]:
+          - generic [ref=e25473]:
+            - generic [ref=e25475]:
+              - generic [ref=e25476]: "1."
+              - generic [ref=e25478]: Essay on why monotonic message-id cursors are critical to chat adapters’ at-most-once delivery semantics
+            - generic [ref=e25480]: "Monotonic message-id cursors are one of the quiet foundations of reliable chat adapter design. They look simple: every inbound message has an identifier, each new identifier is greater than the last one, and the adapter stores the highest identifier it has successfully processed. Yet this small rule is what allows an adapter to reason about progress, avoid duplicate delivery, and survive restarts without reprocessing the same inbound events again and again. In chat systems, the adapter sits between an external platform and an agent runtime. The platform may deliver messages through webhooks, WebSockets, long-polling, REST polling, or some proprietary event stream. The agent runtime expects each user message to be handled once. The adapter’s job is to transform an unreliable or repeated stream of platform events into a clean sequence of application-level messages. A monotonic cursor gives the adapter a durable boundary between the past and the future."
+            - generic [ref=e25482]: At-most-once delivery means that a message should not be delivered to the agent more than once. It does not guarantee that every message will be delivered; that stronger property is at-least-once or exactly-once depending on how it is implemented. At-most-once is about preventing duplicates. In a chat adapter, duplicates are more damaging than they first appear. A repeated user message can cause the agent to answer twice, execute a tool twice, restart a conversation unexpectedly, schedule duplicate jobs, send duplicate notifications, or perform an external side effect twice. If the agent is allowed to run shell commands, modify files, post messages, or call APIs, duplicate delivery is not just noisy; it can be operationally dangerous. A cursor prevents the adapter from treating old messages as new work.
+            - generic [ref=e25484]: "The reason monotonicity matters is that it lets the adapter make a simple comparison. If the incoming message id is less than or equal to the stored last-seen id, the adapter knows the event is old and can ignore it. If it is greater, the adapter knows the event is new and can process it. Without monotonic ids, the adapter has to keep a potentially unbounded set of message ids it has seen before. That requires more memory, more storage, and more complicated expiration rules. With monotonic ids, the entire history collapses into one durable value: the highest processed id. That value can be stored in a small file, a database row, Redis, SQLite, or platform-specific state. The algorithm is easy to audit and easy to recover."
+            - generic [ref=e25486]: The most important practical scenario is restart recovery. Chat adapters are long-running processes, but they are not immortal. They restart after deployments, package upgrades, server reboots, crashes, OOM events, network failures, or manual maintenance. When the adapter comes back, it often asks the platform for recent messages or opens a stream that may replay buffered events. If the adapter has no durable cursor, it may process all recent messages again. If it stores only in-memory state, that state is lost on restart. A monotonic cursor persisted after successful processing gives the adapter a restart-safe memory. It says, “I have already handled everything through message 7307; only deliver messages greater than 7307.” This makes restarts boring instead of dangerous.
+            - generic [ref=e25488]: The cursor also protects against polling overlap. In long-polling or REST polling systems, the adapter may ask the platform every few seconds for new events. If a request times out, is retried, or overlaps with another request, the same event can appear in multiple responses. Some APIs intentionally return the last several events as a safety measure. Others return a page whose boundary is inclusive rather than exclusive. If the adapter tracks a monotonic last id, duplicate responses are harmless. The adapter filters every batch before dispatching, processes only ids greater than the cursor, then advances the cursor when processing succeeds.
+            - generic [ref=e25490]: A subtle design point is when to advance the cursor. If the adapter advances it before the message is successfully handed to the agent, then a crash between cursor update and dispatch causes message loss. That is still compatible with at-most-once delivery, because the message is not duplicated, but it weakens reliability. If the adapter advances it only after dispatch succeeds, then a crash after dispatch but before cursor update can cause a duplicate on restart. That is closer to at-least-once delivery. The correct choice depends on the adapter’s delivery contract. For strict at-most-once semantics, the cursor may be advanced before or atomically with claiming the message, accepting possible loss. For practical chat systems, a common compromise is to record an in-progress state or use an idempotency key so that duplicate side effects are avoided even if the message is retried.
+            - generic [ref=e25492]: Monotonic cursors also help with concurrency. Modern gateways may process multiple platforms, multiple chats, or multiple threads at the same time. Each stream needs its own cursor scope. A global cursor across unrelated chats can drop messages incorrectly if ids are only monotonic per chat. A per-chat cursor avoids that. Conversely, if platform ids are globally monotonic, a global cursor may be sufficient. The adapter must understand the platform’s id semantics. Is the id numeric? Is it sortable as an integer or only lexicographically? Is it monotonic per bot, per conversation, per user, or per transport connection? Does the platform ever reuse ids after deletion or migration? These details determine how cursor state should be keyed and compared.
+            - generic [ref=e25494]: The cursor is also a defense against transport instability. WebSockets reconnect. HTTP requests fail. Gateways crash halfway through receiving an event. Load balancers retry webhook deliveries. Mobile-style APIs sometimes replay the last event after reconnect. If every event is filtered through a monotonic cursor, the adapter becomes resilient to repeated delivery from the platform. The platform can be conservative and resend; the adapter can be conservative and ignore old ids. This separation of concerns is healthy. The platform does not need to know exactly what the agent processed. The adapter only needs a durable record of its own progress.
+            - generic [ref=e25496]: There are traps. A cursor must be updated atomically enough for the system’s risk profile. Writing to a local file without fsync may be fine for a hobby bot but weak for production. Updating a cursor after processing an entire batch can cause duplicate processing of earlier messages if the adapter crashes mid-batch. Updating after each message reduces the duplicate window. If processing messages out of order, a simple highest-id cursor can accidentally skip lower-id messages still in progress. Therefore, adapters that process concurrently often need ordered dispatch, per-message acknowledgement, or a more sophisticated pending set. Monotonic ids simplify the common case, but they do not eliminate the need for careful ordering.
+            - generic [ref=e25498]: Another trap is assuming that timestamps can replace message ids. Timestamps are often not unique, may arrive out of order, may have clock skew, and may be rounded. If two messages have the same timestamp, a timestamp cursor can drop one. If a platform emits delayed messages with older timestamps, a timestamp cursor can skip them. Monotonic message ids are purpose-built for ordering. They provide a logical sequence, not just a wall-clock observation. In distributed systems, logical sequence is usually more reliable than time.
+            - generic [ref=e25500]: A monotonic cursor also makes observability clearer. When debugging a chat adapter, being able to say “last processed id is 7307” is concrete. Logs can show incoming ids, skipped ids, processed ids, and cursor updates. Operators can compare platform state with adapter state. If users report duplicate “conversation reset” acknowledgements every five seconds, cursor state is one of the first things to inspect. Is the cursor file missing? Is it unwritable? Is the adapter reading the wrong home directory? Is the package version using a different cursor path? Is the REST poller failing to persist after processing? A simple cursor value becomes a diagnostic anchor.
+            - generic [ref=e25502]: In at-most-once delivery, the adapter’s core promise is restraint. It must not get excited by the same message twice. Monotonic cursors provide that restraint. They turn a messy inbound world of retries, reconnects, polling windows, and replayed events into a stable progression. Every new event must prove that it is beyond the boundary. Every old event is dropped quietly. For chat agents that can take real actions, that boundary is not merely an optimization. It is a safety mechanism, a reliability primitive, and an operational necessity.
+            - generic [ref=e25504]:
+              - generic [ref=e25505]: "2."
+              - generic [ref=e25507]: Essay on the difference between WebSocket and long-polling for inbound message dispatch
+            - generic [ref=e25509]: WebSocket and long-polling are both ways for a chat adapter to receive inbound messages, but they embody different philosophies. WebSocket is a persistent, bidirectional connection. The adapter connects once, keeps the socket open, and the server pushes events as they happen. Long-polling is a repeated request-response pattern. The adapter asks the server for new events, the server waits until something is available or until a timeout expires, then returns a response. The adapter immediately asks again. Both can deliver chat messages in near real time, but their behavior under load, failure, reconnect, ordering, latency, and operational constraints is different.
+            - generic [ref=e25511]: (1/3)
+          - generic [ref=e25512]:
+            - img [ref=e25514]
+            - img [ref=e25518]
+        - generic [ref=e25060] [cursor=pointer]:
+          - generic [ref=e25062]:
+            - generic [ref=e25064]: "[TEST D] Jeff — please reply with a deliberately LONG plain-text answer (around 12,000 characters total) so I can verify the adapter splits >10K-char replies into (1/N), (2/N) chunks."
+            - generic [ref=e25066]: "Concrete content I want, all in plain text (no tool calls, no code blocks):"
+            - generic [ref=e25067]:
+              - generic [ref=e25068]:
+                - generic [ref=e25069]: "1."
+                - generic [ref=e25071]: A 1500-word essay on why monotonic message-id cursors are critical to chat adapters’ at-most-once delivery semantics.
+              - generic [ref=e25072]:
+                - generic [ref=e25073]: "2."
+                - generic [ref=e25075]: Then a 1500-word essay on the difference between WebSocket and long-polling for inbound message dispatch.
+              - generic [ref=e25076]:
+                - generic [ref=e25077]: "3."
+                - generic [ref=e25079]: Then 50 numbered example chat-platform names with a one-sentence description each.
+            - generic [ref=e25081]: Just write all of that as one continuous reply. Verbose is fine. The point is hitting ~12K chars in one logical reply so I can observe the chunking.
+          - generic [ref=e25082]:
+            - generic [ref=e25084]: 3:42 PM
+            - img [ref=e25086]
+            - img [ref=e25090]
+            - img [ref=e25094]
+        - generic [ref=e24922] [cursor=pointer]:
+          - generic [ref=e24925]:
+            - generic [ref=e24927]:
+              - text: "Plain answer:"
+              - generic [ref=e24928]: none of the tools exposed to me in this current BGOS/API session reliably trigger the “Approve once / Always 🔒 / Cancel” BGOS approval UI right now.
+            - generic [ref=e24930]: "What I found:"
+            - generic [ref=e24931]:
+              - generic [ref=e24932]:
+                - generic [ref=e24933]: •
+                - generic [ref=e24934]:
+                  - generic [ref=e24935]: "Config says approvals are enabled:"
+                  - generic [ref=e24936]:
+                    - generic [ref=e24937]:
+                      - generic [ref=e24938]: •
+                      - generic [ref=e24940]: "approvals.mode: manual"
+                    - generic [ref=e24941]:
+                      - generic [ref=e24942]: •
+                      - generic [ref=e24944]: "approvals.timeout: 60"
+                    - generic [ref=e24945]:
+                      - generic [ref=e24946]: •
+                      - generic [ref=e24948]: "security.tirith_enabled: true"
+              - generic [ref=e24949]:
+                - generic [ref=e24950]: •
+                - generic [ref=e24951]:
+                  - generic [ref=e24952]:
+                    - text: Hermes source says the approval gate is wired mainly through the
+                    - generic [ref=e24953]: terminal/shell exec path
+                    - text: "for commands matching dangerous patterns, such as:"
+                  - generic [ref=e24954]:
+                    - generic [ref=e24955]:
+                      - generic [ref=e24956]: •
+                      - generic [ref=e24958]: bash -c ...
+                    - generic [ref=e24959]:
+                      - generic [ref=e24960]: •
+                      - generic [ref=e24962]: python -c ...
+                    - generic [ref=e24963]:
+                      - generic [ref=e24964]: •
+                      - generic [ref=e24966]: curl ... | bash
+                    - generic [ref=e24967]:
+                      - generic [ref=e24968]: •
+                      - generic [ref=e24970]: recursive rm
+                    - generic [ref=e24971]:
+                      - generic [ref=e24972]: •
+                      - generic [ref=e24974]: systemctl stop/restart/disable/mask
+                    - generic [ref=e24975]:
+                      - generic [ref=e24976]: •
+                      - generic [ref=e24978]: git reset --hard
+                    - generic [ref=e24979]:
+                      - generic [ref=e24980]: •
+                      - generic [ref=e24982]: git clean -f
+                    - generic [ref=e24983]:
+                      - generic [ref=e24984]: •
+                      - generic [ref=e24986]: writes to /etc/, .env, sensitive config paths, etc.
+              - generic [ref=e24987]:
+                - generic [ref=e24988]: •
+                - generic [ref=e24989]:
+                  - generic [ref=e24990]: "But in this actual tool surface, I ran commands that should have matched those patterns:"
+                  - generic [ref=e24991]:
+                    - generic [ref=e24992]:
+                      - generic [ref=e24993]: •
+                      - generic [ref=e24995]: bash -c '...'
+                    - generic [ref=e24996]:
+                      - generic [ref=e24997]: •
+                      - generic [ref=e24999]: file create/delete in /tmp
+                    - generic [ref=e25000]:
+                      - generic [ref=e25001]: •
+                      - generic [ref=e25002]:
+                        - generic [ref=e25003]: and earlier basic shell execs
+                        - generic [ref=e25005]: They executed immediately with no approval UI.
+            - generic [ref=e25007]: "So the practical answer for this gateway test is:"
+            - generic [ref=e25010]: No currently exposed tool I can call from here is producing the BGOS approval prompt.
+            - generic [ref=e25012]: "Likely distinction: the Hermes source has gateway approval support for dangerous terminal calls, but the tool execution path I’m using in this session appears to bypass that BGOS approval-notify flow or lacks the gateway approval callback wiring."
+          - img [ref=e25015]
+        - generic [ref=e24117] [cursor=pointer]:
+          - generic [ref=e24120]: "🔎 search_files: \"approval_callback|requires_approval|a...\""
+          - img [ref=e24123]
+        - generic [ref=e24129] [cursor=pointer]:
+          - generic [ref=e24132]: "🔎 search_files: \"approval|approve|Approvals|request_ap...\""
+          - img [ref=e24135]
+        - generic [ref=e24141] [cursor=pointer]:
+          - generic [ref=e24144]: I’ll quickly inspect the installed Hermes source for where approval gates are actually wired, so I don’t guess from config alone.
+          - img [ref=e24147]
+        - generic [ref=e30808] [cursor=pointer]:
+          - generic [ref=e30811]: "💻 terminal: \"set -o pipefail printf '### hermes co...\""
+          - img [ref=e30814]
+        - generic [ref=e30820] [cursor=pointer]:
+          - generic [ref=e30823]: I’ll inspect the live Hermes config/status for approval-related settings without printing secrets, then I’ll answer plainly based on both config and the tests we just ran.
+          - generic [ref=e30824]:
+            - img [ref=e30826]
+            - img [ref=e30830]
+        - generic [ref=e30838] [cursor=pointer]:
+          - generic [ref=e30840]: "[META] Jeff — which of your tools (if any) trigger an approval prompt on this gateway? I need a tool/command that I, the user, have to click \"Approve once\" for. List the names and any conditions you know of. If none of your tools require approval right now, just say so plainly."
+          - generic [ref=e30841]:
+            - generic [ref=e30843]: 3:38 PM
+            - img [ref=e30845]
+            - img [ref=e30849]
+            - img [ref=e30853]
+        - generic [ref=e30859] [cursor=pointer]:
+          - generic [ref=e30862]:
+            - generic [ref=e30864]: I can’t safely perform this test as requested from the tools available in this session.
+            - generic [ref=e30866]:
+              - text: I do
+              - generic [ref=e30867]: not
+              - text: have a request_approval tool exposed here, and previous shell calls executed directly without surfacing the BGOS approval buttons. Since you explicitly asked me
+              - generic [ref=e30868]: not to auto-run it
+              - text: ", I’m not going to call terminal with that curl command."
+            - generic [ref=e30870]:
+              - text: "So: command"
+              - generic [ref=e30871]: not executed
+              - text: .
+          - generic [ref=e30872]:
+            - img [ref=e30874]
+            - img [ref=e30878]
+        - generic [ref=e30886] [cursor=pointer]:
+          - generic [ref=e30888]:
+            - generic [ref=e30890]: "[TEST C take 3] Jeff — for this test the EXACT command matters. Please call your shell-exec tool with this command, which should trigger your gateway’s approval gate (network + sudo-like pattern):"
+            - generic [ref=e30892]: curl -s https://api.brandgrowthos.ai/healthz | head -c 200; echo TEST_C_NET_OK
+            - generic [ref=e30894]: "Important: please send this through whatever tool needs approval. If your shell tool auto-approves curl, then try invoking request_approval directly, or any tool that needs the user’s consent. The goal is to test the approval-button UI in BGOS — I need to see the inline buttons “Approve once / Always 🔒 / Cancel”. Don’t auto-run it; wait for my click."
+          - generic [ref=e30895]:
+            - generic [ref=e30897]: 3:38 PM
+            - img [ref=e30899]
+            - img [ref=e30903]
+            - img [ref=e30907]
+        - generic [ref=e30913] [cursor=pointer]:
+          - generic [ref=e30917]: OK_TEST_C
+          - img [ref=e30920]
+        - generic [ref=e30926] [cursor=pointer]:
+          - generic [ref=e30929]: Running the exact command via shell exec. I’m not taking any manual bypass action; if the approval gate is active for this tool call, it should pause for your “Approve once” click before execution.
+          - img [ref=e30932]
+        - generic [ref=e30938] [cursor=pointer]:
+          - generic [ref=e30941]: "💻 terminal: \"bash -c 'set -e; F=/tmp/test-c-$(date...\""
+          - img [ref=e30944]
+        - generic [ref=e30950] [cursor=pointer]:
+          - generic [ref=e30954]: OK_TEST_C
+          - img [ref=e30957]
+        - generic [ref=e30963] [cursor=pointer]:
+          - generic [ref=e30966]: "💻 terminal: \"bash -c 'set -e; F=/tmp/test-c-$(date...\""
+          - img [ref=e30969]
+        - generic [ref=e30975] [cursor=pointer]:
+          - generic [ref=e30978]: Running the requested shell command now; I won’t bypass anything manually—if this environment classifies it as approval-required, the approval UI should appear before execution.
+          - img [ref=e30981]
+        - generic [ref=e30987] [cursor=pointer]:
+          - generic [ref=e30990]: ⚡ Interrupting current task. I'll respond to your message shortly.
+          - generic [ref=e30991]:
+            - img [ref=e30993]
+            - img [ref=e30997]
+        - generic [ref=e31005] [cursor=pointer]:
+          - generic [ref=e31007]:
+            - generic [ref=e31009]: "[TEST C retry] Jeff, please run this concrete command which should require my approval (writes/deletes a file in /tmp):"
+            - generic [ref=e31011]: bash -c 'set -e; F=/tmp/test-c-$(date +%s).txt; touch "$F"; rm -f "$F"; echo OK_TEST_C'
+            - generic [ref=e31013]: Wait for me to click “Approve once” — then run it and reply with the stdout. The point of this test is to validate the approval UI button flow, so please don’t auto-bypass.
+          - generic [ref=e31014]:
+            - generic [ref=e31016]: 3:37 PM
+            - img [ref=e31018]
+            - img [ref=e31022]
+            - img [ref=e31026]
+        - generic [ref=e31032] [cursor=pointer]:
+          - generic [ref=e31036]: test-c-approved-1778845018
+          - img [ref=e31039]
+        - generic [ref=e31045] [cursor=pointer]:
+          - generic [ref=e31048]: "💻 terminal: \"echo \"test-c-approved-$(date +%s)\"\""
+          - img [ref=e31051]
+        - generic [ref=e31057] [cursor=pointer]:
+          - generic [ref=e31060]: Running the exact shell command now; if the gateway requires approval, it should surface that prompt to you.
+          - generic [ref=e31061]:
+            - img [ref=e31063]
+            - img [ref=e31067]
+        - generic [ref=e31075] [cursor=pointer]:
+          - generic [ref=e31077]:
+            - generic [ref=e31079]: "[TEST C] Jeff, please run this exact command in your shell, which should trigger an approval prompt for me to click. Use the shell exec tool, not file_read:"
+            - generic [ref=e31081]: echo "test-c-approved-$(date +%s)"
+            - generic [ref=e31083]: Wait for my approval, then run it and reply with the stdout.
+          - generic [ref=e31084]:
+            - generic [ref=e31086]: 3:36 PM
+            - img [ref=e31088]
+            - img [ref=e31092]
+            - img [ref=e31096]
+        - generic [ref=e31102] [cursor=pointer]:
+          - generic [ref=e31105]:
+            - generic [ref=e31107]:
+              - generic [ref=e31108]: "1."
+              - generic [ref=e31110]: "/etc/hostname:"
+            - generic [ref=e31111]: n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01
+            - generic [ref=e31113]:
+              - generic [ref=e31114]: "2."
+              - generic [ref=e31116]: "uname -a:"
+            - generic [ref=e31117]: "Linux n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 6.8.0-111-generic #111-Ubuntu SMP PREEMPT_DYNAMIC Sat Apr 11 23:16:02 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux"
+            - generic [ref=e31119]:
+              - generic [ref=e31120]: "3."
+              - generic [ref=e31122]: "Summary: This is an x86_64 Ubuntu Linux VPS/server running a generic Ubuntu kernel."
+          - img [ref=e31125]
+        - generic [ref=e31131] [cursor=pointer]:
+          - generic [ref=e31134]: "📖 read_file: \"/etc/hostname\""
+          - generic [ref=e31135]:
+            - img [ref=e31137]
+            - img [ref=e31141]
+        - generic [ref=e31149] [cursor=pointer]:
+          - generic [ref=e31151]:
+            - generic [ref=e31153]: "[TEST B] Jeff, please do this concrete task with a couple of tool calls so I can verify streaming + tool-progress UI:"
+            - generic [ref=e31154]:
+              - generic [ref=e31155]:
+                - generic [ref=e31156]: "1."
+                - generic [ref=e31158]: Read /etc/hostname and show me its content.
+              - generic [ref=e31159]:
+                - generic [ref=e31160]: "2."
+                - generic [ref=e31162]: Then run uname -a and show that output too.
+              - generic [ref=e31163]:
+                - generic [ref=e31164]: "3."
+                - generic [ref=e31166]: Then summarize in 1 sentence what kind of machine you’re on.
+            - generic [ref=e31168]: Just do steps 1–3 and reply with each piece, no extra preamble.
+          - generic [ref=e31169]:
+            - generic [ref=e31171]: 3:35 PM
+            - img [ref=e31173]
+            - img [ref=e31177]
+            - img [ref=e31181]
+        - generic [ref=e31187] [cursor=pointer]:
+          - generic [ref=e31190]:
+            - generic [ref=e31192]: Ran them. Captured output below, preserving line breaks.
+            - generic [ref=e31193]: "### 1) python -c \"import hermes_channel_bgos; print('VERSION:', hermes_channel_bgos.version)\" Traceback (most recent call last): File \"<string>\", line 1, in <module> AttributeError: module 'hermes_channel_bgos' has no attribute 'version' ### 2) pip show hermes-channel-bgos | grep -E \"^(Name|Version|Location)\" WARNING: Package(s) not found: hermes-channel-bgos ### 3) cat ~/.hermes/bgos_last_id 2>/dev/null || echo \"MISSING\" 7307 ### 4a) journalctl --user -u hermes-gateway.service -n 20 --no-pager May 15 10:59:23 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: kc 3914937 0.0 0.0 17632 6160 ? S 10:59 0:00 systemctl --user restart hermes-gateway.service May 15 11:00:24 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: WARNING gateway.run: Gateway drain timed out after 60.0s with 1 active agent(s); interrupting remaining work. May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: WARNING hermes_channel_bgos.bgos_ws: bgos_ws.disconnected May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: ┌─────────────────────────────────────────────────────────┐ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: │ ⚕ Hermes Gateway Starting... │ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: ├─────────────────────────────────────────────────────────┤ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: │ Messaging platforms + cron scheduler │ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: │ Press Ctrl+C to stop │ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: └─────────────────────────────────────────────────────────┘ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: ⚡ Interrupted during API call. May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: hermes-gateway.service: Main process exited, code=exited, status=1/FAILURE May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: hermes-gateway.service: Failed with result 'exit-code'. May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: Stopped hermes-gateway.service - Hermes Agent Gateway - Messaging Platform Integration. May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: hermes-gateway.service: Consumed 31.456s CPU time, 257.8M memory peak, 0B memory swap peak. May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: Started hermes-gateway.service - Hermes Agent Gateway - Messaging Platform Integration. May 15 11:00:35 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING hermes_channel_bgos.bgos_adapter: no Hermes agents discovered — Hermes Integrations card will show an empty catalog. Set BGOS_AGENTS (e.g. 'hades:Hades,ramy:Ramy') or BGOS_AGENTS_JSON env var. May 15 11:00:39 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING gateway.run: Unauthorized user: user_369zDLAr4cjQbDgJDdd6f1DagQh (None) on bgos May 15 11:01:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING gateway.run: Unauthorized user: user_369zDLAr4cjQbDgJDdd6f1DagQh (None) on bgos May 15 11:06:16 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING gateway.run: Unauthorized user: user_369zDLAr4cjQbDgJDdd6f1DagQh (None) on bgos May 15 11:27:57 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING gateway.run: Unauthorized user: user_369zDLAr4cjQbDgJDdd6f1DagQh (None) on bgos ### 4b) journalctl -u hermes-agent -n 20 --no-pager Hint: You are currently not seeing messages from other users and the system. Users in groups 'adm', 'systemd-journal' can see all messages. Pass -q to turn off this notice. -- No entries --"
+            - generic [ref=e31195]: "I also checked the interpreter used by the active gateway process, because plain python/pip is not the gateway venv:"
+            - generic [ref=e31196]: "### gateway MainPID 3918062 ### ps -p $PID -o pid,user,cmd PID USER CMD 3918062 kc /home/kc/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run --replace ### /home/kc/.hermes/hermes-agent/venv/bin/python -c importlib.metadata.version VERSION: 0.5.7 ### /home/kc/.hermes/hermes-agent/venv/bin/python -c module attrs FILE: /home/kc/hermes-channel-bgos/src/hermes_channel_bgos/__init__.py __version__: 0.5.7 version: None ### /home/kc/.hermes/hermes-agent/venv/bin/python -m pip show hermes-channel-bgos | grep -E \"^(Name|Version|Location)\" /home/kc/.hermes/hermes-agent/venv/bin/python: No module named pip"
+            - generic [ref=e31198]: "Conclusion: the active Hermes gateway venv is seeing hermes-channel-bgos 0.5.7, but the module exposes __version__, not version, so your first check fails even though the gateway package appears to be upgraded. The plain shell python/pip is not using the gateway environment."
+          - img [ref=e31201]
+        - generic [ref=e31207] [cursor=pointer]:
+          - generic [ref=e31210]: "💻 terminal: \"set -o pipefail PY=/home/kc/.hermes/h...\""
+          - img [ref=e31213]
+        - generic [ref=e31219] [cursor=pointer]:
+          - generic [ref=e31224]: I’ll re-run against the venv wrapper shown in the gateway command line (/home/kc/.hermes/hermes-agent/venv/bin/python), because /proc/$PID/exe resolves to the underlying uv-managed Python binary and bypasses the venv’s site-packages.
+          - img [ref=e31227]
+        - generic [ref=e31233] [cursor=pointer]:
+          - generic [ref=e31238]: The shell’s default python/pip didn’t see the package metadata, so I’m checking the running gateway process’s interpreter/package metadata too. That will tell us whether the active gateway environment is actually on 0.5.7.
+          - img [ref=e31241]
+        - generic [ref=e31247] [cursor=pointer]:
+          - generic [ref=e31250]: "💻 terminal: \"set -o pipefail PID=$(systemctl --use...\""
+          - img [ref=e31253]
+        - generic [ref=e31259] [cursor=pointer]:
+          - generic [ref=e31262]: I’ll run the diagnostic commands exactly in scope (using straight shell quotes so they execute correctly) and include the gateway log tail from the systemd user service if available.
+          - img [ref=e31265]
+        - generic [ref=e31271] [cursor=pointer]:
+          - generic [ref=e31274]: "📚 skill_view: \"hermes-agent\""
+          - generic [ref=e31275]:
+            - img [ref=e31277]
+            - img [ref=e31281]
+        - generic [ref=e31289] [cursor=pointer]:
+          - generic [ref=e31291]: "Jeff — diagnostic request. Please run these three commands on the server and reply with their full stdout, preserving line breaks: 1) python -c “import hermes_channel_bgos; print(‘VERSION:’, hermes_channel_bgos.version)” 2) pip show hermes-channel-bgos | grep -E “^(Name|Version|Location)” 3) cat ~/.hermes/bgos_last_id 2>/dev/null || echo “MISSING” If you can also tail the last 20 lines of the Hermes gateway log (journalctl -u hermes-agent -n 20 --no-pager, or wherever stderr lands), please include that too. I’m trying to confirm whether the bgos channel adapter is on 0.5.7 yet — the chat is still receiving “Conversation reset” acks at the 5s REST-poll cadence, which suggests the upgrade didn’t take."
+          - generic [ref=e31292]:
+            - generic [ref=e31294]: 3:29 PM
+            - img [ref=e31296]
+            - img [ref=e31300]
+            - img [ref=e31304]
+        - generic [ref=e31310] [cursor=pointer]:
+          - generic [ref=e31313]:
+            - generic [ref=e31315]: Hi~ I don’t recognize you yet!
+            - generic [ref=e31317]: "Here’s your pairing code: JZSG8RQW"
+            - generic [ref=e31319]: "Ask the bot owner to run: hermes pairing approve bgos JZSG8RQW"
+          - generic [ref=e31320]:
+            - img [ref=e31322]
+            - img [ref=e31326]
+        - generic [ref=e31334] [cursor=pointer]:
+          - generic [ref=e31336]:
+            - generic [ref=e31338]: "Jeff — diagnostic request. Please run these three commands on the server and reply with their full stdout, preserving line breaks:"
+            - generic [ref=e31339]:
+              - generic [ref=e31340]:
+                - generic [ref=e31341]: 1)
+                - generic [ref=e31343]:
+                  - text: python -c “import hermes_channel_bgos; print(‘VERSION:’, hermes_channel_bgos.
+                  - generic [ref=e31344]: version
+                  - text: )”
+              - generic [ref=e31345]:
+                - generic [ref=e31346]: 2)
+                - generic [ref=e31348]: pip show hermes-channel-bgos | grep -E “^(Name|Version|Location)”
+              - generic [ref=e31349]:
+                - generic [ref=e31350]: 3)
+                - generic [ref=e31352]: cat ~/.hermes/bgos_last_id 2>/dev/null || echo “MISSING”
+            - generic [ref=e31354]: If you can also tail the last 20 lines of the Hermes gateway log (journalctl -u hermes-agent -n 20 --no-pager, or wherever stderr lands), please include that too. I’m trying to confirm whether the bgos channel adapter is on 0.5.7 yet — the chat is still receiving “Conversation reset” acks at the 5s REST-poll cadence, which suggests the upgrade didn’t take.
+          - generic [ref=e31355]:
+            - generic [ref=e31357]: 3:27 PM
+            - img [ref=e31359]
+            - img [ref=e31363]
+            - img [ref=e31367]
+        - generic [ref=e31375] [cursor=pointer]:
+          - generic [ref=e31379]:
+            - text: "Hey Jeff — what version of hermes_channel_bgos is loaded? Run: python -c “import hermes_channel_bgos; print(hermes_channel_bgos."
+            - generic [ref=e31380]: version
+            - text: )”
+          - generic [ref=e31381]:
+            - generic [ref=e31383]: 3:06 PM
+            - img [ref=e31385]
+            - img [ref=e31389]
+            - img [ref=e31393]
+        - generic [ref=e31399] [cursor=pointer]:
+          - generic [ref=e31402]: Conversation reset. Next message starts fresh.
+          - generic [ref=e31403]:
+            - img [ref=e31405]
+            - img [ref=e31409]
+        - generic [ref=e31419]: /new
+        - generic [ref=e31425] [cursor=pointer]:
+          - generic [ref=e31427]: awesome
+          - generic [ref=e31428]:
+            - generic [ref=e31430]: 3:01 PM
+            - img [ref=e31432]
+            - img [ref=e31436]
+            - img [ref=e31440]
+        - generic [ref=e31446] [cursor=pointer]:
+          - generic [ref=e31449]:
+            - generic [ref=e31451]: Hi~ I don’t recognize you yet!
+            - generic [ref=e31453]: "Here’s your pairing code: UFYYCJE3"
+            - generic [ref=e31455]: "Ask the bot owner to run: hermes pairing approve bgos UFYYCJE3"
+          - generic [ref=e31456]:
+            - img [ref=e31458]
+            - img [ref=e31462]
+        - generic [ref=e31470] [cursor=pointer]:
+          - generic [ref=e31472]: afteer the update restart the gateway
+          - generic [ref=e31473]:
+            - generic [ref=e31475]: 3:00 PM
+            - img [ref=e31477]
+            - img [ref=e31481]
+            - img [ref=e31485]
+        - generic [ref=e31491] [cursor=pointer]:
+          - generic [ref=e31494]: Conversation reset. Next message starts fresh.
+          - img [ref=e31497]
+        - generic [ref=e31503] [cursor=pointer]:
+          - generic [ref=e31506]: Conversation reset. Next message starts fresh.
+          - img [ref=e31509]
+        - generic [ref=e31515] [cursor=pointer]:
+          - generic [ref=e31518]: Conversation reset. Next message starts fresh.
+          - img [ref=e31521]
+        - generic [ref=e31527] [cursor=pointer]:
+          - generic [ref=e31530]: Conversation reset. Next message starts fresh.
+          - img [ref=e31533]
+        - generic [ref=e31539] [cursor=pointer]:
+          - generic [ref=e31542]: Conversation reset. Next message starts fresh.
+          - img [ref=e31545]
+        - generic [ref=e31551] [cursor=pointer]:
+          - generic [ref=e31554]: Conversation reset. Next message starts fresh.
+          - img [ref=e31557]
+        - generic [ref=e31563] [cursor=pointer]:
+          - generic [ref=e31566]: Conversation reset. Next message starts fresh.
+          - img [ref=e31569]
+        - generic [ref=e31575] [cursor=pointer]:
+          - generic [ref=e31578]: Conversation reset. Next message starts fresh.
+          - img [ref=e31581]
+        - generic [ref=e31587] [cursor=pointer]:
+          - generic [ref=e31590]: Conversation reset. Next message starts fresh.
+          - img [ref=e31593]
+        - generic [ref=e31599] [cursor=pointer]:
+          - generic [ref=e31602]: Conversation reset. Next message starts fresh.
+          - img [ref=e31605]
+        - generic [ref=e31611] [cursor=pointer]:
+          - generic [ref=e31614]: Conversation reset. Next message starts fresh.
+          - img [ref=e31617]
+        - generic [ref=e31623] [cursor=pointer]:
+          - generic [ref=e31626]: Conversation reset. Next message starts fresh.
+          - img [ref=e31629]
+        - generic [ref=e31635] [cursor=pointer]:
+          - generic [ref=e31638]: Conversation reset. Next message starts fresh.
+          - img [ref=e31641]
+        - generic [ref=e31647] [cursor=pointer]:
+          - generic [ref=e31650]: Conversation reset. Next message starts fresh.
+          - img [ref=e31653]
+        - generic [ref=e31659] [cursor=pointer]:
+          - generic [ref=e31662]: Conversation reset. Next message starts fresh.
+          - img [ref=e31665]
+        - generic [ref=e31671] [cursor=pointer]:
+          - generic [ref=e31674]: Conversation reset. Next message starts fresh.
+          - img [ref=e31677]
+        - generic [ref=e31683] [cursor=pointer]:
+          - generic [ref=e31686]: Conversation reset. Next message starts fresh.
+          - img [ref=e31689]
+        - generic [ref=e31695] [cursor=pointer]:
+          - generic [ref=e31698]: Conversation reset. Next message starts fresh.
+          - img [ref=e31701]
+        - generic [ref=e31707] [cursor=pointer]:
+          - generic [ref=e31710]: Conversation reset. Next message starts fresh.
+          - img [ref=e31713]
+        - generic [ref=e31719] [cursor=pointer]:
+          - generic [ref=e31722]: Conversation reset. Next message starts fresh.
+          - img [ref=e31725]
+        - generic [ref=e31731] [cursor=pointer]:
+          - generic [ref=e31734]: Conversation reset. Next message starts fresh.
+          - img [ref=e31737]
+        - generic [ref=e31743] [cursor=pointer]:
+          - generic [ref=e31746]: Conversation reset. Next message starts fresh.
+          - img [ref=e31749]
+        - generic [ref=e31755] [cursor=pointer]:
+          - generic [ref=e31758]: Conversation reset. Next message starts fresh.
+          - img [ref=e31761]
+        - generic [ref=e31767] [cursor=pointer]:
+          - generic [ref=e31770]: Conversation reset. Next message starts fresh.
+          - img [ref=e31773]
+        - generic [ref=e31779] [cursor=pointer]:
+          - generic [ref=e31782]: Conversation reset. Next message starts fresh.
+          - img [ref=e31785]
+        - generic [ref=e31791] [cursor=pointer]:
+          - generic [ref=e31794]: Conversation reset. Next message starts fresh.
+          - img [ref=e31797]
+        - generic [ref=e31803] [cursor=pointer]:
+          - generic [ref=e31806]: Conversation reset. Next message starts fresh.
+          - img [ref=e31809]
+        - generic [ref=e31815] [cursor=pointer]:
+          - generic [ref=e31818]: Conversation reset. Next message starts fresh.
+          - img [ref=e31821]
+        - generic [ref=e31827] [cursor=pointer]:
+          - generic [ref=e31830]: Conversation reset. Next message starts fresh.
+          - img [ref=e31833]
+        - generic [ref=e31839] [cursor=pointer]:
+          - generic [ref=e31842]: Conversation reset. Next message starts fresh.
+          - img [ref=e31845]
+        - generic [ref=e31851] [cursor=pointer]:
+          - generic [ref=e31854]: Conversation reset. Next message starts fresh.
+          - img [ref=e31857]
+        - generic [ref=e31863] [cursor=pointer]:
+          - generic [ref=e31866]: Conversation reset. Next message starts fresh.
+          - img [ref=e31869]
+        - generic [ref=e31875] [cursor=pointer]:
+          - generic [ref=e31878]: Conversation reset. Next message starts fresh.
+          - img [ref=e31881]
+        - generic [ref=e31887] [cursor=pointer]:
+          - generic [ref=e31890]: Conversation reset. Next message starts fresh.
+          - img [ref=e31893]
+        - generic [ref=e31899] [cursor=pointer]:
+          - generic [ref=e31902]: Conversation reset. Next message starts fresh.
+          - img [ref=e31905]
+        - generic [ref=e31911] [cursor=pointer]:
+          - generic [ref=e31914]: Conversation reset. Next message starts fresh.
+          - img [ref=e31917]
+        - generic [ref=e31923] [cursor=pointer]:
+          - generic [ref=e31926]: Conversation reset. Next message starts fresh.
+          - img [ref=e31929]
+        - generic [ref=e31935] [cursor=pointer]:
+          - generic [ref=e31938]: Conversation reset. Next message starts fresh.
+          - img [ref=e31941]
+        - generic [ref=e31947] [cursor=pointer]:
+          - generic [ref=e31950]: Conversation reset. Next message starts fresh.
+          - img [ref=e31953]
+        - generic [ref=e31959] [cursor=pointer]:
+          - generic [ref=e31962]: Conversation reset. Next message starts fresh.
+          - img [ref=e31965]
+        - generic [ref=e31971] [cursor=pointer]:
+          - generic [ref=e31974]: Conversation reset. Next message starts fresh.
+          - img [ref=e31977]
+        - generic [ref=e31983] [cursor=pointer]:
+          - generic [ref=e31986]: Conversation reset. Next message starts fresh.
+          - img [ref=e31989]
+        - generic [ref=e31995] [cursor=pointer]:
+          - generic [ref=e31998]: Conversation reset. Next message starts fresh.
+          - img [ref=e32001]
+        - generic [ref=e32007] [cursor=pointer]:
+          - generic [ref=e32010]: Conversation reset. Next message starts fresh.
+          - img [ref=e32013]
+        - generic [ref=e32019] [cursor=pointer]:
+          - generic [ref=e32022]: Conversation reset. Next message starts fresh.
+          - img [ref=e32025]
+        - generic [ref=e32031] [cursor=pointer]:
+          - generic [ref=e32034]: Conversation reset. Next message starts fresh.
+          - img [ref=e32037]
+        - generic [ref=e32043] [cursor=pointer]:
+          - generic [ref=e32046]: Conversation reset. Next message starts fresh.
+          - img [ref=e32049]
+        - generic [ref=e32055] [cursor=pointer]:
+          - generic [ref=e32058]: Conversation reset. Next message starts fresh.
+          - img [ref=e32061]
+        - generic [ref=e32067] [cursor=pointer]:
+          - generic [ref=e32070]: Conversation reset. Next message starts fresh.
+          - img [ref=e32073]
+        - generic [ref=e32079] [cursor=pointer]:
+          - generic [ref=e32082]: Conversation reset. Next message starts fresh.
+          - img [ref=e32085]
+        - generic [ref=e32091] [cursor=pointer]:
+          - generic [ref=e32094]: Conversation reset. Next message starts fresh.
+          - img [ref=e32097]
+        - generic [ref=e32103] [cursor=pointer]:
+          - generic [ref=e32106]: Conversation reset. Next message starts fresh.
+          - img [ref=e32109]
+        - generic [ref=e32115] [cursor=pointer]:
+          - generic [ref=e32118]: Conversation reset. Next message starts fresh.
+          - img [ref=e32121]
+        - generic [ref=e32127] [cursor=pointer]:
+          - generic [ref=e32130]: Conversation reset. Next message starts fresh.
+          - img [ref=e32133]
+        - generic [ref=e32139] [cursor=pointer]:
+          - generic [ref=e32142]: Conversation reset. Next message starts fresh.
+          - img [ref=e32145]
+        - generic [ref=e32151] [cursor=pointer]:
+          - generic [ref=e32154]: Conversation reset. Next message starts fresh.
+          - img [ref=e32157]
+        - generic [ref=e32163] [cursor=pointer]:
+          - generic [ref=e32166]: Conversation reset. Next message starts fresh.
+          - img [ref=e32169]
+        - generic [ref=e32175] [cursor=pointer]:
+          - generic [ref=e32178]: Conversation reset. Next message starts fresh.
+          - img [ref=e32181]
+        - generic [ref=e32187] [cursor=pointer]:
+          - generic [ref=e32190]: Conversation reset. Next message starts fresh.
+          - img [ref=e32193]
+        - generic [ref=e32199] [cursor=pointer]:
+          - generic [ref=e32202]: Conversation reset. Next message starts fresh.
+          - img [ref=e32205]
+        - generic [ref=e32211] [cursor=pointer]:
+          - generic [ref=e32214]: Conversation reset. Next message starts fresh.
+          - img [ref=e32217]
+        - generic [ref=e32223] [cursor=pointer]:
+          - generic [ref=e32226]: Conversation reset. Next message starts fresh.
+          - img [ref=e32229]
+        - generic [ref=e32235] [cursor=pointer]:
+          - generic [ref=e32238]: Conversation reset. Next message starts fresh.
+          - img [ref=e32241]
+        - generic [ref=e32247] [cursor=pointer]:
+          - generic [ref=e32250]: Conversation reset. Next message starts fresh.
+          - img [ref=e32253]
+        - generic [ref=e32259] [cursor=pointer]:
+          - generic [ref=e32262]: Conversation reset. Next message starts fresh.
+          - img [ref=e32265]
+        - generic [ref=e32271] [cursor=pointer]:
+          - generic [ref=e32274]: Conversation reset. Next message starts fresh.
+          - img [ref=e32277]
+        - generic [ref=e32283] [cursor=pointer]:
+          - generic [ref=e32286]: Conversation reset. Next message starts fresh.
+          - img [ref=e32289]
+        - generic [ref=e32295] [cursor=pointer]:
+          - generic [ref=e32298]: Conversation reset. Next message starts fresh.
+          - img [ref=e32301]
+        - generic [ref=e32307] [cursor=pointer]:
+          - generic [ref=e32310]: Conversation reset. Next message starts fresh.
+          - img [ref=e32313]
+        - generic [ref=e32319] [cursor=pointer]:
+          - generic [ref=e32322]: Conversation reset. Next message starts fresh.
+          - img [ref=e32325]
+        - generic [ref=e32331] [cursor=pointer]:
+          - generic [ref=e32334]: Conversation reset. Next message starts fresh.
+          - img [ref=e32337]
+        - generic [ref=e32343] [cursor=pointer]:
+          - generic [ref=e32346]: Conversation reset. Next message starts fresh.
+          - img [ref=e32349]
+        - generic [ref=e32355] [cursor=pointer]:
+          - generic [ref=e32358]: Conversation reset. Next message starts fresh.
+          - img [ref=e32361]
+        - generic [ref=e32367] [cursor=pointer]:
+          - generic [ref=e32370]: Conversation reset. Next message starts fresh.
+          - img [ref=e32373]
+        - generic [ref=e32379] [cursor=pointer]:
+          - generic [ref=e32382]: Conversation reset. Next message starts fresh.
+          - img [ref=e32385]
+        - generic [ref=e32391] [cursor=pointer]:
+          - generic [ref=e32394]: Conversation reset. Next message starts fresh.
+          - img [ref=e32397]
+        - generic [ref=e32403] [cursor=pointer]:
+          - generic [ref=e32406]: Conversation reset. Next message starts fresh.
+          - img [ref=e32409]
+        - generic [ref=e32415] [cursor=pointer]:
+          - generic [ref=e32418]: Conversation reset. Next message starts fresh.
+          - img [ref=e32421]
+        - generic [ref=e32427] [cursor=pointer]:
+          - generic [ref=e32430]: Conversation reset. Next message starts fresh.
+          - img [ref=e32433]
+        - generic [ref=e32439] [cursor=pointer]:
+          - generic [ref=e32442]: Conversation reset. Next message starts fresh.
+          - img [ref=e32445]
+        - generic [ref=e32451] [cursor=pointer]:
+          - generic [ref=e32454]: Conversation reset. Next message starts fresh.
+          - img [ref=e32457]
+        - generic [ref=e32463] [cursor=pointer]:
+          - generic [ref=e32466]: Conversation reset. Next message starts fresh.
+          - img [ref=e32469]
+        - generic [ref=e32475] [cursor=pointer]:
+          - generic [ref=e32478]: Conversation reset. Next message starts fresh.
+          - img [ref=e32481]
+        - generic [ref=e32487] [cursor=pointer]:
+          - generic [ref=e32490]: Conversation reset. Next message starts fresh.
+          - img [ref=e32493]
+        - generic [ref=e32499] [cursor=pointer]:
+          - generic [ref=e32502]: Conversation reset. Next message starts fresh.
+          - img [ref=e32505]
+        - generic [ref=e32511] [cursor=pointer]:
+          - generic [ref=e32514]: Conversation reset. Next message starts fresh.
+          - img [ref=e32517]
+        - generic [ref=e32523] [cursor=pointer]:
+          - generic [ref=e32526]: Conversation reset. Next message starts fresh.
+          - img [ref=e32529]
+        - generic [ref=e32535] [cursor=pointer]:
+          - generic [ref=e32538]: Conversation reset. Next message starts fresh.
+          - img [ref=e32541]
+        - generic [ref=e32547] [cursor=pointer]:
+          - generic [ref=e32550]: Conversation reset. Next message starts fresh.
+          - img [ref=e32553]
+        - generic [ref=e32559] [cursor=pointer]:
+          - generic [ref=e32562]: Conversation reset. Next message starts fresh.
+          - img [ref=e32565]
+        - generic [ref=e32571] [cursor=pointer]:
+          - generic [ref=e32574]: Conversation reset. Next message starts fresh.
+          - img [ref=e32577]
+        - generic [ref=e32583] [cursor=pointer]:
+          - generic [ref=e32586]: Conversation reset. Next message starts fresh.
+          - img [ref=e32589]
+        - generic [ref=e32595] [cursor=pointer]:
+          - generic [ref=e32598]: Conversation reset. Next message starts fresh.
+          - img [ref=e32601]
+        - generic [ref=e32607] [cursor=pointer]:
+          - generic [ref=e32610]: Conversation reset. Next message starts fresh.
+          - img [ref=e32613]
+        - generic [ref=e32619] [cursor=pointer]:
+          - generic [ref=e32622]: Conversation reset. Next message starts fresh.
+          - img [ref=e32625]
+        - generic [ref=e32631] [cursor=pointer]:
+          - generic [ref=e32634]: Conversation reset. Next message starts fresh.
+          - img [ref=e32637]
+        - generic [ref=e32643] [cursor=pointer]:
+          - generic [ref=e32646]: Conversation reset. Next message starts fresh.
+          - img [ref=e32649]
+        - generic [ref=e32655] [cursor=pointer]:
+          - generic [ref=e32658]: Conversation reset. Next message starts fresh.
+          - img [ref=e32661]
+        - generic [ref=e32667] [cursor=pointer]:
+          - generic [ref=e32670]: Conversation reset. Next message starts fresh.
+          - img [ref=e32673]
+        - generic [ref=e32679] [cursor=pointer]:
+          - generic [ref=e32682]: Conversation reset. Next message starts fresh.
+          - img [ref=e32685]
+        - generic [ref=e32691] [cursor=pointer]:
+          - generic [ref=e32694]: Conversation reset. Next message starts fresh.
+          - img [ref=e32697]
+        - generic [ref=e32703] [cursor=pointer]:
+          - generic [ref=e32706]: Conversation reset. Next message starts fresh.
+          - img [ref=e32709]
+        - generic [ref=e32715] [cursor=pointer]:
+          - generic [ref=e32718]: Conversation reset. Next message starts fresh.
+          - img [ref=e32721]
+        - generic [ref=e32727] [cursor=pointer]:
+          - generic [ref=e32730]: Conversation reset. Next message starts fresh.
+          - img [ref=e32733]
+        - generic [ref=e32739] [cursor=pointer]:
+          - generic [ref=e32742]: Conversation reset. Next message starts fresh.
+          - img [ref=e32745]
+        - generic [ref=e32751] [cursor=pointer]:
+          - generic [ref=e32754]: Conversation reset. Next message starts fresh.
+          - img [ref=e32757]
+        - generic [ref=e32763] [cursor=pointer]:
+          - generic [ref=e32766]: Conversation reset. Next message starts fresh.
+          - img [ref=e32769]
+        - generic [ref=e32775] [cursor=pointer]:
+          - generic [ref=e32778]: Conversation reset. Next message starts fresh.
+          - img [ref=e32781]
+        - generic [ref=e32787] [cursor=pointer]:
+          - generic [ref=e32790]: Conversation reset. Next message starts fresh.
+          - img [ref=e32793]
+        - generic [ref=e32799] [cursor=pointer]:
+          - generic [ref=e32802]: Conversation reset. Next message starts fresh.
+          - img [ref=e32805]
+        - generic [ref=e32811] [cursor=pointer]:
+          - generic [ref=e32814]: Conversation reset. Next message starts fresh.
+          - img [ref=e32817]
+        - generic [ref=e32823] [cursor=pointer]:
+          - generic [ref=e32826]: Conversation reset. Next message starts fresh.
+          - img [ref=e32829]
+        - generic [ref=e32835] [cursor=pointer]:
+          - generic [ref=e32838]: Conversation reset. Next message starts fresh.
+          - img [ref=e32841]
+        - generic [ref=e32847] [cursor=pointer]:
+          - generic [ref=e32850]: Conversation reset. Next message starts fresh.
+          - img [ref=e32853]
+        - generic [ref=e32859] [cursor=pointer]:
+          - generic [ref=e32862]: Conversation reset. Next message starts fresh.
+          - img [ref=e32865]
+        - generic [ref=e32871] [cursor=pointer]:
+          - generic [ref=e32874]: Conversation reset. Next message starts fresh.
+          - img [ref=e32877]
+        - generic [ref=e32883] [cursor=pointer]:
+          - generic [ref=e32886]: Conversation reset. Next message starts fresh.
+          - img [ref=e32889]
+        - generic [ref=e32895] [cursor=pointer]:
+          - generic [ref=e32898]: Conversation reset. Next message starts fresh.
+          - img [ref=e32901]
+        - generic [ref=e32907] [cursor=pointer]:
+          - generic [ref=e32910]: Conversation reset. Next message starts fresh.
+          - img [ref=e32913]
+        - generic [ref=e32919] [cursor=pointer]:
+          - generic [ref=e32922]: Conversation reset. Next message starts fresh.
+          - img [ref=e32925]
+        - generic [ref=e32931] [cursor=pointer]:
+          - generic [ref=e32934]: Conversation reset. Next message starts fresh.
+          - img [ref=e32937]
+        - generic [ref=e32943] [cursor=pointer]:
+          - generic [ref=e32946]: Conversation reset. Next message starts fresh.
+          - img [ref=e32949]
+        - generic [ref=e32955] [cursor=pointer]:
+          - generic [ref=e32958]: Conversation reset. Next message starts fresh.
+          - img [ref=e32961]
+        - generic [ref=e32967] [cursor=pointer]:
+          - generic [ref=e32970]: Conversation reset. Next message starts fresh.
+          - img [ref=e32973]
+        - generic [ref=e32979] [cursor=pointer]:
+          - generic [ref=e32982]: Conversation reset. Next message starts fresh.
+          - img [ref=e32985]
+        - generic [ref=e32991] [cursor=pointer]:
+          - generic [ref=e32994]: Conversation reset. Next message starts fresh.
+          - img [ref=e32997]
+        - generic [ref=e33003] [cursor=pointer]:
+          - generic [ref=e33006]: Conversation reset. Next message starts fresh.
+          - img [ref=e33009]
+        - generic [ref=e33015] [cursor=pointer]:
+          - generic [ref=e33018]: Conversation reset. Next message starts fresh.
+          - img [ref=e33021]
+        - generic [ref=e33027] [cursor=pointer]:
+          - generic [ref=e33030]: Conversation reset. Next message starts fresh.
+          - img [ref=e33033]
+        - generic [ref=e33039] [cursor=pointer]:
+          - generic [ref=e33042]: Conversation reset. Next message starts fresh.
+          - img [ref=e33045]
+        - generic [ref=e33051] [cursor=pointer]:
+          - generic [ref=e33054]: Conversation reset. Next message starts fresh.
+          - img [ref=e33057]
+        - generic [ref=e33063] [cursor=pointer]:
+          - generic [ref=e33066]: Conversation reset. Next message starts fresh.
+          - img [ref=e33069]
+        - generic [ref=e33075] [cursor=pointer]:
+          - generic [ref=e33078]: Conversation reset. Next message starts fresh.
+          - img [ref=e33081]
+        - generic [ref=e33087] [cursor=pointer]:
+          - generic [ref=e33090]: Conversation reset. Next message starts fresh.
+          - img [ref=e33093]
+        - generic [ref=e33099] [cursor=pointer]:
+          - generic [ref=e33102]: Conversation reset. Next message starts fresh.
+          - img [ref=e33105]
+        - generic [ref=e33111] [cursor=pointer]:
+          - generic [ref=e33114]: Conversation reset. Next message starts fresh.
+          - img [ref=e33117]
+        - generic [ref=e33123] [cursor=pointer]:
+          - generic [ref=e33126]: Conversation reset. Next message starts fresh.
+          - img [ref=e33129]
+        - generic [ref=e33135] [cursor=pointer]:
+          - generic [ref=e33138]: Conversation reset. Next message starts fresh.
+          - img [ref=e33141]
+        - generic [ref=e33147] [cursor=pointer]:
+          - generic [ref=e33150]: Conversation reset. Next message starts fresh.
+          - img [ref=e33153]
+        - generic [ref=e33159] [cursor=pointer]:
+          - generic [ref=e33162]: Conversation reset. Next message starts fresh.
+          - img [ref=e33165]
+        - generic [ref=e33171] [cursor=pointer]:
+          - generic [ref=e33174]: Conversation reset. Next message starts fresh.
+          - img [ref=e33177]
+        - generic [ref=e33183] [cursor=pointer]:
+          - generic [ref=e33186]: Conversation reset. Next message starts fresh.
+          - img [ref=e33189]
+        - generic [ref=e33195] [cursor=pointer]:
+          - generic [ref=e33198]: Conversation reset. Next message starts fresh.
+          - img [ref=e33201]
+        - generic [ref=e33207] [cursor=pointer]:
+          - generic [ref=e33210]: Conversation reset. Next message starts fresh.
+          - img [ref=e33213]
+        - generic [ref=e33219] [cursor=pointer]:
+          - generic [ref=e33222]: Conversation reset. Next message starts fresh.
+          - img [ref=e33225]
+        - generic [ref=e33231] [cursor=pointer]:
+          - generic [ref=e33234]: Conversation reset. Next message starts fresh.
+          - img [ref=e33237]
+        - generic [ref=e33243] [cursor=pointer]:
+          - generic [ref=e33246]: Conversation reset. Next message starts fresh.
+          - img [ref=e33249]
+        - generic [ref=e33255] [cursor=pointer]:
+          - generic [ref=e33258]: Conversation reset. Next message starts fresh.
+          - img [ref=e33261]
+        - generic [ref=e33267] [cursor=pointer]:
+          - generic [ref=e33270]: Conversation reset. Next message starts fresh.
+          - img [ref=e33273]
+        - generic [ref=e33279] [cursor=pointer]:
+          - generic [ref=e33282]: Conversation reset. Next message starts fresh.
+          - img [ref=e33285]
+        - generic [ref=e33291] [cursor=pointer]:
+          - generic [ref=e33294]: Conversation reset. Next message starts fresh.
+          - img [ref=e33297]
+        - generic [ref=e33303] [cursor=pointer]:
+          - generic [ref=e33306]: Conversation reset. Next message starts fresh.
+          - img [ref=e33309]
+        - generic [ref=e33315] [cursor=pointer]:
+          - generic [ref=e33318]: Conversation reset. Next message starts fresh.
+          - img [ref=e33321]
+        - generic [ref=e33327] [cursor=pointer]:
+          - generic [ref=e33330]: Conversation reset. Next message starts fresh.
+          - img [ref=e33333]
+        - generic [ref=e33339] [cursor=pointer]:
+          - generic [ref=e33342]: Conversation reset. Next message starts fresh.
+          - img [ref=e33345]
+        - generic [ref=e33351] [cursor=pointer]:
+          - generic [ref=e33354]: Conversation reset. Next message starts fresh.
+          - img [ref=e33357]
+        - generic [ref=e33363] [cursor=pointer]:
+          - generic [ref=e33366]: Conversation reset. Next message starts fresh.
+          - img [ref=e33369]
+        - generic [ref=e33375] [cursor=pointer]:
+          - generic [ref=e33378]: Conversation reset. Next message starts fresh.
+          - img [ref=e33381]
+        - generic [ref=e33387] [cursor=pointer]:
+          - generic [ref=e33390]: Conversation reset. Next message starts fresh.
+          - img [ref=e33393]
+        - generic [ref=e33399] [cursor=pointer]:
+          - generic [ref=e33402]: Conversation reset. Next message starts fresh.
+          - img [ref=e33405]
+        - generic [ref=e33411] [cursor=pointer]:
+          - generic [ref=e33414]: Conversation reset. Next message starts fresh.
+          - img [ref=e33417]
+        - generic [ref=e33423] [cursor=pointer]:
+          - generic [ref=e33426]: Conversation reset. Next message starts fresh.
+          - img [ref=e33429]
+        - generic [ref=e33435] [cursor=pointer]:
+          - generic [ref=e33438]: Conversation reset. Next message starts fresh.
+          - img [ref=e33441]
+        - generic [ref=e33447] [cursor=pointer]:
+          - generic [ref=e33450]: Conversation reset. Next message starts fresh.
+          - img [ref=e33453]
+        - generic [ref=e33459] [cursor=pointer]:
+          - generic [ref=e33462]: Conversation reset. Next message starts fresh.
+          - img [ref=e33465]
+        - generic [ref=e33471] [cursor=pointer]:
+          - generic [ref=e33474]: Conversation reset. Next message starts fresh.
+          - img [ref=e33477]
+        - generic [ref=e33483] [cursor=pointer]:
+          - generic [ref=e33486]: Conversation reset. Next message starts fresh.
+          - img [ref=e33489]
+        - generic [ref=e33495] [cursor=pointer]:
+          - generic [ref=e33498]: Conversation reset. Next message starts fresh.
+          - img [ref=e33501]
+        - generic [ref=e33507] [cursor=pointer]:
+          - generic [ref=e33510]: Conversation reset. Next message starts fresh.
+          - img [ref=e33513]
+        - generic [ref=e33519] [cursor=pointer]:
+          - generic [ref=e33522]: Conversation reset. Next message starts fresh.
+          - img [ref=e33525]
+        - generic [ref=e33531] [cursor=pointer]:
+          - generic [ref=e33534]: Conversation reset. Next message starts fresh.
+          - img [ref=e33537]
+        - generic [ref=e33543] [cursor=pointer]:
+          - generic [ref=e33546]: Conversation reset. Next message starts fresh.
+          - img [ref=e33549]
+        - generic [ref=e33555] [cursor=pointer]:
+          - generic [ref=e33558]: Conversation reset. Next message starts fresh.
+          - img [ref=e33561]
+        - generic [ref=e33567] [cursor=pointer]:
+          - generic [ref=e33570]: Conversation reset. Next message starts fresh.
+          - img [ref=e33573]
+        - generic [ref=e33579] [cursor=pointer]:
+          - generic [ref=e33582]: Conversation reset. Next message starts fresh.
+          - img [ref=e33585]
+        - generic [ref=e33591] [cursor=pointer]:
+          - generic [ref=e33594]: Conversation reset. Next message starts fresh.
+          - img [ref=e33597]
+        - generic [ref=e33603] [cursor=pointer]:
+          - generic [ref=e33606]: Conversation reset. Next message starts fresh.
+          - img [ref=e33609]
+        - generic [ref=e33615] [cursor=pointer]:
+          - generic [ref=e33618]: Conversation reset. Next message starts fresh.
+          - img [ref=e33621]
+        - generic [ref=e33627] [cursor=pointer]:
+          - generic [ref=e33630]: Conversation reset. Next message starts fresh.
+          - img [ref=e33633]
+        - generic [ref=e33639] [cursor=pointer]:
+          - generic [ref=e33642]: Conversation reset. Next message starts fresh.
+          - img [ref=e33645]
+        - generic [ref=e33651] [cursor=pointer]:
+          - generic [ref=e33654]: Conversation reset. Next message starts fresh.
+          - img [ref=e33657]
+        - generic [ref=e33663] [cursor=pointer]:
+          - generic [ref=e33666]: Conversation reset. Next message starts fresh.
+          - img [ref=e33669]
+        - generic [ref=e33675] [cursor=pointer]:
+          - generic [ref=e33678]: Conversation reset. Next message starts fresh.
+          - img [ref=e33681]
+        - generic [ref=e33687] [cursor=pointer]:
+          - generic [ref=e33690]: Conversation reset. Next message starts fresh.
+          - img [ref=e33693]
+        - generic [ref=e33699] [cursor=pointer]:
+          - generic [ref=e33702]: Conversation reset. Next message starts fresh.
+          - img [ref=e33705]
+        - generic [ref=e33711] [cursor=pointer]:
+          - generic [ref=e33714]: Conversation reset. Next message starts fresh.
+          - img [ref=e33717]
+        - generic [ref=e33723] [cursor=pointer]:
+          - generic [ref=e33726]: Conversation reset. Next message starts fresh.
+          - img [ref=e33729]
+        - generic [ref=e33735] [cursor=pointer]:
+          - generic [ref=e33738]: Conversation reset. Next message starts fresh.
+          - img [ref=e33741]
+        - generic [ref=e33747] [cursor=pointer]:
+          - generic [ref=e33750]: Conversation reset. Next message starts fresh.
+          - img [ref=e33753]
+        - generic [ref=e33759] [cursor=pointer]:
+          - generic [ref=e33762]: Conversation reset. Next message starts fresh.
+          - img [ref=e33765]
+        - generic [ref=e33771] [cursor=pointer]:
+          - generic [ref=e33774]: Conversation reset. Next message starts fresh.
+          - img [ref=e33777]
+        - generic [ref=e33783] [cursor=pointer]:
+          - generic [ref=e33786]: Conversation reset. Next message starts fresh.
+          - img [ref=e33789]
+        - generic [ref=e33795] [cursor=pointer]:
+          - generic [ref=e33798]: Conversation reset. Next message starts fresh.
+          - img [ref=e33801]
+        - generic [ref=e33807] [cursor=pointer]:
+          - generic [ref=e33810]: Conversation reset. Next message starts fresh.
+          - img [ref=e33813]
+        - generic [ref=e33819] [cursor=pointer]:
+          - generic [ref=e33822]: Conversation reset. Next message starts fresh.
+          - img [ref=e33825]
+        - generic [ref=e33831] [cursor=pointer]:
+          - generic [ref=e33834]: Conversation reset. Next message starts fresh.
+          - img [ref=e33837]
+        - generic [ref=e33843] [cursor=pointer]:
+          - generic [ref=e33846]: Conversation reset. Next message starts fresh.
+          - img [ref=e33849]
+        - generic [ref=e33855] [cursor=pointer]:
+          - generic [ref=e33858]: Conversation reset. Next message starts fresh.
+          - img [ref=e33861]
+        - generic [ref=e33867] [cursor=pointer]:
+          - generic [ref=e33870]: Conversation reset. Next message starts fresh.
+          - img [ref=e33873]
+        - generic [ref=e33879] [cursor=pointer]:
+          - generic [ref=e33882]: Conversation reset. Next message starts fresh.
+          - img [ref=e33885]
+        - generic [ref=e33891] [cursor=pointer]:
+          - generic [ref=e33894]: Conversation reset. Next message starts fresh.
+          - img [ref=e33897]
+        - generic [ref=e33903] [cursor=pointer]:
+          - generic [ref=e33906]: Conversation reset. Next message starts fresh.
+          - img [ref=e33909]
+        - generic [ref=e33915] [cursor=pointer]:
+          - generic [ref=e33918]: Conversation reset. Next message starts fresh.
+          - img [ref=e33921]
+        - generic [ref=e33927] [cursor=pointer]:
+          - generic [ref=e33930]: Conversation reset. Next message starts fresh.
+          - img [ref=e33933]
+        - generic [ref=e33939] [cursor=pointer]:
+          - generic [ref=e33942]: Conversation reset. Next message starts fresh.
+          - img [ref=e33945]
+        - generic [ref=e33951] [cursor=pointer]:
+          - generic [ref=e33954]: Conversation reset. Next message starts fresh.
+          - img [ref=e33957]
+        - generic [ref=e33963] [cursor=pointer]:
+          - generic [ref=e33966]: Conversation reset. Next message starts fresh.
+          - img [ref=e33969]
+        - generic [ref=e33975] [cursor=pointer]:
+          - generic [ref=e33978]: Conversation reset. Next message starts fresh.
+          - img [ref=e33981]
+        - generic [ref=e33987] [cursor=pointer]:
+          - generic [ref=e33990]: Conversation reset. Next message starts fresh.
+          - img [ref=e33993]
+        - generic [ref=e33999] [cursor=pointer]:
+          - generic [ref=e34002]: Conversation reset. Next message starts fresh.
+          - img [ref=e34005]
+        - generic [ref=e34011] [cursor=pointer]:
+          - generic [ref=e34014]: Conversation reset. Next message starts fresh.
+          - img [ref=e34017]
+        - generic [ref=e34023] [cursor=pointer]:
+          - generic [ref=e34026]: Conversation reset. Next message starts fresh.
+          - img [ref=e34029]
+        - generic [ref=e34035] [cursor=pointer]:
+          - generic [ref=e34038]: Conversation reset. Next message starts fresh.
+          - img [ref=e34041]
+        - generic [ref=e34047] [cursor=pointer]:
+          - generic [ref=e34050]: Conversation reset. Next message starts fresh.
+          - img [ref=e34053]
+        - generic [ref=e34059] [cursor=pointer]:
+          - generic [ref=e34062]: Conversation reset. Next message starts fresh.
+          - img [ref=e34065]
+        - generic [ref=e34071] [cursor=pointer]:
+          - generic [ref=e34074]: Conversation reset. Next message starts fresh.
+          - img [ref=e34077]
+        - generic [ref=e34083] [cursor=pointer]:
+          - generic [ref=e34086]: Conversation reset. Next message starts fresh.
+          - img [ref=e34089]
+        - generic [ref=e34095] [cursor=pointer]:
+          - generic [ref=e34098]: Conversation reset. Next message starts fresh.
+          - img [ref=e34101]
+        - generic [ref=e34107] [cursor=pointer]:
+          - generic [ref=e34110]: Conversation reset. Next message starts fresh.
+          - img [ref=e34113]
+        - generic [ref=e34119] [cursor=pointer]:
+          - generic [ref=e34122]: Conversation reset. Next message starts fresh.
+          - img [ref=e34125]
+        - generic [ref=e34131] [cursor=pointer]:
+          - generic [ref=e34134]: Conversation reset. Next message starts fresh.
+          - img [ref=e34137]
+        - generic [ref=e34143] [cursor=pointer]:
+          - generic [ref=e34146]: Conversation reset. Next message starts fresh.
+          - img [ref=e34149]
+        - generic [ref=e34155] [cursor=pointer]:
+          - generic [ref=e34158]: Conversation reset. Next message starts fresh.
+          - img [ref=e34161]
+        - generic [ref=e34167] [cursor=pointer]:
+          - generic [ref=e34170]: Conversation reset. Next message starts fresh.
+          - img [ref=e34173]
+        - generic [ref=e34179] [cursor=pointer]:
+          - generic [ref=e34182]: Conversation reset. Next message starts fresh.
+          - img [ref=e34185]
+        - generic [ref=e34191] [cursor=pointer]:
+          - generic [ref=e34194]: Conversation reset. Next message starts fresh.
+          - img [ref=e34197]
+        - generic [ref=e34203] [cursor=pointer]:
+          - generic [ref=e34206]: Conversation reset. Next message starts fresh.
+          - img [ref=e34209]
+        - generic [ref=e34215] [cursor=pointer]:
+          - generic [ref=e34218]: Conversation reset. Next message starts fresh.
+          - img [ref=e34221]
+        - generic [ref=e34227] [cursor=pointer]:
+          - generic [ref=e34230]: Conversation reset. Next message starts fresh.
+          - img [ref=e34233]
+        - generic [ref=e34239] [cursor=pointer]:
+          - generic [ref=e34242]: Conversation reset. Next message starts fresh.
+          - img [ref=e34245]
+        - generic [ref=e34251] [cursor=pointer]:
+          - generic [ref=e34254]: Conversation reset. Next message starts fresh.
+          - img [ref=e34257]
+        - generic [ref=e34263] [cursor=pointer]:
+          - generic [ref=e34266]: Conversation reset. Next message starts fresh.
+          - img [ref=e34269]
+        - generic [ref=e34275] [cursor=pointer]:
+          - generic [ref=e34278]: Conversation reset. Next message starts fresh.
+          - img [ref=e34281]
+        - generic [ref=e34287] [cursor=pointer]:
+          - generic [ref=e34290]: Conversation reset. Next message starts fresh.
+          - img [ref=e34293]
+        - generic [ref=e34299] [cursor=pointer]:
+          - generic [ref=e34302]: Conversation reset. Next message starts fresh.
+          - img [ref=e34305]
+        - generic [ref=e34311] [cursor=pointer]:
+          - generic [ref=e34314]: Conversation reset. Next message starts fresh.
+          - img [ref=e34317]
+        - generic [ref=e34323] [cursor=pointer]:
+          - generic [ref=e34326]: Conversation reset. Next message starts fresh.
+          - img [ref=e34329]
+        - generic [ref=e34335] [cursor=pointer]:
+          - generic [ref=e34338]: Conversation reset. Next message starts fresh.
+          - img [ref=e34341]
+        - generic [ref=e34347] [cursor=pointer]:
+          - generic [ref=e34350]: Conversation reset. Next message starts fresh.
+          - img [ref=e34353]
+        - generic [ref=e34359] [cursor=pointer]:
+          - generic [ref=e34362]: Conversation reset. Next message starts fresh.
+          - img [ref=e34365]
+        - generic [ref=e34371] [cursor=pointer]:
+          - generic [ref=e34374]: Conversation reset. Next message starts fresh.
+          - img [ref=e34377]
+        - generic [ref=e34383] [cursor=pointer]:
+          - generic [ref=e34386]: Conversation reset. Next message starts fresh.
+          - img [ref=e34389]
+        - generic [ref=e34395] [cursor=pointer]:
+          - generic [ref=e34398]: Conversation reset. Next message starts fresh.
+          - img [ref=e34401]
+        - generic [ref=e34407] [cursor=pointer]:
+          - generic [ref=e34410]: Conversation reset. Next message starts fresh.
+          - img [ref=e34413]
+        - generic [ref=e34419] [cursor=pointer]:
+          - generic [ref=e34422]: Conversation reset. Next message starts fresh.
+          - img [ref=e34425]
+        - generic [ref=e34431] [cursor=pointer]:
+          - generic [ref=e34434]: Conversation reset. Next message starts fresh.
+          - img [ref=e34437]
+        - generic [ref=e34443] [cursor=pointer]:
+          - generic [ref=e34446]: Conversation reset. Next message starts fresh.
+          - img [ref=e34449]
+        - generic [ref=e34455] [cursor=pointer]:
+          - generic [ref=e34458]: Conversation reset. Next message starts fresh.
+          - img [ref=e34461]
+        - generic [ref=e34467] [cursor=pointer]:
+          - generic [ref=e34470]: Conversation reset. Next message starts fresh.
+          - img [ref=e34473]
+        - generic [ref=e34479] [cursor=pointer]:
+          - generic [ref=e34482]: Conversation reset. Next message starts fresh.
+          - img [ref=e34485]
+        - generic [ref=e34491] [cursor=pointer]:
+          - generic [ref=e34494]: Conversation reset. Next message starts fresh.
+          - img [ref=e34497]
+        - generic [ref=e34503] [cursor=pointer]:
+          - generic [ref=e34506]: Conversation reset. Next message starts fresh.
+          - img [ref=e34509]
+        - generic [ref=e34515] [cursor=pointer]:
+          - generic [ref=e34518]: Conversation reset. Next message starts fresh.
+          - img [ref=e34521]
+        - generic [ref=e34527] [cursor=pointer]:
+          - generic [ref=e34530]: Conversation reset. Next message starts fresh.
+          - img [ref=e34533]
+        - generic [ref=e34539] [cursor=pointer]:
+          - generic [ref=e34542]: Conversation reset. Next message starts fresh.
+          - img [ref=e34545]
+        - generic [ref=e34551] [cursor=pointer]:
+          - generic [ref=e34554]: Conversation reset. Next message starts fresh.
+          - img [ref=e34557]
+        - generic [ref=e34563] [cursor=pointer]:
+          - generic [ref=e34566]: Conversation reset. Next message starts fresh.
+          - img [ref=e34569]
+        - generic [ref=e34575] [cursor=pointer]:
+          - generic [ref=e34578]: Conversation reset. Next message starts fresh.
+          - img [ref=e34581]
+        - generic [ref=e34587] [cursor=pointer]:
+          - generic [ref=e34590]: Conversation reset. Next message starts fresh.
+          - img [ref=e34593]
+        - generic [ref=e34599] [cursor=pointer]:
+          - generic [ref=e34602]: Conversation reset. Next message starts fresh.
+          - img [ref=e34605]
+        - generic [ref=e34611] [cursor=pointer]:
+          - generic [ref=e34614]: Conversation reset. Next message starts fresh.
+          - img [ref=e34617]
+        - generic [ref=e34623] [cursor=pointer]:
+          - generic [ref=e34626]: Conversation reset. Next message starts fresh.
+          - img [ref=e34629]
+        - generic [ref=e34635] [cursor=pointer]:
+          - generic [ref=e34638]: Conversation reset. Next message starts fresh.
+          - img [ref=e34641]
+        - generic [ref=e34647] [cursor=pointer]:
+          - generic [ref=e34650]: Conversation reset. Next message starts fresh.
+          - img [ref=e34653]
+        - generic [ref=e34659] [cursor=pointer]:
+          - generic [ref=e34662]: Conversation reset. Next message starts fresh.
+          - img [ref=e34665]
+        - generic [ref=e34671] [cursor=pointer]:
+          - generic [ref=e34674]: Conversation reset. Next message starts fresh.
+          - img [ref=e34677]
+        - generic [ref=e34683] [cursor=pointer]:
+          - generic [ref=e34686]: Conversation reset. Next message starts fresh.
+          - img [ref=e34689]
+        - generic [ref=e34695] [cursor=pointer]:
+          - generic [ref=e34698]: Conversation reset. Next message starts fresh.
+          - img [ref=e34701]
+        - generic [ref=e34707] [cursor=pointer]:
+          - generic [ref=e34710]: Conversation reset. Next message starts fresh.
+          - img [ref=e34713]
+        - generic [ref=e34719] [cursor=pointer]:
+          - generic [ref=e34722]: Conversation reset. Next message starts fresh.
+          - img [ref=e34725]
+        - generic [ref=e34731] [cursor=pointer]:
+          - generic [ref=e34734]: Conversation reset. Next message starts fresh.
+          - img [ref=e34737]
+        - generic [ref=e34743] [cursor=pointer]:
+          - generic [ref=e34746]: Conversation reset. Next message starts fresh.
+          - img [ref=e34749]
+        - generic [ref=e34755] [cursor=pointer]:
+          - generic [ref=e34758]: Conversation reset. Next message starts fresh.
+          - img [ref=e34761]
+        - generic [ref=e34767] [cursor=pointer]:
+          - generic [ref=e34770]: Conversation reset. Next message starts fresh.
+          - img [ref=e34773]
+        - generic [ref=e34779] [cursor=pointer]:
+          - generic [ref=e34782]: Conversation reset. Next message starts fresh.
+          - img [ref=e34785]
+        - generic [ref=e34791] [cursor=pointer]:
+          - generic [ref=e34794]: Conversation reset. Next message starts fresh.
+          - img [ref=e34797]
+        - generic [ref=e34803] [cursor=pointer]:
+          - generic [ref=e34806]: Conversation reset. Next message starts fresh.
+          - img [ref=e34809]
+        - generic [ref=e34815] [cursor=pointer]:
+          - generic [ref=e34818]: Conversation reset. Next message starts fresh.
+          - img [ref=e34821]
+        - generic [ref=e34827] [cursor=pointer]:
+          - generic [ref=e34830]: Conversation reset. Next message starts fresh.
+          - img [ref=e34833]
+        - generic [ref=e34839] [cursor=pointer]:
+          - generic [ref=e34842]: Conversation reset. Next message starts fresh.
+          - img [ref=e34845]
+        - generic [ref=e34851] [cursor=pointer]:
+          - generic [ref=e34854]: Conversation reset. Next message starts fresh.
+          - img [ref=e34857]
+        - generic [ref=e34863] [cursor=pointer]:
+          - generic [ref=e34866]: Conversation reset. Next message starts fresh.
+          - img [ref=e34869]
+        - generic [ref=e34875] [cursor=pointer]:
+          - generic [ref=e34878]: Conversation reset. Next message starts fresh.
+          - img [ref=e34881]
+        - generic [ref=e34887] [cursor=pointer]:
+          - generic [ref=e34890]: Conversation reset. Next message starts fresh.
+          - img [ref=e34893]
+        - generic [ref=e34899] [cursor=pointer]:
+          - generic [ref=e34902]: Conversation reset. Next message starts fresh.
+          - img [ref=e34905]
+        - generic [ref=e34911] [cursor=pointer]:
+          - generic [ref=e34914]: Conversation reset. Next message starts fresh.
+          - img [ref=e34917]
+        - generic [ref=e34923] [cursor=pointer]:
+          - generic [ref=e34926]: Conversation reset. Next message starts fresh.
+          - img [ref=e34929]
+        - generic [ref=e34935] [cursor=pointer]:
+          - generic [ref=e34938]: Conversation reset. Next message starts fresh.
+          - img [ref=e34941]
+        - generic [ref=e34947] [cursor=pointer]:
+          - generic [ref=e34950]: Conversation reset. Next message starts fresh.
+          - img [ref=e34953]
+        - generic [ref=e34959] [cursor=pointer]:
+          - generic [ref=e34962]: Conversation reset. Next message starts fresh.
+          - img [ref=e34965]
+        - generic [ref=e34971] [cursor=pointer]:
+          - generic [ref=e34974]: Conversation reset. Next message starts fresh.
+          - img [ref=e34977]
+        - generic [ref=e34983] [cursor=pointer]:
+          - generic [ref=e34986]: Conversation reset. Next message starts fresh.
+          - img [ref=e34989]
+        - generic [ref=e34995] [cursor=pointer]:
+          - generic [ref=e34998]: Conversation reset. Next message starts fresh.
+          - img [ref=e35001]
+        - generic [ref=e35007] [cursor=pointer]:
+          - generic [ref=e35010]: Conversation reset. Next message starts fresh.
+          - img [ref=e35013]
+        - generic [ref=e35019] [cursor=pointer]:
+          - generic [ref=e35022]: Conversation reset. Next message starts fresh.
+          - img [ref=e35025]
+        - generic [ref=e35031] [cursor=pointer]:
+          - generic [ref=e35034]: Conversation reset. Next message starts fresh.
+          - img [ref=e35037]
+        - generic [ref=e35043] [cursor=pointer]:
+          - generic [ref=e35046]: Conversation reset. Next message starts fresh.
+          - img [ref=e35049]
+        - generic [ref=e35055] [cursor=pointer]:
+          - generic [ref=e35058]: Conversation reset. Next message starts fresh.
+          - img [ref=e35061]
+        - generic [ref=e35067] [cursor=pointer]:
+          - generic [ref=e35070]: Conversation reset. Next message starts fresh.
+          - img [ref=e35073]
+        - generic [ref=e35079] [cursor=pointer]:
+          - generic [ref=e35082]: Conversation reset. Next message starts fresh.
+          - img [ref=e35085]
+        - generic [ref=e35091] [cursor=pointer]:
+          - generic [ref=e35094]: Conversation reset. Next message starts fresh.
+          - img [ref=e35097]
+        - generic [ref=e35103] [cursor=pointer]:
+          - generic [ref=e35106]: Conversation reset. Next message starts fresh.
+          - img [ref=e35109]
+        - generic [ref=e35115] [cursor=pointer]:
+          - generic [ref=e35118]: Conversation reset. Next message starts fresh.
+          - img [ref=e35121]
+        - generic [ref=e35127] [cursor=pointer]:
+          - generic [ref=e35130]: Conversation reset. Next message starts fresh.
+          - img [ref=e35133]
+        - generic [ref=e35139] [cursor=pointer]:
+          - generic [ref=e35142]: Conversation reset. Next message starts fresh.
+          - img [ref=e35145]
+        - generic [ref=e35151] [cursor=pointer]:
+          - generic [ref=e35154]: Conversation reset. Next message starts fresh.
+          - img [ref=e35157]
+        - generic [ref=e35163] [cursor=pointer]:
+          - generic [ref=e35166]: Conversation reset. Next message starts fresh.
+          - img [ref=e35169]
+        - generic [ref=e35175] [cursor=pointer]:
+          - generic [ref=e35178]: Conversation reset. Next message starts fresh.
+          - img [ref=e35181]
+        - generic [ref=e35187] [cursor=pointer]:
+          - generic [ref=e35190]: Conversation reset. Next message starts fresh.
+          - img [ref=e35193]
+        - generic [ref=e35199] [cursor=pointer]:
+          - generic [ref=e35202]: Conversation reset. Next message starts fresh.
+          - img [ref=e35205]
+        - generic [ref=e35211] [cursor=pointer]:
+          - generic [ref=e35214]: Conversation reset. Next message starts fresh.
+          - img [ref=e35217]
+        - generic [ref=e35223] [cursor=pointer]:
+          - generic [ref=e35226]: Conversation reset. Next message starts fresh.
+          - img [ref=e35229]
+        - generic [ref=e35235] [cursor=pointer]:
+          - generic [ref=e35238]: Conversation reset. Next message starts fresh.
+          - img [ref=e35241]
+        - generic [ref=e35247] [cursor=pointer]:
+          - generic [ref=e35250]: Conversation reset. Next message starts fresh.
+          - img [ref=e35253]
+        - generic [ref=e35259] [cursor=pointer]:
+          - generic [ref=e35262]: Conversation reset. Next message starts fresh.
+          - img [ref=e35265]
+        - generic [ref=e35271] [cursor=pointer]:
+          - generic [ref=e35274]: Conversation reset. Next message starts fresh.
+          - img [ref=e35277]
+        - generic [ref=e35283] [cursor=pointer]:
+          - generic [ref=e35286]: Conversation reset. Next message starts fresh.
+          - img [ref=e35289]
+        - generic [ref=e35295] [cursor=pointer]:
+          - generic [ref=e35298]: Conversation reset. Next message starts fresh.
+          - img [ref=e35301]
+        - generic [ref=e35307] [cursor=pointer]:
+          - generic [ref=e35310]: Conversation reset. Next message starts fresh.
+          - img [ref=e35313]
+        - generic [ref=e35319] [cursor=pointer]:
+          - generic [ref=e35322]: Conversation reset. Next message starts fresh.
+          - img [ref=e35325]
+        - generic [ref=e35331] [cursor=pointer]:
+          - generic [ref=e35334]: Conversation reset. Next message starts fresh.
+          - img [ref=e35337]
+        - generic [ref=e35343] [cursor=pointer]:
+          - generic [ref=e35346]: Conversation reset. Next message starts fresh.
+          - img [ref=e35349]
+        - generic [ref=e35355] [cursor=pointer]:
+          - generic [ref=e35358]: Conversation reset. Next message starts fresh.
+          - img [ref=e35361]
+        - generic [ref=e35367] [cursor=pointer]:
+          - generic [ref=e35370]: Conversation reset. Next message starts fresh.
+          - img [ref=e35373]
+        - generic [ref=e35379] [cursor=pointer]:
+          - generic [ref=e35382]: Conversation reset. Next message starts fresh.
+          - img [ref=e35385]
+        - generic [ref=e35391] [cursor=pointer]:
+          - generic [ref=e35394]: Conversation reset. Next message starts fresh.
+          - img [ref=e35397]
+        - generic [ref=e35403] [cursor=pointer]:
+          - generic [ref=e35406]: Conversation reset. Next message starts fresh.
+          - img [ref=e35409]
+        - generic [ref=e35415] [cursor=pointer]:
+          - generic [ref=e35418]: Conversation reset. Next message starts fresh.
+          - img [ref=e35421]
+        - generic [ref=e35427] [cursor=pointer]:
+          - generic [ref=e35430]: Conversation reset. Next message starts fresh.
+          - img [ref=e35433]
+        - generic [ref=e35439] [cursor=pointer]:
+          - generic [ref=e35442]: Conversation reset. Next message starts fresh.
+          - img [ref=e35445]
+        - generic [ref=e35451] [cursor=pointer]:
+          - generic [ref=e35454]: Conversation reset. Next message starts fresh.
+          - img [ref=e35457]
+        - generic [ref=e35463] [cursor=pointer]:
+          - generic [ref=e35466]: Conversation reset. Next message starts fresh.
+          - img [ref=e35469]
+        - generic [ref=e35475] [cursor=pointer]:
+          - generic [ref=e35478]: Conversation reset. Next message starts fresh.
+          - img [ref=e35481]
+        - generic [ref=e35487] [cursor=pointer]:
+          - generic [ref=e35490]: Conversation reset. Next message starts fresh.
+          - img [ref=e35493]
+        - generic [ref=e35499] [cursor=pointer]:
+          - generic [ref=e35502]: Conversation reset. Next message starts fresh.
+          - img [ref=e35505]
+        - generic [ref=e35511] [cursor=pointer]:
+          - generic [ref=e35514]: Conversation reset. Next message starts fresh.
+          - img [ref=e35517]
+        - generic [ref=e35523] [cursor=pointer]:
+          - generic [ref=e35526]: Conversation reset. Next message starts fresh.
+          - img [ref=e35529]
+        - generic [ref=e35535] [cursor=pointer]:
+          - generic [ref=e35538]: Conversation reset. Next message starts fresh.
+          - img [ref=e35541]
+        - generic [ref=e35547] [cursor=pointer]:
+          - generic [ref=e35550]: Conversation reset. Next message starts fresh.
+          - img [ref=e35553]
+        - generic [ref=e35559] [cursor=pointer]:
+          - generic [ref=e35562]: Conversation reset. Next message starts fresh.
+          - img [ref=e35565]
+        - generic [ref=e35571] [cursor=pointer]:
+          - generic [ref=e35574]: Conversation reset. Next message starts fresh.
+          - img [ref=e35577]
+        - generic [ref=e35583] [cursor=pointer]:
+          - generic [ref=e35586]: Conversation reset. Next message starts fresh.
+          - img [ref=e35589]
+        - generic [ref=e35595] [cursor=pointer]:
+          - generic [ref=e35598]: Conversation reset. Next message starts fresh.
+          - img [ref=e35601]
+        - generic [ref=e35607] [cursor=pointer]:
+          - generic [ref=e35610]: Conversation reset. Next message starts fresh.
+          - img [ref=e35613]
+        - generic [ref=e35619] [cursor=pointer]:
+          - generic [ref=e35622]: Conversation reset. Next message starts fresh.
+          - img [ref=e35625]
+        - generic [ref=e35631] [cursor=pointer]:
+          - generic [ref=e35634]: Conversation reset. Next message starts fresh.
+          - img [ref=e35637]
+        - generic [ref=e35643] [cursor=pointer]:
+          - generic [ref=e35646]: Conversation reset. Next message starts fresh.
+          - img [ref=e35649]
+        - generic [ref=e35655] [cursor=pointer]:
+          - generic [ref=e35658]: Conversation reset. Next message starts fresh.
+          - img [ref=e35661]
+        - generic [ref=e35667] [cursor=pointer]:
+          - generic [ref=e35670]: Conversation reset. Next message starts fresh.
+          - img [ref=e35673]
+        - generic [ref=e35679] [cursor=pointer]:
+          - generic [ref=e35682]: Conversation reset. Next message starts fresh.
+          - img [ref=e35685]
+        - generic [ref=e35691] [cursor=pointer]:
+          - generic [ref=e35694]: Conversation reset. Next message starts fresh.
+          - img [ref=e35697]
+        - generic [ref=e35703] [cursor=pointer]:
+          - generic [ref=e35706]: Conversation reset. Next message starts fresh.
+          - img [ref=e35709]
+        - generic [ref=e35715] [cursor=pointer]:
+          - generic [ref=e35718]: Conversation reset. Next message starts fresh.
+          - img [ref=e35721]
+        - generic [ref=e35727] [cursor=pointer]:
+          - generic [ref=e35730]: Conversation reset. Next message starts fresh.
+          - img [ref=e35733]
+        - generic [ref=e35739] [cursor=pointer]:
+          - generic [ref=e35742]: Conversation reset. Next message starts fresh.
+          - img [ref=e35745]
+        - generic [ref=e35751] [cursor=pointer]:
+          - generic [ref=e35754]: Conversation reset. Next message starts fresh.
+          - img [ref=e35757]
+        - generic [ref=e35763] [cursor=pointer]:
+          - generic [ref=e35766]: Conversation reset. Next message starts fresh.
+          - img [ref=e35769]
+        - generic [ref=e35775] [cursor=pointer]:
+          - generic [ref=e35778]: Conversation reset. Next message starts fresh.
+          - img [ref=e35781]
+        - generic [ref=e35787] [cursor=pointer]:
+          - generic [ref=e35790]: Conversation reset. Next message starts fresh.
+          - img [ref=e35793]
+        - generic [ref=e35799] [cursor=pointer]:
+          - generic [ref=e35802]: Conversation reset. Next message starts fresh.
+          - img [ref=e35805]
+        - generic [ref=e35811] [cursor=pointer]:
+          - generic [ref=e35814]: Conversation reset. Next message starts fresh.
+          - img [ref=e35817]
+        - generic [ref=e35823] [cursor=pointer]:
+          - generic [ref=e35826]: Conversation reset. Next message starts fresh.
+          - img [ref=e35829]
+        - generic [ref=e35835] [cursor=pointer]:
+          - generic [ref=e35838]: Conversation reset. Next message starts fresh.
+          - img [ref=e35841]
+        - generic [ref=e35847] [cursor=pointer]:
+          - generic [ref=e35850]: Conversation reset. Next message starts fresh.
+          - img [ref=e35853]
+        - generic [ref=e35859] [cursor=pointer]:
+          - generic [ref=e35862]: Conversation reset. Next message starts fresh.
+          - img [ref=e35865]
+        - generic [ref=e35871] [cursor=pointer]:
+          - generic [ref=e35874]: Conversation reset. Next message starts fresh.
+          - img [ref=e35877]
+        - generic [ref=e35883] [cursor=pointer]:
+          - generic [ref=e35886]: Conversation reset. Next message starts fresh.
+          - img [ref=e35889]
+        - generic [ref=e35895] [cursor=pointer]:
+          - generic [ref=e35898]: Conversation reset. Next message starts fresh.
+          - img [ref=e35901]
+        - generic [ref=e35907] [cursor=pointer]:
+          - generic [ref=e35910]: Conversation reset. Next message starts fresh.
+          - img [ref=e35913]
+        - generic [ref=e35919] [cursor=pointer]:
+          - generic [ref=e35922]: Conversation reset. Next message starts fresh.
+          - img [ref=e35925]
+        - generic [ref=e35931] [cursor=pointer]:
+          - generic [ref=e35934]: Conversation reset. Next message starts fresh.
+          - img [ref=e35937]
+        - generic [ref=e35943] [cursor=pointer]:
+          - generic [ref=e35946]: Conversation reset. Next message starts fresh.
+          - img [ref=e35949]
+        - generic [ref=e35955] [cursor=pointer]:
+          - generic [ref=e35958]: Conversation reset. Next message starts fresh.
+          - img [ref=e35961]
+        - generic [ref=e35967] [cursor=pointer]:
+          - generic [ref=e35970]: Conversation reset. Next message starts fresh.
+          - img [ref=e35973]
+        - generic [ref=e35979] [cursor=pointer]:
+          - generic [ref=e35982]: Conversation reset. Next message starts fresh.
+          - img [ref=e35985]
+        - generic [ref=e35991] [cursor=pointer]:
+          - generic [ref=e35994]: Conversation reset. Next message starts fresh.
+          - img [ref=e35997]
+        - generic [ref=e36003] [cursor=pointer]:
+          - generic [ref=e36006]: Conversation reset. Next message starts fresh.
+          - img [ref=e36009]
+        - generic [ref=e36015] [cursor=pointer]:
+          - generic [ref=e36018]: Conversation reset. Next message starts fresh.
+          - img [ref=e36021]
+        - generic [ref=e36027] [cursor=pointer]:
+          - generic [ref=e36030]: Conversation reset. Next message starts fresh.
+          - img [ref=e36033]
+        - generic [ref=e36039] [cursor=pointer]:
+          - generic [ref=e36042]: Conversation reset. Next message starts fresh.
+          - img [ref=e36045]
+        - generic [ref=e36051] [cursor=pointer]:
+          - generic [ref=e36054]: Conversation reset. Next message starts fresh.
+          - img [ref=e36057]
+        - generic [ref=e36063] [cursor=pointer]:
+          - generic [ref=e36066]: Conversation reset. Next message starts fresh.
+          - img [ref=e36069]
+        - generic [ref=e36075] [cursor=pointer]:
+          - generic [ref=e36078]: Conversation reset. Next message starts fresh.
+          - img [ref=e36081]
+        - generic [ref=e36087] [cursor=pointer]:
+          - generic [ref=e36090]: Conversation reset. Next message starts fresh.
+          - img [ref=e36093]
+        - generic [ref=e36099] [cursor=pointer]:
+          - generic [ref=e36102]: Conversation reset. Next message starts fresh.
+          - img [ref=e36105]
+        - generic [ref=e36111] [cursor=pointer]:
+          - generic [ref=e36114]: Conversation reset. Next message starts fresh.
+          - img [ref=e36117]
+        - generic [ref=e36123] [cursor=pointer]:
+          - generic [ref=e36126]: Conversation reset. Next message starts fresh.
+          - img [ref=e36129]
+        - generic [ref=e36135] [cursor=pointer]:
+          - generic [ref=e36138]: Conversation reset. Next message starts fresh.
+          - img [ref=e36141]
+        - generic [ref=e36147] [cursor=pointer]:
+          - generic [ref=e36150]: Conversation reset. Next message starts fresh.
+          - img [ref=e36153]
+        - generic [ref=e36159] [cursor=pointer]:
+          - generic [ref=e36162]: Conversation reset. Next message starts fresh.
+          - img [ref=e36165]
+        - generic [ref=e36171] [cursor=pointer]:
+          - generic [ref=e36174]: Conversation reset. Next message starts fresh.
+          - img [ref=e36177]
+        - generic [ref=e36183] [cursor=pointer]:
+          - generic [ref=e36186]: Conversation reset. Next message starts fresh.
+          - img [ref=e36189]
+        - generic [ref=e36195] [cursor=pointer]:
+          - generic [ref=e36198]: Conversation reset. Next message starts fresh.
+          - img [ref=e36201]
+        - generic [ref=e36207] [cursor=pointer]:
+          - generic [ref=e36210]: Conversation reset. Next message starts fresh.
+          - img [ref=e36213]
+        - generic [ref=e36219] [cursor=pointer]:
+          - generic [ref=e36222]: Conversation reset. Next message starts fresh.
+          - img [ref=e36225]
+        - generic [ref=e36231] [cursor=pointer]:
+          - generic [ref=e36234]: Conversation reset. Next message starts fresh.
+          - img [ref=e36237]
+        - generic [ref=e36243] [cursor=pointer]:
+          - generic [ref=e36246]: Conversation reset. Next message starts fresh.
+          - img [ref=e36249]
+        - generic [ref=e36255] [cursor=pointer]:
+          - generic [ref=e36258]: Conversation reset. Next message starts fresh.
+          - img [ref=e36261]
+        - generic [ref=e36267] [cursor=pointer]:
+          - generic [ref=e36270]: Conversation reset. Next message starts fresh.
+          - img [ref=e36273]
+        - generic [ref=e36279] [cursor=pointer]:
+          - generic [ref=e36282]: Conversation reset. Next message starts fresh.
+          - img [ref=e36285]
+        - generic [ref=e36291] [cursor=pointer]:
+          - generic [ref=e36294]: Conversation reset. Next message starts fresh.
+          - img [ref=e36297]
+        - generic [ref=e36303] [cursor=pointer]:
+          - generic [ref=e36306]: Conversation reset. Next message starts fresh.
+          - img [ref=e36309]
+        - generic [ref=e36315] [cursor=pointer]:
+          - generic [ref=e36318]: Conversation reset. Next message starts fresh.
+          - img [ref=e36321]
+        - generic [ref=e36327] [cursor=pointer]:
+          - generic [ref=e36330]: Conversation reset. Next message starts fresh.
+          - img [ref=e36333]
+        - generic [ref=e36339] [cursor=pointer]:
+          - generic [ref=e36342]: Conversation reset. Next message starts fresh.
+          - img [ref=e36345]
+        - generic [ref=e36351] [cursor=pointer]:
+          - generic [ref=e36354]: Conversation reset. Next message starts fresh.
+          - img [ref=e36357]
+        - generic [ref=e36363] [cursor=pointer]:
+          - generic [ref=e36366]: Conversation reset. Next message starts fresh.
+          - img [ref=e36369]
+        - generic [ref=e36375] [cursor=pointer]:
+          - generic [ref=e36378]: Conversation reset. Next message starts fresh.
+          - img [ref=e36381]
+        - generic [ref=e36387] [cursor=pointer]:
+          - generic [ref=e36390]: Conversation reset. Next message starts fresh.
+          - img [ref=e36393]
+        - generic [ref=e36399] [cursor=pointer]:
+          - generic [ref=e36402]: Conversation reset. Next message starts fresh.
+          - img [ref=e36405]
+        - generic [ref=e36411] [cursor=pointer]:
+          - generic [ref=e36414]: Conversation reset. Next message starts fresh.
+          - img [ref=e36417]
+        - generic [ref=e36423] [cursor=pointer]:
+          - generic [ref=e36426]: Conversation reset. Next message starts fresh.
+          - img [ref=e36429]
+        - generic [ref=e36435] [cursor=pointer]:
+          - generic [ref=e36438]: Conversation reset. Next message starts fresh.
+          - img [ref=e36441]
+        - generic [ref=e36447] [cursor=pointer]:
+          - generic [ref=e36450]: Conversation reset. Next message starts fresh.
+          - img [ref=e36453]
+      - generic [ref=e1010]:
+        - generic [ref=e1012]:
+          - textbox "Type a message..." [active] [ref=e1014]
+          - generic [ref=e1015]:
+            - img [ref=e1017] [cursor=pointer]
+            - img [ref=e36459] [cursor=pointer]
+            - img [ref=e1026] [cursor=pointer]
+        - generic [ref=e1027]: Guardian Jeff can make mistakes. Please double-check responses.

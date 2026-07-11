@@ -1,0 +1,446 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e38652]:
+      - generic [ref=e38653]:
+        - generic [ref=e38654]:
+          - generic [ref=e38656] [cursor=pointer]: ☰
+          - img [ref=e38658] [cursor=pointer]
+          - generic [ref=e38662] [cursor=pointer]: ←
+          - generic [ref=e38664] [cursor=pointer]: →
+        - generic [ref=e38665]:
+          - generic [ref=e38667] [cursor=pointer]: —
+          - generic [ref=e38669] [cursor=pointer]: □
+          - generic [ref=e38671] [cursor=pointer]: ✕
+      - generic [ref=e38678]:
+        - generic [ref=e38680]:
+          - generic [ref=e38681]:
+            - generic [ref=e38682]:
+              - img [ref=e38683]
+              - generic [ref=e38691]: BGOS
+            - generic [ref=e38692] [cursor=pointer]:
+              - img [ref=e38693]
+              - generic [ref=e38703]: Command Center
+            - generic [ref=e38704] [cursor=pointer]:
+              - img [ref=e38705]
+              - generic [ref=e38707]: Chats
+            - generic [ref=e38708] [cursor=pointer]:
+              - img [ref=e38709]
+              - generic [ref=e38713]: Meetings
+            - generic [ref=e38714] [cursor=pointer]:
+              - img [ref=e38715]
+              - generic [ref=e38717]: Saved
+          - generic [ref=e38719]:
+            - generic [ref=e38721]: Agents
+            - generic [ref=e38722]:
+              - generic [ref=e38725]:
+                - generic [ref=e38726] [cursor=pointer]:
+                  - img [ref=e38730]
+                  - generic [ref=e38732]: David
+                - img [ref=e38735] [cursor=pointer]
+              - generic [ref=e38741]:
+                - generic [ref=e38742] [cursor=pointer]:
+                  - img [ref=e38746]
+                  - generic [ref=e38748]: Ava
+                - img [ref=e38751] [cursor=pointer]
+              - generic [ref=e38757]:
+                - generic [ref=e38758] [cursor=pointer]:
+                  - img [ref=e38762]
+                  - generic [ref=e38764]: n8n Guru
+                - img [ref=e38767] [cursor=pointer]
+              - generic [ref=e38773]:
+                - generic [ref=e38774] [cursor=pointer]:
+                  - img [ref=e38778]
+                  - generic [ref=e38780]: Mario
+                - img [ref=e38783] [cursor=pointer]
+              - generic [ref=e38789]:
+                - generic [ref=e38790] [cursor=pointer]:
+                  - img [ref=e38794]
+                  - generic [ref=e38796]: Nicole
+                - img [ref=e38799] [cursor=pointer]
+              - generic [ref=e38805]:
+                - generic [ref=e38806] [cursor=pointer]:
+                  - img [ref=e38810]
+                  - generic [ref=e38812]: Hades
+                - img [ref=e38815] [cursor=pointer]
+              - generic [ref=e38821]:
+                - generic [ref=e38822] [cursor=pointer]:
+                  - img [ref=e38826]
+                  - generic [ref=e38828]: Guardian Jeff
+                - img [ref=e38831] [cursor=pointer]
+              - generic [ref=e38837]:
+                - generic [ref=e38838] [cursor=pointer]:
+                  - img [ref=e38842]
+                  - generic [ref=e38844]: Even R Guru
+                - img [ref=e38847] [cursor=pointer]
+              - generic [ref=e38853]:
+                - generic [ref=e38854] [cursor=pointer]:
+                  - img [ref=e38858]
+                  - generic [ref=e38860]: Vihan
+                - img [ref=e38863] [cursor=pointer]
+              - generic [ref=e38869]:
+                - generic [ref=e38870] [cursor=pointer]:
+                  - img [ref=e38874]
+                  - generic [ref=e38876]: Autonomee
+                - img [ref=e38879] [cursor=pointer]
+              - generic [ref=e38885]:
+                - generic [ref=e38886] [cursor=pointer]:
+                  - img [ref=e38890]
+                  - generic [ref=e38892]: BGOS Newsletter
+                - img [ref=e38895] [cursor=pointer]
+              - generic [ref=e38901]:
+                - generic [ref=e38902] [cursor=pointer]:
+                  - img [ref=e38906]
+                  - generic [ref=e38908]: Ramy
+                - img [ref=e38911] [cursor=pointer]
+              - generic [ref=e38917]:
+                - generic [ref=e38918] [cursor=pointer]:
+                  - img [ref=e38922]
+                  - generic [ref=e38924]: Echo
+                - img [ref=e38927] [cursor=pointer]
+              - generic [ref=e38933]:
+                - generic [ref=e38934] [cursor=pointer]:
+                  - img [ref=e38938]
+                  - generic [ref=e38940]: Ava n8n
+                - img [ref=e38943] [cursor=pointer]
+              - generic [ref=e38949]:
+                - generic [ref=e38954] [cursor=pointer]: Mark
+                - img [ref=e38957] [cursor=pointer]
+              - generic [ref=e38963]:
+                - generic [ref=e38968] [cursor=pointer]: Erika
+                - img [ref=e38971] [cursor=pointer]
+            - generic [ref=e38977] [cursor=pointer]: Recents
+          - generic [ref=e38978] [cursor=pointer]:
+            - generic [ref=e38979]: +
+            - generic [ref=e38980]: New assistant
+          - generic [ref=e38981] [cursor=pointer]:
+            - generic [ref=e38982]: 💡
+            - generic [ref=e38983]: Share feedback
+          - generic [ref=e38985]:
+            - generic [ref=e38986] [cursor=pointer]:
+              - img [ref=e38989]
+              - generic [ref=e38990]:
+                - generic [ref=e38991]: Kc Chaanine
+                - generic [ref=e38992]: Free Plan
+            - img [ref=e38994] [cursor=pointer]
+            - img [ref=e39000] [cursor=pointer]
+        - generic [ref=e39011]:
+          - img [ref=e39015] [cursor=pointer]
+          - generic [ref=e39018]:
+            - generic [ref=e39022] [cursor=pointer]:
+              - generic [ref=e39025]:
+                - generic [ref=e39027]:
+                  - text: Done! 📧 Email sent to
+                  - generic [ref=e39028]: ap.uae@pjprestaurants.com
+                  - text: "(Sobia), with Karim CC’d, asking about the Big FM February payment:"
+                - generic [ref=e39029]:
+                  - generic [ref=e39030]:
+                    - generic [ref=e39031]: •
+                    - generic [ref=e39033]:
+                      - generic [ref=e39034]: "Invoice:"
+                      - text: BIG/INV/2026/5015
+                  - generic [ref=e39035]:
+                    - generic [ref=e39036]: •
+                    - generic [ref=e39038]:
+                      - generic [ref=e39039]: "Amount:"
+                      - text: AED 105,000 incl. VAT
+                  - generic [ref=e39040]:
+                    - generic [ref=e39041]: •
+                    - generic [ref=e39043]:
+                      - generic [ref=e39044]: "Status:"
+                      - text: Overdue
+                - generic [ref=e39046]: Asked her to confirm payment status and share the transfer slip if it’s already been paid so I can update the records. I’ll let you know when she replies!
+              - generic [ref=e39047]:
+                - img [ref=e39049]
+                - img [ref=e39053]
+            - generic [ref=e39061] [cursor=pointer]:
+              - generic [ref=e39063]: can you send an email to sobia to ask her regarding bigFM payments as they are showing as overdue for you ?>
+              - generic [ref=e39064]:
+                - generic [ref=e39066]: 4:43 PM
+                - img [ref=e39068]
+                - img [ref=e39072]
+                - img [ref=e39076]
+            - generic [ref=e39082] [cursor=pointer]:
+              - generic [ref=e39085]:
+                - generic [ref=e39087]:
+                  - text: Found them! They’re on our system as
+                  - generic [ref=e39088]: Fun Asia Network Film TV and Radio Production Services LLC
+                  - text: — and their invoices come in as
+                  - generic [ref=e39089]: BIG FM
+                  - text: "(invoice prefix BIG/INV). Here’s the full picture:"
+                - generic [ref=e39093]: Annual Radio/TV Campaign — AED 100,000/month excl. VAT | PO/26/000100
+                - generic [ref=e39094]:
+                  - generic [ref=e39096]:
+                    - generic [ref=e39098]: Month
+                    - generic [ref=e39100]: Record
+                    - generic [ref=e39102]: Status
+                    - generic [ref=e39104]: "Invoice #"
+                    - generic [ref=e39106]: Paid Date
+                  - generic [ref=e39107]:
+                    - generic [ref=e39108]:
+                      - generic [ref=e39110]: Dec 2025
+                      - generic [ref=e39112]: BUD-202601-00029
+                      - generic [ref=e39114]: ✅ Invoice Paid
+                      - generic [ref=e39116]: —
+                      - generic [ref=e39118]: 2 Feb 2026
+                    - generic [ref=e39119]:
+                      - generic [ref=e39121]: Jan 2026
+                      - generic [ref=e39123]: BUD-202601-00018
+                      - generic [ref=e39125]: ✅ Invoice Paid
+                      - generic [ref=e39127]: BIG/INV/2026/5014
+                      - generic [ref=e39129]: 18 Mar 2026
+                    - generic [ref=e39130]:
+                      - generic [ref=e39132]: Feb 2026
+                      - generic [ref=e39134]: BUD-202601-00019
+                      - generic [ref=e39136]:
+                        - text: 🔴
+                        - generic [ref=e39137]: Overdue
+                      - generic [ref=e39139]: BIG/INV/2026/5015
+                      - generic [ref=e39141]: —
+                    - generic [ref=e39142]:
+                      - generic [ref=e39144]: Mar 2026
+                      - generic [ref=e39146]: BUD-202601-00023
+                      - generic [ref=e39148]: 🟡 PO Sent
+                      - generic [ref=e39150]: —
+                      - generic [ref=e39152]: —
+                    - generic [ref=e39153]:
+                      - generic [ref=e39155]: Apr 2026
+                      - generic [ref=e39157]: BUD-202601-00022
+                      - generic [ref=e39159]: 🟡 PO Sent
+                      - generic [ref=e39161]: —
+                      - generic [ref=e39163]: —
+                    - generic [ref=e39164]:
+                      - generic [ref=e39166]: May 2026
+                      - generic [ref=e39168]: BUD-202601-00021
+                      - generic [ref=e39170]: 🟡 PO Sent
+                      - generic [ref=e39172]: —
+                      - generic [ref=e39174]: —
+                    - generic [ref=e39175]:
+                      - generic [ref=e39177]: Jun–Dec 2026
+                      - generic [ref=e39179]: BUD-202601-00020 to 00028
+                      - generic [ref=e39181]: 🟡 PO Sent
+                      - generic [ref=e39183]: —
+                      - generic [ref=e39185]: —
+                - generic [ref=e39189]: "Key points:"
+                - generic [ref=e39190]:
+                  - generic [ref=e39191]:
+                    - generic [ref=e39192]: •
+                    - generic [ref=e39194]:
+                      - text: Only
+                      - generic [ref=e39195]: January
+                      - text: has been paid recently (18 Mar 2026)
+                  - generic [ref=e39196]:
+                    - generic [ref=e39197]: •
+                    - generic [ref=e39199]:
+                      - generic [ref=e39200]: February is Overdue
+                      - text: — invoice BIG/INV/2026/5015 received but no payment recorded
+                  - generic [ref=e39201]:
+                    - generic [ref=e39202]: •
+                    - generic [ref=e39204]: March through December — PO sent but no invoices received yet
+                  - generic [ref=e39205]:
+                    - generic [ref=e39206]: •
+                    - generic [ref=e39208]: It’s a 12-month deal at AED 100K/month (AED 1.2M total excl. VAT)
+                - generic [ref=e39210]: Want me to chase the February payment or follow up on missing invoices?
+              - generic [ref=e39211]:
+                - img [ref=e39213]
+                - img [ref=e39217]
+            - generic [ref=e39225] [cursor=pointer]:
+              - generic [ref=e39227]: Erica, can you check for me please the Fun Asia Network or BigFM? I don't know what they're called on our system. If we paid them anything recently.
+              - generic [ref=e39228]:
+                - generic [ref=e39230]: 4:43 PM
+                - img [ref=e39232]
+                - img [ref=e39236]
+                - img [ref=e39240]
+            - generic [ref=e39246] [cursor=pointer]:
+              - generic [ref=e39249]: Glad it's helpful! 😊 Let me know if you need anything else — budget reports, follow-ups, or anything in between. 👋
+              - generic [ref=e39250]:
+                - img [ref=e39252]
+                - img [ref=e39256]
+            - generic [ref=e39264] [cursor=pointer]:
+              - generic [ref=e39266]: fantastic thanks
+              - generic [ref=e39267]:
+                - generic [ref=e39269]: 7:05 PM
+                - img [ref=e39271]
+                - img [ref=e39275]
+                - img [ref=e39279]
+            - generic [ref=e39285] [cursor=pointer]:
+              - generic [ref=e39288]:
+                - generic [ref=e39290]:
+                  - text: Here’s your
+                  - generic [ref=e39291]: April 2026 Marketing Expenses
+                  - text: "breakdown (all excl. VAT):"
+                - generic [ref=e39294]: 📊 By Category
+                - generic [ref=e39295]:
+                  - generic [ref=e39297]:
+                    - generic [ref=e39299]: Category
+                    - generic [ref=e39301]: Amount (AED)
+                  - generic [ref=e39302]:
+                    - generic [ref=e39303]:
+                      - generic [ref=e39305]: Agency Fee
+                      - generic [ref=e39307]: 35,580
+                    - generic [ref=e39308]:
+                      - generic [ref=e39310]: Broadcast Media
+                      - generic [ref=e39312]: 198,167
+                    - generic [ref=e39313]:
+                      - generic [ref=e39315]: Designing Fee
+                      - generic [ref=e39317]: 18,000
+                    - generic [ref=e39318]:
+                      - generic [ref=e39320]: Digital Marketing
+                      - generic [ref=e39322]: 445,625
+                    - generic [ref=e39323]:
+                      - generic [ref=e39325]: BGF (offsets)
+                      - generic [ref=e39327]: "-55,000"
+                    - generic [ref=e39328]:
+                      - generic [ref=e39330]: Other
+                      - generic [ref=e39332]: 5,000
+                    - generic [ref=e39333]:
+                      - generic [ref=e39335]: Outdoor Advertisement
+                      - generic [ref=e39337]: 442,149
+                    - generic [ref=e39338]:
+                      - generic [ref=e39340]: Printing Advertisement
+                      - generic [ref=e39342]: 1,510
+                    - generic [ref=e39343]:
+                      - generic [ref=e39345]: Unclassified (Local Knowledge)
+                      - generic [ref=e39347]: 4,810
+                    - generic [ref=e39348]:
+                      - generic [ref=e39351]: Total
+                      - generic [ref=e39354]: 1,095,841
+                - generic [ref=e39357]: 🔴 By Status (highlights)
+                - generic [ref=e39358]:
+                  - generic [ref=e39360]:
+                    - generic [ref=e39362]: Status
+                    - generic [ref=e39364]: Count
+                  - generic [ref=e39365]:
+                    - generic [ref=e39366]:
+                      - generic [ref=e39368]: Overdue
+                      - generic [ref=e39370]: 6 items
+                    - generic [ref=e39371]:
+                      - generic [ref=e39373]: Invoice Received
+                      - generic [ref=e39375]: 4 items
+                    - generic [ref=e39376]:
+                      - generic [ref=e39378]: Invoice Paid
+                      - generic [ref=e39380]: 5 items
+                    - generic [ref=e39381]:
+                      - generic [ref=e39383]: Approved Pending PO
+                      - generic [ref=e39385]: 4 items
+                    - generic [ref=e39386]:
+                      - generic [ref=e39388]: PO Sent
+                      - generic [ref=e39390]: 3 items
+                    - generic [ref=e39391]:
+                      - generic [ref=e39393]: No PO Required
+                      - generic [ref=e39395]: 3 items
+                    - generic [ref=e39396]:
+                      - generic [ref=e39398]: Cancelled
+                      - generic [ref=e39400]: 1 item
+                    - generic [ref=e39401]:
+                      - generic [ref=e39403]: To Review
+                      - generic [ref=e39405]: 2 items
+                - generic [ref=e39409]: "Net April spend: AED 1,095,841 excl. VAT"
+                - generic [ref=e39411]:
+                  - text: The big chunks are Digital Marketing (Metasphere + Logline + aggregators) and Outdoor (SB Mobility + 24-7 Media + iMedia). Also worth flagging — 6 items are still
+                  - generic [ref=e39412]: Overdue
+                  - text: 🔴. Want me to pull a focused view on those?
+              - generic [ref=e39413]:
+                - img [ref=e39415]
+                - img [ref=e39419]
+            - generic [ref=e39427] [cursor=pointer]:
+              - generic [ref=e39429]: what expenses do we have so far in April ?
+              - generic [ref=e39430]:
+                - generic [ref=e39432]: 7:04 PM
+                - img [ref=e39434]
+                - img [ref=e39438]
+                - img [ref=e39442]
+            - generic [ref=e39448] [cursor=pointer]:
+              - generic [ref=e39451]: Hey! 👋 What's up?
+              - generic [ref=e39452]:
+                - img [ref=e39454]
+                - img [ref=e39458]
+            - generic [ref=e39466] [cursor=pointer]:
+              - generic [ref=e39468]: hi
+              - generic [ref=e39469]:
+                - generic [ref=e39471]: 7:04 PM
+                - img [ref=e39473]
+                - img [ref=e39477]
+                - img [ref=e39481]
+            - generic [ref=e39489] [cursor=pointer]:
+              - generic [ref=e39491]: hi
+              - generic [ref=e39492]:
+                - generic [ref=e39494]: 6:56 PM
+                - img [ref=e39496]
+                - img [ref=e39500]
+                - img [ref=e39504]
+            - generic [ref=e39512] [cursor=pointer]:
+              - generic [ref=e39514]: hi
+              - generic [ref=e39515]:
+                - generic [ref=e39517]: 6:29 PM
+                - img [ref=e39519]
+                - img [ref=e39523]
+                - img [ref=e39527]
+            - generic [ref=e39535] [cursor=pointer]:
+              - generic [ref=e39537]: hi
+              - generic [ref=e39538]:
+                - generic [ref=e39540]: 6:27 PM
+                - img [ref=e39542]
+                - img [ref=e39546]
+                - img [ref=e39550]
+            - generic [ref=e39558] [cursor=pointer]:
+              - generic [ref=e39560]: hey Erika, what’s the total UAE marketing spend this month so far?”
+              - generic [ref=e39561]:
+                - generic [ref=e39563]: 6:23 PM
+                - img [ref=e39565]
+                - img [ref=e39569]
+                - img [ref=e39573]
+          - generic [ref=e39577]:
+            - generic [ref=e39579]:
+              - textbox "Type a message..." [ref=e39581]
+              - generic [ref=e39582]:
+                - img [ref=e39584] [cursor=pointer]
+                - img [ref=e39587] [cursor=pointer]
+                - img [ref=e39593] [cursor=pointer]
+            - generic [ref=e39594]: AI can make mistakes. Please double-check responses.
+    - generic [ref=e39600] [cursor=pointer]:
+      - generic [ref=e39602]: "!"
+      - generic [ref=e39603]: (0 , _reactNativeWebDistIndex.requireNativeComponent) is not a function
+  - generic [ref=e39608]:
+    - generic [ref=e39612]: Log 1 of 1
+    - generic [ref=e39613]:
+      - generic [ref=e39615]: Uncaught Error
+      - generic [ref=e39616]: (0 , _reactNativeWebDistIndex.requireNativeComponent) is not a function
+    - generic [ref=e39618]:
+      - generic [ref=e39619]:
+        - generic [ref=e39621]: Source
+        - generic [ref=e39623]:
+          - generic [ref=e39626]:
+            - generic [ref=e39627]:
+              - generic [ref=e39629]: 93 |
+              - generic [ref=e39630]: targetMode = e.data.mode;
+            - generic [ref=e39631]:
+              - generic [ref=e39633]: 94 |
+              - generic [ref=e39634]: targetFrequency = e.data.frequency;
+            - generic [ref=e39635]:
+              - generic [ref=e39636]: ">"
+              - generic [ref=e39637]: 95 |
+              - generic [ref=e39638]: "}"
+            - generic [ref=e39639]:
+              - generic [ref=e39641]: "|"
+              - generic [ref=e39642]: ^
+            - generic [ref=e39643]:
+              - generic [ref=e39645]: 96 |
+              - generic [ref=e39646]: "});"
+            - generic [ref=e39649]: 97 |
+            - generic [ref=e39650]:
+              - generic [ref=e39652]: 98 |
+              - generic [ref=e39653]: // Setup Three.js
+          - generic [ref=e39656] [cursor=pointer]: src/components/voice/VoiceSphereWeb.tsx (95:1)
+      - generic [ref=e39657]:
+        - generic [ref=e39659]: Call Stack
+        - generic [ref=e39660]:
+          - generic [ref=e39663] [cursor=pointer]:
+            - generic [ref=e39664]: <global>
+            - generic [ref=e39665]: src/components/voice/VoiceSphereWeb.tsx:95
+          - generic [ref=e39668] [cursor=pointer]:
+            - generic [ref=e39669]: VoiceAgentModal
+            - generic [ref=e39670]: src/components/voice/VoiceAgentModal.tsx:386:33
+          - generic [ref=e39674] [cursor=pointer]: See 33 more frames
+    - generic [ref=e39675]:
+      - generic [ref=e39679] [cursor=pointer]: Dismiss
+      - generic [ref=e39683] [cursor=pointer]: Minimize

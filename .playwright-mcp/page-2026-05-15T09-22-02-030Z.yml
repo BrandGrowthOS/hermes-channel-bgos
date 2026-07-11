@@ -1,0 +1,293 @@
+- generic [ref=e17]:
+  - generic [ref=e18]:
+    - generic [ref=e19]:
+      - generic [ref=e21] [cursor=pointer]: ☰
+      - img [ref=e23] [cursor=pointer]
+      - generic [ref=e27] [cursor=pointer]: ←
+      - generic [ref=e29] [cursor=pointer]: →
+    - generic [ref=e30]:
+      - generic [ref=e32] [cursor=pointer]: —
+      - generic [ref=e34] [cursor=pointer]: □
+      - generic [ref=e36] [cursor=pointer]: ✕
+  - generic [ref=e43]:
+    - generic [ref=e45]:
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - img [ref=e48]
+          - generic [ref=e56]: BGOS
+        - generic [ref=e57] [cursor=pointer]:
+          - img [ref=e58]
+          - generic [ref=e68]: Command Center
+        - generic [ref=e69] [cursor=pointer]:
+          - img [ref=e70]
+          - generic [ref=e72]: Chats
+        - generic [ref=e73] [cursor=pointer]:
+          - img [ref=e74]
+          - generic [ref=e78]: Meetings
+        - generic [ref=e79] [cursor=pointer]:
+          - img [ref=e80]
+          - generic [ref=e82]: Saved
+      - generic [ref=e84]:
+        - generic [ref=e86]: Agents
+        - generic [ref=e87]:
+          - generic [ref=e90]:
+            - generic [ref=e91] [cursor=pointer]:
+              - img [ref=e95]
+              - generic [ref=e97]: David
+            - img [ref=e100] [cursor=pointer]
+          - generic [ref=e106]:
+            - generic [ref=e107] [cursor=pointer]:
+              - img [ref=e111]
+              - generic [ref=e113]: Ava
+            - img [ref=e116] [cursor=pointer]
+          - generic [ref=e122]:
+            - generic [ref=e123] [cursor=pointer]:
+              - img [ref=e127]
+              - generic [ref=e129]: n8n Guru
+            - img [ref=e132] [cursor=pointer]
+          - generic [ref=e138]:
+            - generic [ref=e139] [cursor=pointer]:
+              - img [ref=e143]
+              - generic [ref=e145]: Mario
+            - img [ref=e148] [cursor=pointer]
+          - generic [ref=e154]:
+            - generic [ref=e155] [cursor=pointer]:
+              - img [ref=e159]
+              - generic [ref=e161]: Nicole
+            - img [ref=e164] [cursor=pointer]
+          - generic [ref=e170]:
+            - generic [ref=e171] [cursor=pointer]:
+              - img [ref=e175]
+              - generic [ref=e177]: Hades
+            - img [ref=e180] [cursor=pointer]
+          - generic [ref=e186]:
+            - generic [ref=e187] [cursor=pointer]:
+              - img [ref=e191]
+              - generic [ref=e193]: Guardian Jeff
+            - img [ref=e196] [cursor=pointer]
+          - generic [ref=e202]:
+            - generic [ref=e203] [cursor=pointer]:
+              - img [ref=e207]
+              - generic [ref=e209]: Even R Guru
+            - img [ref=e212] [cursor=pointer]
+          - generic [ref=e218]:
+            - generic [ref=e219] [cursor=pointer]:
+              - img [ref=e223]
+              - generic [ref=e225]: Vihan
+            - img [ref=e228] [cursor=pointer]
+          - generic [ref=e234]:
+            - generic [ref=e235] [cursor=pointer]:
+              - img [ref=e239]
+              - generic [ref=e241]: Autonomee
+            - img [ref=e244] [cursor=pointer]
+          - generic [ref=e250]:
+            - generic [ref=e251] [cursor=pointer]:
+              - img [ref=e255]
+              - generic [ref=e257]: BGOS Newsletter
+            - img [ref=e260] [cursor=pointer]
+          - generic [ref=e266]:
+            - generic [ref=e267] [cursor=pointer]:
+              - img [ref=e271]
+              - generic [ref=e273]: Ramy
+            - img [ref=e276] [cursor=pointer]
+          - generic [ref=e282]:
+            - generic [ref=e283] [cursor=pointer]:
+              - img [ref=e287]
+              - generic [ref=e289]: Echo
+            - img [ref=e292] [cursor=pointer]
+          - generic [ref=e298]:
+            - generic [ref=e299] [cursor=pointer]:
+              - img [ref=e303]
+              - generic [ref=e305]: Ava n8n
+            - img [ref=e308] [cursor=pointer]
+          - generic [ref=e314]:
+            - generic [ref=e319] [cursor=pointer]: Mark
+            - img [ref=e322] [cursor=pointer]
+          - generic [ref=e328]:
+            - generic [ref=e333] [cursor=pointer]: Erika
+            - img [ref=e336] [cursor=pointer]
+        - generic [ref=e342] [cursor=pointer]: Recents
+      - generic [ref=e343] [cursor=pointer]:
+        - generic [ref=e344]: +
+        - generic [ref=e345]: New assistant
+      - generic [ref=e346] [cursor=pointer]:
+        - generic [ref=e347]: 💡
+        - generic [ref=e348]: Share feedback
+      - generic [ref=e350]:
+        - generic [ref=e351] [cursor=pointer]:
+          - img [ref=e354]
+          - generic [ref=e355]:
+            - generic [ref=e356]: Kc Chaanine
+            - generic [ref=e357]: Free Plan
+        - img [ref=e359] [cursor=pointer]
+        - img [ref=e365] [cursor=pointer]
+    - generic [ref=e447]:
+      - generic [ref=e449] [cursor=pointer]:
+        - generic [ref=e450]: Guardian Jeff
+        - img [ref=e452]
+      - generic [ref=e455]:
+        - generic [ref=e922] [cursor=pointer]:
+          - generic [ref=e925]: A
+          - generic [ref=e926]:
+            - img [ref=e928]
+            - img [ref=e932]
+        - generic [ref=e940] [cursor=pointer]:
+          - generic [ref=e942]: A
+          - generic [ref=e943]:
+            - generic [ref=e945]: 1:21 PM
+            - img [ref=e947]
+            - img [ref=e951]
+            - img [ref=e955]
+        - generic [ref=e459] [cursor=pointer]:
+          - generic [ref=e462]:
+            - generic [ref=e464]: Yes, I can see it.
+            - generic [ref=e466]:
+              - text: It’s a Discord-style message from
+              - generic [ref=e467]: Leonidus
+              - text: "saying:"
+            - generic [ref=e470]: “No new candidate data this run. • Upwork API credentials are sti…”
+            - generic [ref=e472]: The rest is cut off/truncated in the screenshot.
+          - img [ref=e475]
+        - generic [ref=e481] [cursor=pointer]:
+          - generic [ref=e484]: "👁️ vision_analyze: \"Can you describe what is in this imag...\""
+          - img [ref=e487]
+        - generic [ref=e493] [cursor=pointer]:
+          - generic [ref=e496]: ⚡ Interrupting current task (iteration 1/90). I'll respond to your message shortly.
+          - generic [ref=e497]:
+            - img [ref=e499]
+            - img [ref=e503]
+        - generic [ref=e511] [cursor=pointer]:
+          - generic [ref=e513]:
+            - img [ref=e516]
+            - generic [ref=e517]: image.png
+          - generic [ref=e519]: can you see the image?
+          - generic [ref=e520]:
+            - generic [ref=e522]: 11:49 PM
+            - img [ref=e524]
+            - img [ref=e528]
+            - img [ref=e532]
+        - generic [ref=e538] [cursor=pointer]:
+          - generic [ref=e541]:
+            - generic [ref=e543]: "Command ran, but the file did not exist:"
+            - generic [ref=e544]: "rm: cannot remove '/tmp/bgos-approval-fresh-test.txt': No such file or directory"
+          - img [ref=e547]
+        - generic [ref=e553] [cursor=pointer]:
+          - generic [ref=e556]: "💻 terminal: \"rm /tmp/bgos-approval-fresh-test.txt\""
+          - generic [ref=e557]:
+            - img [ref=e559]
+            - img [ref=e563]
+        - generic [ref=e571] [cursor=pointer]:
+          - generic [ref=e573]: "run the shell command: rm /tmp/bgos-approval-fresh-test.txt"
+          - generic [ref=e574]:
+            - generic [ref=e576]: 11:23 PM
+            - img [ref=e578]
+            - img [ref=e582]
+            - img [ref=e586]
+        - generic [ref=e592] [cursor=pointer]:
+          - generic [ref=e595]:
+            - generic [ref=e597]: ✨ Session reset! Starting fresh.
+            - generic [ref=e599]: "◆ Model: gpt-5.5 ◆ Provider: openai-codex ◆ Context: 272K tokens (detected) ✦ Tip: /rollback also undoes the conversation turn, so the agent doesn’t remember rolled-back changes."
+          - generic [ref=e600]:
+            - img [ref=e602]
+            - img [ref=e606]
+        - generic [ref=e614] [cursor=pointer]:
+          - generic [ref=e616]: /new
+          - generic [ref=e617]:
+            - generic [ref=e619]: 11:23 PM
+            - img [ref=e621]
+            - img [ref=e625]
+            - img [ref=e629]
+        - generic [ref=e635] [cursor=pointer]:
+          - generic [ref=e638]:
+            - generic [ref=e640]: "Both commands ran. Output:"
+            - generic [ref=e641]: "rm: cannot remove '/tmp/bgos-approval-test-nonexistent-file': No such file or directory rm: cannot remove '/tmp/bgos-approval-test-nonexistent-file': No such file or directory"
+          - img [ref=e644]
+        - generic [ref=e650] [cursor=pointer]:
+          - generic [ref=e653]: "💻 terminal: \"rm /tmp/bgos-approval-test-nonexisten...\""
+          - img [ref=e656]
+        - generic [ref=e662] [cursor=pointer]:
+          - generic [ref=e665]: ⚡ Interrupting current task (iteration 1/90). I'll respond to your message shortly.
+          - generic [ref=e666]:
+            - img [ref=e668]
+            - img [ref=e672]
+        - generic [ref=e680] [cursor=pointer]:
+          - generic [ref=e682]: "run the shell command: rm /tmp/bgos-approval-test-nonexistent-file"
+          - generic [ref=e683]:
+            - generic [ref=e685]: 10:54 PM
+            - img [ref=e687]
+            - img [ref=e691]
+            - img [ref=e695]
+        - generic [ref=e701] [cursor=pointer]:
+          - generic [ref=e705]: hello
+          - img [ref=e708]
+        - generic [ref=e714] [cursor=pointer]:
+          - generic [ref=e717]: "💻 terminal: \"echo hello\""
+          - img [ref=e720]
+        - generic [ref=e726] [cursor=pointer]:
+          - generic [ref=e730]: hello
+          - img [ref=e733]
+        - generic [ref=e739] [cursor=pointer]:
+          - generic [ref=e742]: "💻 terminal: \"echo hello\""
+          - img [ref=e745]
+        - generic [ref=e751] [cursor=pointer]:
+          - generic [ref=e754]: ⚡ Interrupting current task. I'll respond to your message shortly.
+          - generic [ref=e755]:
+            - img [ref=e757]
+            - img [ref=e761]
+        - generic [ref=e769] [cursor=pointer]:
+          - generic [ref=e771]: "run the shell command: echo hello"
+          - generic [ref=e772]:
+            - generic [ref=e774]: 10:50 PM
+            - img [ref=e776]
+            - img [ref=e780]
+            - img [ref=e784]
+        - generic [ref=e790] [cursor=pointer]:
+          - generic [ref=e793]:
+            - generic [ref=e795]: Yes, I’m receiving you.
+            - generic [ref=e797]: Security / active connection check
+            - generic [ref=e799]: I ran a fresh read-only security triage.
+            - generic [ref=e801]: Current connected users
+            - generic [ref=e803]:
+              - text: I do
+              - generic [ref=e804]: not
+              - text: see an active unknown SSH user.
+            - generic [ref=e806]: "The system shows one stale/closing kc session:"
+            - generic [ref=e807]: SESSION UID USER TTY STATE 2432 kc pts/0 closing
+            - generic [ref=e809]: "But who -a says that pts/0 already exited:"
+            - generic [ref=e810]: pts/0 2026-05-13 15:18 term=0 exit=0
+            - generic [ref=e812]: So this looks like a stale logind/session artifact, not an active attacker shell.
+            - generic [ref=e814]: Successful SSH logins
+            - generic [ref=e816]: "Successful SSH logins in the last 14 days are only for:"
+            - generic [ref=e817]: kc from 87.200.45.72
+            - generic [ref=e819]: "Latest successful login:"
+            - generic [ref=e820]: May 13 14:53 Accepted publickey for kc from 87.200.45.72
+            - generic [ref=e822]: No successful root login found.
+            - generic [ref=e824]: Failed SSH probes
+            - generic [ref=e826]: "There are ongoing internet SSH probes/bruteforce attempts, but they are failed. fail2ban is active:"
+            - generic [ref=e827]: "Currently banned: 23 Total failed: 854"
+            - generic [ref=e829]: SSH hardening status
+            - generic [ref=e831]: "Current SSH config:"
+            - generic [ref=e832]: port 222 permitrootlogin no passwordauthentication no pubkeyauthentication yes kbdinteractiveauthentication no
+            - generic [ref=e834]: "So root login is blocked. Correct login should be:"
+            - generic [ref=e835]: ssh -p 222 kc@157.230.33.113
+            - generic [ref=e837]: "Then:"
+            - generic [ref=e838]: sudo -i
+            - generic [ref=e840]: Keys
+            - generic [ref=e842]: "kc keys are still present:"
+            - generic [ref=e843]: /home/kc/.ssh/authorized_keys 2026-03-13 19:43 kc:kc 600
+            - generic [ref=e845]: "Root authorized keys still show recent modification:"
+            - generic [ref=e846]: /root/.ssh/authorized_keys 2026-05-13 14:55 root:root 600
+            - generic [ref=e848]: But because PermitRootLogin no, root SSH should not work anyway.
+            - generic [ref=e851]: 200-word explanation
+            - generic [ref=e853]: "Telegram Bot API’s MarkdownV2 is not a general Markdown dialect like CommonMark; it is a compact, message-formatting syntax designed for Telegram clients and API parsing. CommonMark aims to standardize Markdown for documents, with block structures such as headings, thematic breaks, nested lists, block quotes, tables only via extensions, and carefully specified HTML handling. MarkdownV2 supports a smaller set of inline-oriented features: bold, italic, underline, strikethrough, spoiler text, inline links, custom emoji links, inline code, preformatted blocks, and expandable block quotes."
+            - generic [ref=e855]: "The biggest practical difference is escaping. MarkdownV2 requires many punctuation characters to be escaped with backslashes when they should appear literally: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., and !. CommonMark also has escaping rules, but they are less aggressive and depend on context. Telegram parsing is unforgiving: a single unescaped reserved character can reject the whole API request with a parse error."
+            - generic [ref=e857]: MarkdownV2 also lacks CommonMark’s document semantics. There are no real headings, images, raw HTML, automatic list normalization, or broad block-level composition. It is best treated as Telegram-specific markup, not portable Markdown. Generate it deliberately, escape user text defensively, and test messages through the Bot API. This matters most when bots interpolate names, URLs, logs, or code snippets supplied by users or external systems dynamically.
+          - img [ref=e860]
+      - generic [ref=e901]:
+        - generic [ref=e903]:
+          - textbox "Type a message..." [active] [ref=e905]
+          - generic [ref=e906]:
+            - img [ref=e908] [cursor=pointer]
+            - img [ref=e961] [cursor=pointer]
+            - img [ref=e917] [cursor=pointer]
+        - generic [ref=e918]: Guardian Jeff can make mistakes. Please double-check responses.
