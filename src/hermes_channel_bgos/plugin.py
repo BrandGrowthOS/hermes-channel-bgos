@@ -389,3 +389,64 @@ Same-chat constraint: the source message must be in the SAME BGOS chat as the re
 
 ## Conversation context
 Each BGOS chat maps to a single Hermes conversation. DMs only — no group threads, no forum topics. The user can wipe context via `/new`. Typing indicators, stickers, reactions, and message editing by the user are not supported."""
+
+
+def resolve_platform_hint() -> str:
+    """Return the agent-facing BGOS capability hint (capability bootstrap).
+
+    Prefers the backend-served canon fetched at plugin-registration time via a
+    short, best-effort synchronous GET, so connected agents get one live,
+    centrally maintained guide instead of this frozen bundled copy. Falls back to
+    BGOS_PLATFORM_HINT on ANY problem (unpaired host, network error, non-200,
+    missing marker), so registration never fails and existing behavior is
+    preserved for currently-paired agents.
+
+    Works for both install paths (fork patch and native plugin) because both
+    consume whatever string register() passes as platform_hint. Disable the fetch
+    with BGOS_DISABLE_CAPABILITIES_FETCH=1; tune the timeout (seconds, default 4)
+    with BGOS_CAPABILITIES_FETCH_TIMEOUT.
+    """
+    if os.environ.get("BGOS_DISABLE_CAPABILITIES_FETCH") == "1":
+        return BGOS_PLATFORM_HINT
+    token, base_url = resolve_pairing()
+    if not token:
+        # No credential to fetch with yet; keep the bundled copy.
+        return BGOS_PLATFORM_HINT
+    try:
+        timeout = float(
+            os.environ.get("BGOS_CAPABILITIES_FETCH_TIMEOUT", "4") or "4"
+        )
+    except ValueError:
+        timeout = 4.0
+    url = base_url.rstrip("/") + "/api/v1/integrations/capabilities"
+    try:
+        resp = httpx.get(
+            url,
+            params={"channel": "hermes"},
+            headers={"X-BGOS-Pairing": token},
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            text = data.get("text") if isinstance(data, dict) else None
+            if (
+                isinstance(text, str)
+                and "BGOS Channel" in text
+                and "Agent Capabilities" in text
+            ):
+                log.info(
+                    "fetched served capability canon (version=%s, chars=%d)",
+                    data.get("version"),
+                    len(text),
+                )
+                return text
+        log.info(
+            "capability canon fetch returned status=%s; using bundled hint",
+            resp.status_code,
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail registration on a fetch
+        log.info(
+            "capability canon fetch failed (%s); using bundled hint",
+            exc.__class__.__name__,
+        )
+    return BGOS_PLATFORM_HINT

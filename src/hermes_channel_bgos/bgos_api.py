@@ -247,6 +247,20 @@ class BgosApi:
         """Introspect the pairing scope: pairing_id + assistants[] + metadata."""
         return await self._request("GET", "/api/v1/integrations/me")
 
+    async def get_capabilities(self, channel: str = "hermes") -> dict:
+        """GET /api/v1/integrations/capabilities, the backend-served agent
+        capability canon for this channel (capability bootstrap).
+
+        Returns {channel, version, text, core, channelSyntax}; `text` is the
+        ready-to-inject PLATFORM_HINTS body. Callers fetch this at connect and
+        fall back to the bundled BGOS_PLATFORM_HINT when it is unavailable, so a
+        fetch failure never hard-fails the gateway. Mirrors whoami()."""
+        return await self._request(
+            "GET",
+            "/api/v1/integrations/capabilities",
+            params={"channel": channel},
+        )
+
     # -------------------------------------------------------------------------
     # Messages
     # -------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from hermes_channel_bgos.bgos_adapter import BGOSAdapter, _DEFAULT_MAX_MESSAGE_L
 from hermes_channel_bgos.plugin import (
     BGOS_PLATFORM_HINT,
     env_enablement,
+    resolve_platform_hint,
     standalone_send,
 )
 
@@ -52,5 +53,9 @@ def register(ctx) -> None:
         max_message_length=_DEFAULT_MAX_MESSAGE_LENGTH,
         pii_safe=True,
         allow_update_command=True,
-        platform_hint=BGOS_PLATFORM_HINT,
+        # Capability bootstrap: prefer the backend-served canon fetched here at
+        # registration, falling back to the bundled BGOS_PLATFORM_HINT on any
+        # failure (see resolve_platform_hint). BGOS_PLATFORM_HINT stays imported
+        # as the documented frozen fallback.
+        platform_hint=resolve_platform_hint(),
     )
