@@ -133,21 +133,34 @@ async def _run(
         await api.close()
 
     path = secrets_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # SECURITY: create the token file 0600 from the first byte rather than
+    # write-then-chmod, so the pairing token is never briefly world/group
+    # readable (the node channel plugins write their secrets atomically at 0600;
+    # this matches that hygiene). 0o600 has no group/other bits, so umask cannot
+    # widen it. The parent dir is created 0700 up front for the same reason.
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     data = {
         "pairing_token": resp["pairing_token"],
         "pairing_id": resp["pairing_id"],
         "base_url": base_url,
     }
-    path.write_text(json.dumps(data, indent=2))
+    payload = json.dumps(data, indent=2)
     if os.name == "posix":
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+        # Belt and suspenders: enforce 0600 even if the file pre-existed with
+        # looser perms, and tighten the parent dir if it already existed.
         os.chmod(path, 0o600)
-        # Tighten parent perms on POSIX too — don't weaken them on Windows
         try:
             os.chmod(path.parent, 0o700)
         except OSError:
             # Non-fatal — secrets file itself is already 0600
             pass
+    else:
+        path.write_text(payload)
 
     click.secho(f"Paired. Secret written to {path}", fg="green")
 
