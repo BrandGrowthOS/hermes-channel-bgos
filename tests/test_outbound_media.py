@@ -14,6 +14,7 @@ from hermes_channel_bgos.bgos_adapter import (
     BGOSAdapter,
     S3_THRESHOLD,
     _classify_media,
+    _media_path_is_sensitive,
     _parse_media_markers,
     _sniff_image_dimensions,
 )
@@ -704,3 +705,30 @@ async def test_send_image_dead_url_is_graceful(monkeypatch):
     )
     res = await adapter.send_image(chat_id=1, image_url="https://dead.link/x.png")
     assert res.message_id is None
+
+
+async def test_media_path_sensitive_denylist(tmp_path, monkeypatch):
+    """Outbound MEDIA: markers are agent-emitted; a prompt-injected agent must
+    not be able to exfiltrate the pairing token or system secrets. The denylist
+    refuses secret-bearing locations while leaving normal media sendable."""
+    # System secret store is refused.
+    assert _media_path_is_sensitive("/etc/passwd") is True
+    # A user SSH key is refused (resolves under ~/.ssh regardless of existence).
+    assert _media_path_is_sensitive("~/.ssh/id_rsa") is True
+    # The pairing-token store is the highest-value target and must be refused.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    secret = tmp_path / ".hermes" / "secrets" / "bgos.json"
+    assert _media_path_is_sensitive(str(secret)) is True
+    # A normal agent-written media file (outside any sensitive root) is allowed.
+    ok = tmp_path / "poster.png"
+    ok.write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert _media_path_is_sensitive(str(ok)) is False
+
+
+async def test_build_media_attachments_skips_sensitive_path(monkeypatch):
+    """End to end: a MEDIA: marker pointing at /etc/passwd yields no attachment."""
+    adapter = BGOSAdapter(
+        BgosConfig(base_url="http://127.0.0.1:9", pairing_token="pair_xyz")
+    )
+    attachments = await adapter._build_media_attachments(["/etc/passwd"])
+    assert attachments == []

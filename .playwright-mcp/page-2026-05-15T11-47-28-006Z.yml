@@ -1,0 +1,487 @@
+- generic [ref=e17]:
+  - generic [ref=e18]:
+    - generic [ref=e19]:
+      - generic [ref=e21] [cursor=pointer]: ☰
+      - img [ref=e23] [cursor=pointer]
+      - generic [ref=e27] [cursor=pointer]: ←
+      - generic [ref=e29] [cursor=pointer]: →
+    - generic [ref=e30]:
+      - generic [ref=e32] [cursor=pointer]: —
+      - generic [ref=e34] [cursor=pointer]: □
+      - generic [ref=e36] [cursor=pointer]: ✕
+  - generic [ref=e43]:
+    - generic [ref=e45]:
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - img [ref=e48]
+          - generic [ref=e56]: BGOS
+        - generic [ref=e57] [cursor=pointer]:
+          - img [ref=e58]
+          - generic [ref=e68]: Command Center
+        - generic [ref=e69] [cursor=pointer]:
+          - img [ref=e70]
+          - generic [ref=e72]: Chats
+        - generic [ref=e73] [cursor=pointer]:
+          - img [ref=e74]
+          - generic [ref=e78]: Meetings
+        - generic [ref=e79] [cursor=pointer]:
+          - img [ref=e80]
+          - generic [ref=e82]: Saved
+      - generic [ref=e84]:
+        - generic [ref=e86]: Agents
+        - generic [ref=e87]:
+          - generic [ref=e90]:
+            - generic [ref=e91] [cursor=pointer]:
+              - img [ref=e95]
+              - generic [ref=e97]: David
+            - img [ref=e100] [cursor=pointer]
+          - generic [ref=e106]:
+            - generic [ref=e107] [cursor=pointer]:
+              - img [ref=e111]
+              - generic [ref=e113]: Ava
+            - img [ref=e116] [cursor=pointer]
+          - generic [ref=e122]:
+            - generic [ref=e123] [cursor=pointer]:
+              - img [ref=e127]
+              - generic [ref=e129]: n8n Guru
+            - img [ref=e132] [cursor=pointer]
+          - generic [ref=e138]:
+            - generic [ref=e139] [cursor=pointer]:
+              - img [ref=e143]
+              - generic [ref=e145]: Mario
+            - img [ref=e148] [cursor=pointer]
+          - generic [ref=e154]:
+            - generic [ref=e155] [cursor=pointer]:
+              - img [ref=e159]
+              - generic [ref=e161]: Nicole
+            - img [ref=e164] [cursor=pointer]
+          - generic [ref=e170]:
+            - generic [ref=e171] [cursor=pointer]:
+              - img [ref=e175]
+              - generic [ref=e177]: Hades
+            - img [ref=e180] [cursor=pointer]
+          - generic [ref=e186]:
+            - generic [ref=e187] [cursor=pointer]:
+              - img [ref=e191]
+              - generic [ref=e192]:
+                - generic [ref=e193]: Guardian Jeff
+                - generic [ref=e37591]: Thinking…
+            - img [ref=e196] [cursor=pointer]
+          - generic [ref=e202]:
+            - generic [ref=e203] [cursor=pointer]:
+              - img [ref=e207]
+              - generic [ref=e209]: Even R Guru
+            - img [ref=e212] [cursor=pointer]
+          - generic [ref=e218]:
+            - generic [ref=e219] [cursor=pointer]:
+              - img [ref=e223]
+              - generic [ref=e225]: Vihan
+            - img [ref=e228] [cursor=pointer]
+          - generic [ref=e234]:
+            - generic [ref=e235] [cursor=pointer]:
+              - img [ref=e239]
+              - generic [ref=e241]: Autonomee
+            - img [ref=e244] [cursor=pointer]
+          - generic [ref=e250]:
+            - generic [ref=e251] [cursor=pointer]:
+              - img [ref=e255]
+              - generic [ref=e257]: BGOS Newsletter
+            - img [ref=e260] [cursor=pointer]
+          - generic [ref=e266]:
+            - generic [ref=e267] [cursor=pointer]:
+              - img [ref=e271]
+              - generic [ref=e273]: Ramy
+            - img [ref=e276] [cursor=pointer]
+          - generic [ref=e282]:
+            - generic [ref=e283] [cursor=pointer]:
+              - img [ref=e287]
+              - generic [ref=e289]: Echo
+            - img [ref=e292] [cursor=pointer]
+          - generic [ref=e298]:
+            - generic [ref=e299] [cursor=pointer]:
+              - img [ref=e303]
+              - generic [ref=e305]: Ava n8n
+            - img [ref=e308] [cursor=pointer]
+          - generic [ref=e314]:
+            - generic [ref=e319] [cursor=pointer]: Mark
+            - img [ref=e322] [cursor=pointer]
+          - generic [ref=e328]:
+            - generic [ref=e333] [cursor=pointer]: Erika
+            - img [ref=e336] [cursor=pointer]
+        - generic [ref=e342] [cursor=pointer]: Recents
+      - generic [ref=e343] [cursor=pointer]:
+        - generic [ref=e344]: +
+        - generic [ref=e345]: New assistant
+      - generic [ref=e346] [cursor=pointer]:
+        - generic [ref=e347]: 💡
+        - generic [ref=e348]: Share feedback
+      - generic [ref=e350]:
+        - generic [ref=e351] [cursor=pointer]:
+          - img [ref=e354]
+          - generic [ref=e355]:
+            - generic [ref=e356]: Kc Chaanine
+            - generic [ref=e357]: Free Plan
+        - img [ref=e359] [cursor=pointer]
+        - img [ref=e365] [cursor=pointer]
+    - generic [ref=e376]:
+      - generic [ref=e378] [cursor=pointer]:
+        - generic [ref=e379]: Guardian Jeff
+        - img [ref=e381]
+      - generic [ref=e384]:
+        - generic [ref=e37593]:
+          - img [ref=e37597]
+          - generic [ref=e37607]: Thinking...
+        - generic [ref=e37613] [cursor=pointer]:
+          - generic [ref=e37615]:
+            - generic [ref=e37617]: "[TEST F] Jeff — I need to test the multi-image carousel UI. Please send me 4 images in a single message by calling whatever image-attachment tool you have. If you don’t have an image generation tool, just use 4 public placeholder URLs — for example:"
+            - generic [ref=e37618]:
+              - generic [ref=e37619]:
+                - generic [ref=e37620]: •
+                - generic [ref=e37622]: https://picsum.photos/seed/bgos1/400/300
+              - generic [ref=e37623]:
+                - generic [ref=e37624]: •
+                - generic [ref=e37626]: https://picsum.photos/seed/bgos2/400/300
+              - generic [ref=e37627]:
+                - generic [ref=e37628]: •
+                - generic [ref=e37630]: https://picsum.photos/seed/bgos3/400/300
+              - generic [ref=e37631]:
+                - generic [ref=e37632]: •
+                - generic [ref=e37634]: https://picsum.photos/seed/bgos4/400/300
+            - generic [ref=e37636]: "You can either download them locally and attach, OR if your gateway supports send_multiple_images, call that directly. Goal: validate that the BGOS adapter bundles them into ONE carousel bubble rather than 4 separate ones. If you can’t send images, just say “send_multiple_images not available” and I’ll move on."
+          - generic [ref=e37637]:
+            - generic [ref=e37639]: 3:47 PM
+            - img [ref=e37641]
+            - img [ref=e37645]
+            - img [ref=e37649]
+        - generic [ref=e36778] [cursor=pointer]:
+          - generic [ref=e36781]:
+            - generic [ref=e36783]: "I saw 4 separate user-message arrivals for TEST E:"
+            - generic [ref=e36784]:
+              - generic [ref=e36785]:
+                - generic [ref=e36786]: "1."
+                - generic [ref=e36788]: "[TEST E msg 1/3] first piece"
+              - generic [ref=e36789]:
+                - generic [ref=e36790]: "2."
+                - generic [ref=e36792]: "[TEST E msg 2/3] second piece"
+              - generic [ref=e36793]:
+                - generic [ref=e36794]: "3."
+                - generic [ref=e36796]: "[TEST E msg 2/3] second piece"
+              - generic [ref=e36797]:
+                - generic [ref=e36798]: "4."
+                - generic [ref=e36800]: "[TEST E msg 3/3] third piece"
+            - generic [ref=e36801]:
+              - generic [ref=e36802]: "Content-distinct pieces: 3."
+              - generic [ref=e36804]: "Arrival count including the duplicate msg 2/3: 4."
+          - generic [ref=e36805]:
+            - img [ref=e36807]
+            - img [ref=e36811]
+        - generic [ref=e36494] [cursor=pointer]:
+          - generic [ref=e36496]: "[TEST E msg 3/3] third piece — count separate replies in your output: how many distinct user messages did you see arrive, batched or not?"
+          - generic [ref=e36497]:
+            - generic [ref=e36499]: 3:46 PM
+            - img [ref=e36501]
+            - img [ref=e36505]
+            - img [ref=e36509]
+        - generic [ref=e36515] [cursor=pointer]:
+          - generic [ref=e36518]: second piece received again.
+          - img [ref=e36521]
+        - generic [ref=e36527] [cursor=pointer]:
+          - generic [ref=e36530]: second piece received.
+          - img [ref=e36533]
+        - generic [ref=e30753] [cursor=pointer]:
+          - generic [ref=e30756]: ⚡ Interrupting current task. I'll respond to your message shortly.
+          - generic [ref=e30757]:
+            - img [ref=e30759]
+            - img [ref=e30763]
+        - generic [ref=e30771] [cursor=pointer]:
+          - generic [ref=e30773]: "[TEST E msg 2/3] second piece"
+          - generic [ref=e30774]:
+            - generic [ref=e30776]: 3:45 PM
+            - img [ref=e30778]
+            - img [ref=e30782]
+            - img [ref=e30786]
+        - generic [ref=e30792] [cursor=pointer]:
+          - generic [ref=e30795]: first piece received.
+          - generic [ref=e30796]:
+            - img [ref=e30798]
+            - img [ref=e30802]
+        - generic [ref=e30568] [cursor=pointer]:
+          - generic [ref=e30570]: "[TEST E msg 1/3] first piece"
+          - generic [ref=e30571]:
+            - generic [ref=e30573]: 3:45 PM
+            - img [ref=e30575]
+            - img [ref=e30579]
+            - img [ref=e30583]
+        - generic [ref=e30589] [cursor=pointer]:
+          - generic [ref=e30592]: "💾 Self-improvement review: User profile updated"
+          - img [ref=e30595]
+        - generic [ref=e30601] [cursor=pointer]:
+          - generic [ref=e30604]: ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAEND_OF_PAYLOAD
+          - img [ref=e30607]
+        - generic [ref=e29772] [cursor=pointer]:
+          - generic [ref=e29775]: "💻 terminal: \"python3 -c \"import sys; sys.stdout.wr...\""
+          - img [ref=e29778]
+        - generic [ref=e29784] [cursor=pointer]:
+          - generic [ref=e29787]: ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB END_OF_PAYLOAD
+          - img [ref=e29790]
+        - generic [ref=e28976] [cursor=pointer]:
+          - generic [ref=e28979]: "💻 terminal: \"python3 -c \"import sys; sys.stdout.wr...\""
+          - img [ref=e28982]
+        - generic [ref=e28988] [cursor=pointer]:
+          - generic [ref=e28991]: Executing the exact payload generator now and I’ll return its stdout raw.
+          - img [ref=e28994]
+        - generic [ref=e25167] [cursor=pointer]:
+          - generic [ref=e25170]: ⚡ Interrupting current task. I'll respond to your message shortly.
+          - generic [ref=e25171]:
+            - img [ref=e25173]
+            - img [ref=e25177]
+        - generic [ref=e25185] [cursor=pointer]:
+          - generic [ref=e25187]:
+            - generic [ref=e25189]: "[TEST D simpler] Jeff — please interrupt the previous request and instead do this single shell command:"
+            - generic [ref=e25191]: python3 -c "import sys; sys.stdout.write('AB' * 5600); sys.stdout.write('\\nEND_OF_PAYLOAD\\n')"
+            - generic [ref=e25193]: That prints exactly 11,200 chars of “AB” + a sentinel. Just send the raw stdout back to me. The point is to test long-message chunking, not essay generation.
+          - generic [ref=e25194]:
+            - generic [ref=e25196]: 3:43 PM
+            - img [ref=e25198]
+            - img [ref=e25202]
+            - img [ref=e25206]
+        - generic [ref=e25212] [cursor=pointer]:
+          - generic [ref=e25216]:
+            - generic [ref=e25217]:
+              - generic [ref=e25218]: "10."
+              - generic [ref=e25220]: "Rocket.Chat: Rocket.Chat is an open-source messaging platform designed for self-hosted team chat, omnichannel support, and integrations."
+            - generic [ref=e25221]:
+              - generic [ref=e25222]: "11."
+              - generic [ref=e25224]: "Zulip: Zulip is a team chat system that organizes conversations into streams and topics for high-signal asynchronous discussion."
+            - generic [ref=e25225]:
+              - generic [ref=e25226]: "12."
+              - generic [ref=e25228]: "Google Chat: Google Chat is Google Workspace’s business messaging platform for direct messages, spaces, threaded conversations, and app bots."
+            - generic [ref=e25229]:
+              - generic [ref=e25230]: "13."
+              - generic [ref=e25232]: "Facebook Messenger: Facebook Messenger is Meta’s consumer messaging platform for personal conversations, business pages, bots, and social messaging."
+            - generic [ref=e25233]:
+              - generic [ref=e25234]: "14."
+              - generic [ref=e25236]: "Instagram Direct: Instagram Direct is Instagram’s private messaging system for conversations around profiles, stories, reels, and creator interactions."
+            - generic [ref=e25237]:
+              - generic [ref=e25238]: "15."
+              - generic [ref=e25240]: "iMessage: iMessage is Apple’s messaging service for texts, media, group chats, reactions, and device-native encrypted communication."
+            - generic [ref=e25241]:
+              - generic [ref=e25242]: "16."
+              - generic [ref=e25244]: "SMS: SMS is the traditional cellular text messaging protocol used for short plain-text messages across mobile networks."
+            - generic [ref=e25245]:
+              - generic [ref=e25246]: "17."
+              - generic [ref=e25248]: "MMS: MMS extends SMS with support for images, audio, video, and richer media attachments over mobile carrier infrastructure."
+            - generic [ref=e25249]:
+              - generic [ref=e25250]: "18."
+              - generic [ref=e25252]: "RCS: RCS is a modern carrier messaging standard that adds typing indicators, read receipts, media sharing, and business messaging features."
+            - generic [ref=e25253]:
+              - generic [ref=e25254]: "19."
+              - generic [ref=e25256]: "WeChat: WeChat is a Chinese super-app combining messaging, payments, mini-programs, social feeds, and business communication."
+            - generic [ref=e25257]:
+              - generic [ref=e25258]: "20."
+              - generic [ref=e25260]: "WeCom: WeCom is Tencent’s enterprise messaging and collaboration platform connected to the broader WeChat ecosystem."
+            - generic [ref=e25261]:
+              - generic [ref=e25262]: "21."
+              - generic [ref=e25264]: "DingTalk: DingTalk is Alibaba’s enterprise collaboration platform for workplace chat, attendance, approvals, meetings, and organizational workflows."
+            - generic [ref=e25265]:
+              - generic [ref=e25266]: "22."
+              - generic [ref=e25268]: "Feishu: Feishu is ByteDance’s productivity suite combining chat, documents, calendars, video meetings, and workplace automation."
+            - generic [ref=e25269]:
+              - generic [ref=e25270]: "23."
+              - generic [ref=e25272]: "Lark: Lark is the international version of Feishu, offering team chat, docs, meetings, calendars, and integrated collaboration tools."
+            - generic [ref=e25273]:
+              - generic [ref=e25274]: "24."
+              - generic [ref=e25276]: "LINE: LINE is a messaging platform popular in Japan, Taiwan, and Thailand, with stickers, official accounts, payments, and bots."
+            - generic [ref=e25277]:
+              - generic [ref=e25278]: "25."
+              - generic [ref=e25280]: "Viber: Viber is a messaging and calling platform supporting private chats, communities, stickers, and business messaging."
+            - generic [ref=e25281]:
+              - generic [ref=e25282]: "26."
+              - generic [ref=e25284]: "Skype: Skype is a long-running communication platform for chat, voice calls, video calls, and international calling."
+            - generic [ref=e25285]:
+              - generic [ref=e25286]: "27."
+              - generic [ref=e25288]: "Snapchat: Snapchat is a camera-first social messaging platform built around disappearing messages, stories, lenses, and visual communication."
+            - generic [ref=e25289]:
+              - generic [ref=e25290]: "28."
+              - generic [ref=e25292]: "TikTok Direct Messages: TikTok Direct Messages allow users to share videos, chat privately, and communicate within the TikTok social graph."
+            - generic [ref=e25293]:
+              - generic [ref=e25294]: "29."
+              - generic [ref=e25296]: "X Direct Messages: X Direct Messages provide private conversations on the X platform, including text, media, links, and group chats."
+            - generic [ref=e25297]:
+              - generic [ref=e25298]: "30."
+              - generic [ref=e25300]: "Reddit Chat: Reddit Chat enables direct and group messaging between Reddit users alongside subreddit-based public discussion."
+            - generic [ref=e25301]:
+              - generic [ref=e25302]: "31."
+              - generic [ref=e25304]: "Guilded: Guilded is a community chat platform similar to Discord, with servers, channels, calendars, forums, and gaming-oriented features."
+            - generic [ref=e25305]:
+              - generic [ref=e25306]: "32."
+              - generic [ref=e25308]: "Steam Chat: Steam Chat is Valve’s messaging system for gamers, supporting friends lists, groups, voice chat, and game-related presence."
+            - generic [ref=e25309]:
+              - generic [ref=e25310]: "33."
+              - generic [ref=e25312]: "Battle.net Chat: Battle.net Chat is Blizzard’s messaging layer for friends, groups, and game-connected communication across Blizzard titles."
+            - generic [ref=e25313]:
+              - generic [ref=e25314]: "34."
+              - generic [ref=e25316]: "PlayStation Messages: PlayStation Messages support communication between PlayStation Network users for gaming coordination and social chat."
+            - generic [ref=e25317]:
+              - generic [ref=e25318]: "35."
+              - generic [ref=e25320]: "Xbox Chat: Xbox Chat provides messaging, parties, voice communication, and social features across Xbox consoles and Microsoft gaming services."
+            - generic [ref=e25321]:
+              - generic [ref=e25322]: "36."
+              - generic [ref=e25324]: "Twitch Chat: Twitch Chat is a live-streaming chat system where viewers interact with streamers, moderators, bots, and communities in real time."
+            - generic [ref=e25325]:
+              - generic [ref=e25326]: "37."
+              - generic [ref=e25328]: "YouTube Live Chat: YouTube Live Chat lets viewers participate in real-time conversations during live streams and premieres."
+            - generic [ref=e25329]:
+              - generic [ref=e25330]: "38."
+              - generic [ref=e25332]: "Kick Chat: Kick Chat is a live-streaming chat system used for audience participation, moderation, and streamer-community interaction."
+            - generic [ref=e25333]:
+              - generic [ref=e25334]: "39."
+              - generic [ref=e25336]: "IRC: IRC is a classic real-time text chat protocol built around networks, channels, nicknames, and lightweight clients."
+            - generic [ref=e25337]:
+              - generic [ref=e25338]: "40."
+              - generic [ref=e25340]: "XMPP: XMPP is an extensible messaging protocol used for federated chat, presence, pubsub, and custom real-time applications."
+            - generic [ref=e25341]:
+              - generic [ref=e25342]: "41."
+              - generic [ref=e25344]: "Mastodon Direct Mentions: Mastodon direct-style conversations use ActivityPub visibility controls to send limited-audience messages across federated servers."
+            - generic [ref=e25345]:
+              - generic [ref=e25346]: "42."
+              - generic [ref=e25348]: "Bluesky Chat: Bluesky Chat provides private messaging capabilities within the Bluesky social network and its decentralized identity ecosystem."
+            - generic [ref=e25349]:
+              - generic [ref=e25350]: "43."
+              - generic [ref=e25352]: "LinkedIn Messaging: LinkedIn Messaging supports professional direct communication, recruiting outreach, business networking, and company interactions."
+            - generic [ref=e25353]:
+              - generic [ref=e25354]: "44."
+              - generic [ref=e25356]: "Workplace from Meta: Workplace is Meta’s enterprise collaboration platform combining familiar social features with workplace chat and groups."
+            - generic [ref=e25357]:
+              - generic [ref=e25358]: "45."
+              - generic [ref=e25360]: "Zoom Team Chat: Zoom Team Chat is Zoom’s persistent messaging product integrated with meetings, channels, contacts, and files."
+            - generic [ref=e25361]:
+              - generic [ref=e25362]: "46."
+              - generic [ref=e25364]: "Cisco Webex Messaging: Cisco Webex Messaging provides enterprise chat spaces, direct messages, meetings, calling, and compliance-oriented collaboration."
+            - generic [ref=e25365]:
+              - generic [ref=e25366]: "47."
+              - generic [ref=e25368]: "Twist: Twist is an asynchronous team messaging platform designed around threads, channels, and calmer workplace communication."
+            - generic [ref=e25369]:
+              - generic [ref=e25370]: "48."
+              - generic [ref=e25372]: "Chanty: Chanty is a team chat platform offering channels, direct messages, task management, calls, and collaboration features."
+            - generic [ref=e25373]:
+              - generic [ref=e25374]: "49."
+              - generic [ref=e25376]: "Flock: Flock is a business messaging platform with channels, direct messages, productivity integrations, video calls, and shared workflows."
+            - generic [ref=e25377]:
+              - generic [ref=e25378]: "50."
+              - generic [ref=e25380]: "Basecamp Campfire: Basecamp Campfire is a simple team chat feature inside Basecamp for project-oriented real-time discussion and coordination. (3/3)"
+          - img [ref=e25383]
+        - generic [ref=e25389] [cursor=pointer]:
+          - generic [ref=e25392]:
+            - generic [ref=e25394]: "WebSocket feels like a live wire. After the handshake, both sides can send messages without creating a new HTTP request each time. For inbound dispatch, this means the platform can push a message to the adapter the moment it arrives. Latency is usually low because there is no polling interval. The adapter does not need to ask “anything new?” every few seconds. It simply listens. This is especially useful for interactive chat agents, typing indicators, streaming responses, presence updates, reaction events, and any system where immediacy matters. WebSocket also supports bidirectional control flows naturally: the client can send acknowledgements, heartbeats, subscription changes, or command replies over the same connection."
+            - generic [ref=e25396]: Long-polling, by contrast, is a disciplined loop of temporary waits. The adapter sends an HTTP request such as “give me updates after id 7307.” If there are updates, the server returns them immediately. If not, the server holds the request open for a while. When the request returns, the adapter processes the response and sends another request. Latency can still be quite good, because the request is often already open when a message arrives. However, there is usually more overhead than WebSocket because each cycle involves HTTP request headers, response headers, connection management unless keep-alive is used, and application logic to reissue the next poll. Long-polling is simpler to deploy through old proxies and strict corporate networks, but it can be less elegant for high-frequency event streams.
+            - generic [ref=e25398]: The biggest operational difference is connection lifecycle. WebSockets require a stable long-lived connection. This can be fragile in environments with load balancers, reverse proxies, NAT timeouts, mobile networks, idle connection limits, or Cloudflare-style tunnel behavior. A WebSocket adapter must implement heartbeats, ping/pong handling, reconnect backoff, subscription restoration, and replay after reconnect. When it works, it is efficient and responsive. When it fails silently, the adapter can appear connected while receiving nothing unless heartbeat logic detects the dead connection. Good WebSocket clients treat disconnects as normal, not exceptional.
+            - generic [ref=e25400]: Long-polling embraces disconnection as part of the design. Every request ends. Timeouts are expected. The adapter loops. If one request fails, the next can succeed. This makes long-polling robust in many plain HTTP environments. It is easier to inspect with curl, easier to pass through proxies, and often easier to reason about in logs because each poll has a start, end, status code, and response body. The downside is that the adapter must be careful not to create duplicate concurrent polls for the same cursor. Two overlapping polls can return the same event, which makes monotonic cursor filtering essential.
+            - generic [ref=e25402]: From a server-resource perspective, WebSockets and long-polling stress different parts of the system. WebSocket uses one long-lived connection per client. That consumes connection state, memory, and file descriptors, but avoids repeated HTTP parsing. Long-polling uses many requests over time. Each waiting request also consumes server resources, but the connection is periodically released and recreated. At small scale, either is fine. At large scale, WebSocket infrastructure must be tuned for many concurrent open sockets, while long-polling infrastructure must be tuned for high request churn and many pending HTTP requests. Neither is automatically superior; the best choice depends on platform architecture.
+            - generic [ref=e25404]: "Inbound dispatch semantics also differ. With WebSocket, events arrive as a stream. The adapter often receives a sequence of frames and must parse them continuously. If the connection drops, the adapter must know where to resume. Some platforms provide sequence numbers and resume tokens. Others simply require the client to reconnect and fetch missed events through a REST endpoint. With long-polling, resumption is built into the request model: “give me events after cursor X.” The cursor is part of every request. That makes recovery explicit. However, if the adapter uses the wrong cursor, or fails to persist it, long-polling can repeatedly deliver the same events."
+            - generic [ref=e25406]: Latency patterns are different too. WebSocket tends to have low and consistent latency while connected. Long-polling can also be low latency if the server responds immediately when events arrive, but there may be edge cases where latency equals the gap between polls. If the adapter uses short REST polling rather than true long-polling, such as checking every five seconds, then average latency may be around half the interval and worst-case latency around the full interval. That cadence can be visible to users. If an adapter sends a reset acknowledgement every five seconds, it may indicate a REST poll loop repeatedly treating an old message as new. WebSocket failures can also lead to fallback polling, and that fallback can reveal cursor bugs.
+            - generic [ref=e25408]: Backpressure is another consideration. In WebSocket systems, messages can arrive faster than the adapter can process them. The client needs buffering, flow control, or a strategy for pausing reads. If the adapter processes one message by invoking a long-running agent turn, it must not block the socket reader entirely or it may miss heartbeats and get disconnected. A common architecture is to have a lightweight socket reader enqueue events, while workers process them separately. In long-polling, backpressure is often naturally tied to the polling loop. If processing takes time before the next poll, the adapter slows its intake. That can be simpler, though it may increase latency for subsequent messages.
+            - generic [ref=e25410]: Ordering behaves differently depending on platform guarantees. A WebSocket stream often preserves event order within one connection, but reconnects can introduce gaps or replay. Long-polling often returns batches ordered by id, but overlapping requests or pagination can complicate ordering. In both cases, the adapter should treat platform ordering guarantees as useful but not sufficient. It should use message ids, cursors, and idempotency checks. Transport order is not the same as application delivery correctness.
+            - generic [ref=e25412]: Failure visibility is also different. WebSocket failures may appear as disconnect events, heartbeat timeouts, close codes, or stalled reads. Debugging often involves checking ping intervals, proxy idle timeouts, TLS termination, and reconnect logs. Long-polling failures appear as HTTP status codes, timeouts, malformed responses, or repeated empty polls. Debugging often involves inspecting request parameters, cursor state, response bodies, and rate limits. WebSocket bugs can feel like “nothing is arriving.” Long-polling bugs can feel like “the same thing keeps arriving.” Both require careful logging.
+            - generic [ref=e25414]: Security and authentication patterns can differ as well. WebSockets often authenticate during handshake using headers, cookies, or query tokens, then keep that authenticated channel open. Token rotation can be awkward if the connection lives longer than the token. Long-polling authenticates each request, which naturally picks up refreshed tokens but increases repeated auth overhead. WebSocket can be more efficient; long-polling can be simpler to integrate with standard HTTP middleware.
+            - generic [ref=e25416]: "For a chat adapter, the choice is rarely absolute. A robust adapter may support both. WebSocket can be the primary path for real-time delivery, while long-polling or REST fetch can be the recovery path after reconnect. Long-polling can be the default for platforms that do not support push streams. Webhooks are another alternative, where the platform calls the adapter instead of the adapter calling the platform. Each transport needs the same higher-level discipline: durable cursors, duplicate suppression, scoped conversation identity, error handling, and clear acknowledgement rules."
+            - generic [ref=e25418]: The essential difference is that WebSocket is continuous and event-driven, while long-polling is iterative and request-driven. WebSocket optimizes for immediacy and efficient bidirectional communication, at the cost of maintaining a fragile persistent connection. Long-polling optimizes for compatibility and explicit recovery, at the cost of request churn and potential polling cadence artifacts. For inbound message dispatch, either can be reliable if implemented carefully. Neither can save an adapter that lacks durable cursor management. Transport moves bytes; the adapter’s delivery semantics come from how it records, filters, acknowledges, and dispatches those bytes as messages.
+            - generic [ref=e25419]:
+              - generic [ref=e25420]:
+                - generic [ref=e25421]: "3."
+                - generic [ref=e25423]: Fifty example chat-platform names with one-sentence descriptions each
+              - generic [ref=e25424]:
+                - generic [ref=e25425]: "4."
+                - generic [ref=e25427]: "Telegram: Telegram is a cloud-based messaging platform popular for bots, channels, groups, and fast cross-device synchronization."
+              - generic [ref=e25428]:
+                - generic [ref=e25429]: "5."
+                - generic [ref=e25431]: "Discord: Discord is a community-focused chat platform with servers, channels, threads, voice rooms, bots, and rich real-time interactions."
+              - generic [ref=e25432]:
+                - generic [ref=e25433]: "6."
+                - generic [ref=e25435]: "Slack: Slack is a workplace collaboration platform organized around teams, channels, direct messages, workflow automation, and app integrations."
+              - generic [ref=e25436]:
+                - generic [ref=e25437]: "7."
+                - generic [ref=e25439]: "Microsoft Teams: Microsoft Teams is an enterprise communication platform combining chat, meetings, files, calendars, and Microsoft 365 integration."
+              - generic [ref=e25440]:
+                - generic [ref=e25441]: "8."
+                - generic [ref=e25443]: "WhatsApp: WhatsApp is a widely used mobile messaging platform offering encrypted personal chats, groups, voice calls, and business messaging APIs."
+              - generic [ref=e25444]:
+                - generic [ref=e25445]: "9."
+                - generic [ref=e25447]: "Signal: Signal is a privacy-focused messaging application known for end-to-end encryption, minimal metadata, and secure group communication."
+              - generic [ref=e25448]:
+                - generic [ref=e25449]: "10."
+                - generic [ref=e25451]: "Matrix: Matrix is an open protocol for decentralized real-time communication, supporting federated chat rooms, bridges, and encrypted messaging."
+              - generic [ref=e25452]:
+                - generic [ref=e25453]: "11."
+                - generic [ref=e25455]: "Element: Element is a popular Matrix client that provides secure team chat, rooms, spaces, and cross-platform messaging."
+              - generic [ref=e25456]:
+                - generic [ref=e25457]: "12."
+                - generic [ref=e25459]: "Mattermost: Mattermost is a self-hostable team collaboration platform often used by engineering, security, and operations teams."
+            - generic [ref=e25461]: (2/3)
+          - img [ref=e25464]
+        - generic [ref=e37655] [cursor=pointer]:
+          - generic [ref=e37658]:
+            - generic [ref=e37660]:
+              - generic [ref=e37661]: "1."
+              - generic [ref=e37663]: Essay on why monotonic message-id cursors are critical to chat adapters’ at-most-once delivery semantics
+            - generic [ref=e37665]: "Monotonic message-id cursors are one of the quiet foundations of reliable chat adapter design. They look simple: every inbound message has an identifier, each new identifier is greater than the last one, and the adapter stores the highest identifier it has successfully processed. Yet this small rule is what allows an adapter to reason about progress, avoid duplicate delivery, and survive restarts without reprocessing the same inbound events again and again. In chat systems, the adapter sits between an external platform and an agent runtime. The platform may deliver messages through webhooks, WebSockets, long-polling, REST polling, or some proprietary event stream. The agent runtime expects each user message to be handled once. The adapter’s job is to transform an unreliable or repeated stream of platform events into a clean sequence of application-level messages. A monotonic cursor gives the adapter a durable boundary between the past and the future."
+            - generic [ref=e37667]: At-most-once delivery means that a message should not be delivered to the agent more than once. It does not guarantee that every message will be delivered; that stronger property is at-least-once or exactly-once depending on how it is implemented. At-most-once is about preventing duplicates. In a chat adapter, duplicates are more damaging than they first appear. A repeated user message can cause the agent to answer twice, execute a tool twice, restart a conversation unexpectedly, schedule duplicate jobs, send duplicate notifications, or perform an external side effect twice. If the agent is allowed to run shell commands, modify files, post messages, or call APIs, duplicate delivery is not just noisy; it can be operationally dangerous. A cursor prevents the adapter from treating old messages as new work.
+            - generic [ref=e37669]: "The reason monotonicity matters is that it lets the adapter make a simple comparison. If the incoming message id is less than or equal to the stored last-seen id, the adapter knows the event is old and can ignore it. If it is greater, the adapter knows the event is new and can process it. Without monotonic ids, the adapter has to keep a potentially unbounded set of message ids it has seen before. That requires more memory, more storage, and more complicated expiration rules. With monotonic ids, the entire history collapses into one durable value: the highest processed id. That value can be stored in a small file, a database row, Redis, SQLite, or platform-specific state. The algorithm is easy to audit and easy to recover."
+            - generic [ref=e37671]: The most important practical scenario is restart recovery. Chat adapters are long-running processes, but they are not immortal. They restart after deployments, package upgrades, server reboots, crashes, OOM events, network failures, or manual maintenance. When the adapter comes back, it often asks the platform for recent messages or opens a stream that may replay buffered events. If the adapter has no durable cursor, it may process all recent messages again. If it stores only in-memory state, that state is lost on restart. A monotonic cursor persisted after successful processing gives the adapter a restart-safe memory. It says, “I have already handled everything through message 7307; only deliver messages greater than 7307.” This makes restarts boring instead of dangerous.
+            - generic [ref=e37673]: The cursor also protects against polling overlap. In long-polling or REST polling systems, the adapter may ask the platform every few seconds for new events. If a request times out, is retried, or overlaps with another request, the same event can appear in multiple responses. Some APIs intentionally return the last several events as a safety measure. Others return a page whose boundary is inclusive rather than exclusive. If the adapter tracks a monotonic last id, duplicate responses are harmless. The adapter filters every batch before dispatching, processes only ids greater than the cursor, then advances the cursor when processing succeeds.
+            - generic [ref=e37675]: A subtle design point is when to advance the cursor. If the adapter advances it before the message is successfully handed to the agent, then a crash between cursor update and dispatch causes message loss. That is still compatible with at-most-once delivery, because the message is not duplicated, but it weakens reliability. If the adapter advances it only after dispatch succeeds, then a crash after dispatch but before cursor update can cause a duplicate on restart. That is closer to at-least-once delivery. The correct choice depends on the adapter’s delivery contract. For strict at-most-once semantics, the cursor may be advanced before or atomically with claiming the message, accepting possible loss. For practical chat systems, a common compromise is to record an in-progress state or use an idempotency key so that duplicate side effects are avoided even if the message is retried.
+            - generic [ref=e37677]: Monotonic cursors also help with concurrency. Modern gateways may process multiple platforms, multiple chats, or multiple threads at the same time. Each stream needs its own cursor scope. A global cursor across unrelated chats can drop messages incorrectly if ids are only monotonic per chat. A per-chat cursor avoids that. Conversely, if platform ids are globally monotonic, a global cursor may be sufficient. The adapter must understand the platform’s id semantics. Is the id numeric? Is it sortable as an integer or only lexicographically? Is it monotonic per bot, per conversation, per user, or per transport connection? Does the platform ever reuse ids after deletion or migration? These details determine how cursor state should be keyed and compared.
+            - generic [ref=e37679]: The cursor is also a defense against transport instability. WebSockets reconnect. HTTP requests fail. Gateways crash halfway through receiving an event. Load balancers retry webhook deliveries. Mobile-style APIs sometimes replay the last event after reconnect. If every event is filtered through a monotonic cursor, the adapter becomes resilient to repeated delivery from the platform. The platform can be conservative and resend; the adapter can be conservative and ignore old ids. This separation of concerns is healthy. The platform does not need to know exactly what the agent processed. The adapter only needs a durable record of its own progress.
+            - generic [ref=e37681]: There are traps. A cursor must be updated atomically enough for the system’s risk profile. Writing to a local file without fsync may be fine for a hobby bot but weak for production. Updating a cursor after processing an entire batch can cause duplicate processing of earlier messages if the adapter crashes mid-batch. Updating after each message reduces the duplicate window. If processing messages out of order, a simple highest-id cursor can accidentally skip lower-id messages still in progress. Therefore, adapters that process concurrently often need ordered dispatch, per-message acknowledgement, or a more sophisticated pending set. Monotonic ids simplify the common case, but they do not eliminate the need for careful ordering.
+            - generic [ref=e37683]: Another trap is assuming that timestamps can replace message ids. Timestamps are often not unique, may arrive out of order, may have clock skew, and may be rounded. If two messages have the same timestamp, a timestamp cursor can drop one. If a platform emits delayed messages with older timestamps, a timestamp cursor can skip them. Monotonic message ids are purpose-built for ordering. They provide a logical sequence, not just a wall-clock observation. In distributed systems, logical sequence is usually more reliable than time.
+            - generic [ref=e37685]: A monotonic cursor also makes observability clearer. When debugging a chat adapter, being able to say “last processed id is 7307” is concrete. Logs can show incoming ids, skipped ids, processed ids, and cursor updates. Operators can compare platform state with adapter state. If users report duplicate “conversation reset” acknowledgements every five seconds, cursor state is one of the first things to inspect. Is the cursor file missing? Is it unwritable? Is the adapter reading the wrong home directory? Is the package version using a different cursor path? Is the REST poller failing to persist after processing? A simple cursor value becomes a diagnostic anchor.
+            - generic [ref=e37687]: In at-most-once delivery, the adapter’s core promise is restraint. It must not get excited by the same message twice. Monotonic cursors provide that restraint. They turn a messy inbound world of retries, reconnects, polling windows, and replayed events into a stable progression. Every new event must prove that it is beyond the boundary. Every old event is dropped quietly. For chat agents that can take real actions, that boundary is not merely an optimization. It is a safety mechanism, a reliability primitive, and an operational necessity.
+            - generic [ref=e37689]:
+              - generic [ref=e37690]: "2."
+              - generic [ref=e37692]: Essay on the difference between WebSocket and long-polling for inbound message dispatch
+            - generic [ref=e37694]: WebSocket and long-polling are both ways for a chat adapter to receive inbound messages, but they embody different philosophies. WebSocket is a persistent, bidirectional connection. The adapter connects once, keeps the socket open, and the server pushes events as they happen. Long-polling is a repeated request-response pattern. The adapter asks the server for new events, the server waits until something is available or until a timeout expires, then returns a response. The adapter immediately asks again. Both can deliver chat messages in near real time, but their behavior under load, failure, reconnect, ordering, latency, and operational constraints is different.
+            - generic [ref=e37696]: (1/3)
+          - generic [ref=e37697]:
+            - img [ref=e37699]
+            - img [ref=e37703]
+        - generic [ref=e37454] [cursor=pointer]:
+          - generic [ref=e37457]: Conversation reset. Next message starts fresh.
+          - img [ref=e37460]
+        - generic [ref=e37466] [cursor=pointer]:
+          - generic [ref=e37469]: Conversation reset. Next message starts fresh.
+          - img [ref=e37472]
+        - generic [ref=e37478] [cursor=pointer]:
+          - generic [ref=e37481]: Conversation reset. Next message starts fresh.
+          - img [ref=e37484]
+        - generic [ref=e37490] [cursor=pointer]:
+          - generic [ref=e37493]: Conversation reset. Next message starts fresh.
+          - img [ref=e37496]
+        - generic [ref=e37502] [cursor=pointer]:
+          - generic [ref=e37505]: Conversation reset. Next message starts fresh.
+          - img [ref=e37508]
+        - generic [ref=e37514] [cursor=pointer]:
+          - generic [ref=e37517]: Conversation reset. Next message starts fresh.
+          - img [ref=e37520]
+        - generic [ref=e37526] [cursor=pointer]:
+          - generic [ref=e37529]: Conversation reset. Next message starts fresh.
+          - img [ref=e37532]
+        - generic [ref=e37538] [cursor=pointer]:
+          - generic [ref=e37541]: Conversation reset. Next message starts fresh.
+          - img [ref=e37544]
+        - generic [ref=e37550] [cursor=pointer]:
+          - generic [ref=e37553]: Conversation reset. Next message starts fresh.
+          - img [ref=e37556]
+        - generic [ref=e37562] [cursor=pointer]:
+          - generic [ref=e37565]: Conversation reset. Next message starts fresh.
+          - img [ref=e37568]
+        - generic [ref=e37709] [cursor=pointer]:
+          - generic [ref=e37712]: Conversation reset. Next message starts fresh.
+          - img [ref=e37715]
+      - generic [ref=e1010]:
+        - generic [ref=e1012]:
+          - textbox "Type a message..." [active] [ref=e1014]
+          - generic [ref=e1015]:
+            - img [ref=e1017] [cursor=pointer]
+            - img [ref=e37720] [cursor=pointer]
+            - img [ref=e1026] [cursor=pointer]
+        - generic [ref=e1027]: Guardian Jeff can make mistakes. Please double-check responses.

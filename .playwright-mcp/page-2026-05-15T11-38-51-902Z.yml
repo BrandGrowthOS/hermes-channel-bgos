@@ -1,0 +1,406 @@
+- generic [ref=e17]:
+  - generic [ref=e18]:
+    - generic [ref=e19]:
+      - generic [ref=e21] [cursor=pointer]: ☰
+      - img [ref=e23] [cursor=pointer]
+      - generic [ref=e27] [cursor=pointer]: ←
+      - generic [ref=e29] [cursor=pointer]: →
+    - generic [ref=e30]:
+      - generic [ref=e32] [cursor=pointer]: —
+      - generic [ref=e34] [cursor=pointer]: □
+      - generic [ref=e36] [cursor=pointer]: ✕
+  - generic [ref=e43]:
+    - generic [ref=e45]:
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - img [ref=e48]
+          - generic [ref=e56]: BGOS
+        - generic [ref=e57] [cursor=pointer]:
+          - img [ref=e58]
+          - generic [ref=e68]: Command Center
+        - generic [ref=e69] [cursor=pointer]:
+          - img [ref=e70]
+          - generic [ref=e72]: Chats
+        - generic [ref=e73] [cursor=pointer]:
+          - img [ref=e74]
+          - generic [ref=e78]: Meetings
+        - generic [ref=e79] [cursor=pointer]:
+          - img [ref=e80]
+          - generic [ref=e82]: Saved
+      - generic [ref=e84]:
+        - generic [ref=e86]: Agents
+        - generic [ref=e87]:
+          - generic [ref=e90]:
+            - generic [ref=e91] [cursor=pointer]:
+              - img [ref=e95]
+              - generic [ref=e97]: David
+            - img [ref=e100] [cursor=pointer]
+          - generic [ref=e106]:
+            - generic [ref=e107] [cursor=pointer]:
+              - img [ref=e111]
+              - generic [ref=e113]: Ava
+            - img [ref=e116] [cursor=pointer]
+          - generic [ref=e122]:
+            - generic [ref=e123] [cursor=pointer]:
+              - img [ref=e127]
+              - generic [ref=e129]: n8n Guru
+            - img [ref=e132] [cursor=pointer]
+          - generic [ref=e138]:
+            - generic [ref=e139] [cursor=pointer]:
+              - img [ref=e143]
+              - generic [ref=e145]: Mario
+            - img [ref=e148] [cursor=pointer]
+          - generic [ref=e154]:
+            - generic [ref=e155] [cursor=pointer]:
+              - img [ref=e159]
+              - generic [ref=e161]: Nicole
+            - img [ref=e164] [cursor=pointer]
+          - generic [ref=e170]:
+            - generic [ref=e171] [cursor=pointer]:
+              - img [ref=e175]
+              - generic [ref=e177]: Hades
+            - img [ref=e180] [cursor=pointer]
+          - generic [ref=e186]:
+            - generic [ref=e187] [cursor=pointer]:
+              - img [ref=e191]
+              - generic [ref=e192]:
+                - generic [ref=e193]: Guardian Jeff
+                - generic [ref=e22753]: Thinking…
+            - img [ref=e196] [cursor=pointer]
+          - generic [ref=e202]:
+            - generic [ref=e203] [cursor=pointer]:
+              - img [ref=e207]
+              - generic [ref=e209]: Even R Guru
+            - img [ref=e212] [cursor=pointer]
+          - generic [ref=e218]:
+            - generic [ref=e219] [cursor=pointer]:
+              - img [ref=e223]
+              - generic [ref=e225]: Vihan
+            - img [ref=e228] [cursor=pointer]
+          - generic [ref=e234]:
+            - generic [ref=e235] [cursor=pointer]:
+              - img [ref=e239]
+              - generic [ref=e241]: Autonomee
+            - img [ref=e244] [cursor=pointer]
+          - generic [ref=e250]:
+            - generic [ref=e251] [cursor=pointer]:
+              - img [ref=e255]
+              - generic [ref=e257]: BGOS Newsletter
+            - img [ref=e260] [cursor=pointer]
+          - generic [ref=e266]:
+            - generic [ref=e267] [cursor=pointer]:
+              - img [ref=e271]
+              - generic [ref=e273]: Ramy
+            - img [ref=e276] [cursor=pointer]
+          - generic [ref=e282]:
+            - generic [ref=e283] [cursor=pointer]:
+              - img [ref=e287]
+              - generic [ref=e289]: Echo
+            - img [ref=e292] [cursor=pointer]
+          - generic [ref=e298]:
+            - generic [ref=e299] [cursor=pointer]:
+              - img [ref=e303]
+              - generic [ref=e305]: Ava n8n
+            - img [ref=e308] [cursor=pointer]
+          - generic [ref=e314]:
+            - generic [ref=e319] [cursor=pointer]: Mark
+            - img [ref=e322] [cursor=pointer]
+          - generic [ref=e328]:
+            - generic [ref=e333] [cursor=pointer]: Erika
+            - img [ref=e336] [cursor=pointer]
+        - generic [ref=e342] [cursor=pointer]: Recents
+      - generic [ref=e343] [cursor=pointer]:
+        - generic [ref=e344]: +
+        - generic [ref=e345]: New assistant
+      - generic [ref=e346] [cursor=pointer]:
+        - generic [ref=e347]: 💡
+        - generic [ref=e348]: Share feedback
+      - generic [ref=e350]:
+        - generic [ref=e351] [cursor=pointer]:
+          - img [ref=e354]
+          - generic [ref=e355]:
+            - generic [ref=e356]: Kc Chaanine
+            - generic [ref=e357]: Free Plan
+        - img [ref=e359] [cursor=pointer]
+        - img [ref=e365] [cursor=pointer]
+    - generic [ref=e376]:
+      - generic [ref=e378] [cursor=pointer]:
+        - generic [ref=e379]: Guardian Jeff
+        - img [ref=e381]
+      - generic [ref=e384]:
+        - generic [ref=e22755]:
+          - img [ref=e22759]
+          - generic [ref=e22769]: Thinking...
+        - generic [ref=e22775] [cursor=pointer]:
+          - generic [ref=e22777]: "[META] Jeff — which of your tools (if any) trigger an approval prompt on this gateway? I need a tool/command that I, the user, have to click \"Approve once\" for. List the names and any conditions you know of. If none of your tools require approval right now, just say so plainly."
+          - generic [ref=e22778]:
+            - generic [ref=e22780]: 3:38 PM
+            - img [ref=e22782]
+            - img [ref=e22786]
+            - img [ref=e22790]
+        - generic [ref=e17940] [cursor=pointer]:
+          - generic [ref=e17943]:
+            - generic [ref=e17945]: I can’t safely perform this test as requested from the tools available in this session.
+            - generic [ref=e17947]:
+              - text: I do
+              - generic [ref=e17948]: not
+              - text: have a request_approval tool exposed here, and previous shell calls executed directly without surfacing the BGOS approval buttons. Since you explicitly asked me
+              - generic [ref=e17949]: not to auto-run it
+              - text: ", I’m not going to call terminal with that curl command."
+            - generic [ref=e17951]:
+              - text: "So: command"
+              - generic [ref=e17952]: not executed
+              - text: .
+          - generic [ref=e17953]:
+            - img [ref=e17955]
+            - img [ref=e17959]
+        - generic [ref=e17832] [cursor=pointer]:
+          - generic [ref=e17834]:
+            - generic [ref=e17836]: "[TEST C take 3] Jeff — for this test the EXACT command matters. Please call your shell-exec tool with this command, which should trigger your gateway’s approval gate (network + sudo-like pattern):"
+            - generic [ref=e17838]: curl -s https://api.brandgrowthos.ai/healthz | head -c 200; echo TEST_C_NET_OK
+            - generic [ref=e17840]: "Important: please send this through whatever tool needs approval. If your shell tool auto-approves curl, then try invoking request_approval directly, or any tool that needs the user’s consent. The goal is to test the approval-button UI in BGOS — I need to see the inline buttons “Approve once / Always 🔒 / Cancel”. Don’t auto-run it; wait for my click."
+          - generic [ref=e17841]:
+            - generic [ref=e17843]: 3:38 PM
+            - img [ref=e17845]
+            - img [ref=e17849]
+            - img [ref=e17853]
+        - generic [ref=e16962] [cursor=pointer]:
+          - generic [ref=e16966]: OK_TEST_C
+          - img [ref=e16969]
+        - generic [ref=e16975] [cursor=pointer]:
+          - generic [ref=e16978]: Running the exact command via shell exec. I’m not taking any manual bypass action; if the approval gate is active for this tool call, it should pause for your “Approve once” click before execution.
+          - img [ref=e16981]
+        - generic [ref=e16987] [cursor=pointer]:
+          - generic [ref=e16990]: "💻 terminal: \"bash -c 'set -e; F=/tmp/test-c-$(date...\""
+          - img [ref=e16993]
+        - generic [ref=e16999] [cursor=pointer]:
+          - generic [ref=e17003]: OK_TEST_C
+          - img [ref=e17006]
+        - generic [ref=e17012] [cursor=pointer]:
+          - generic [ref=e17015]: "💻 terminal: \"bash -c 'set -e; F=/tmp/test-c-$(date...\""
+          - img [ref=e17018]
+        - generic [ref=e17024] [cursor=pointer]:
+          - generic [ref=e17027]: Running the requested shell command now; I won’t bypass anything manually—if this environment classifies it as approval-required, the approval UI should appear before execution.
+          - img [ref=e17030]
+        - generic [ref=e5741] [cursor=pointer]:
+          - generic [ref=e5744]: ⚡ Interrupting current task. I'll respond to your message shortly.
+          - generic [ref=e5745]:
+            - img [ref=e5747]
+            - img [ref=e5751]
+        - generic [ref=e5759] [cursor=pointer]:
+          - generic [ref=e5761]:
+            - generic [ref=e5763]: "[TEST C retry] Jeff, please run this concrete command which should require my approval (writes/deletes a file in /tmp):"
+            - generic [ref=e5765]: bash -c 'set -e; F=/tmp/test-c-$(date +%s).txt; touch "$F"; rm -f "$F"; echo OK_TEST_C'
+            - generic [ref=e5767]: Wait for me to click “Approve once” — then run it and reply with the stdout. The point of this test is to validate the approval UI button flow, so please don’t auto-bypass.
+          - generic [ref=e5768]:
+            - generic [ref=e5770]: 3:37 PM
+            - img [ref=e5772]
+            - img [ref=e5776]
+            - img [ref=e5780]
+        - generic [ref=e4931] [cursor=pointer]:
+          - generic [ref=e4935]: test-c-approved-1778845018
+          - img [ref=e4938]
+        - generic [ref=e4944] [cursor=pointer]:
+          - generic [ref=e4947]: "💻 terminal: \"echo \"test-c-approved-$(date +%s)\"\""
+          - img [ref=e4950]
+        - generic [ref=e4956] [cursor=pointer]:
+          - generic [ref=e4959]: Running the exact shell command now; if the gateway requires approval, it should surface that prompt to you.
+          - generic [ref=e4960]:
+            - img [ref=e4962]
+            - img [ref=e4966]
+        - generic [ref=e4874] [cursor=pointer]:
+          - generic [ref=e4876]:
+            - generic [ref=e4878]: "[TEST C] Jeff, please run this exact command in your shell, which should trigger an approval prompt for me to click. Use the shell exec tool, not file_read:"
+            - generic [ref=e4880]: echo "test-c-approved-$(date +%s)"
+            - generic [ref=e4882]: Wait for my approval, then run it and reply with the stdout.
+          - generic [ref=e4883]:
+            - generic [ref=e4885]: 3:36 PM
+            - img [ref=e4887]
+            - img [ref=e4891]
+            - img [ref=e4895]
+        - generic [ref=e4681] [cursor=pointer]:
+          - generic [ref=e4684]:
+            - generic [ref=e4686]:
+              - generic [ref=e4687]: "1."
+              - generic [ref=e4689]: "/etc/hostname:"
+            - generic [ref=e4690]: n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01
+            - generic [ref=e4692]:
+              - generic [ref=e4693]: "2."
+              - generic [ref=e4695]: "uname -a:"
+            - generic [ref=e4696]: "Linux n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 6.8.0-111-generic #111-Ubuntu SMP PREEMPT_DYNAMIC Sat Apr 11 23:16:02 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux"
+            - generic [ref=e4698]:
+              - generic [ref=e4699]: "3."
+              - generic [ref=e4701]: "Summary: This is an x86_64 Ubuntu Linux VPS/server running a generic Ubuntu kernel."
+          - img [ref=e4704]
+        - generic [ref=e4710] [cursor=pointer]:
+          - generic [ref=e4713]: "📖 read_file: \"/etc/hostname\""
+          - generic [ref=e4714]:
+            - img [ref=e4716]
+            - img [ref=e4720]
+        - generic [ref=e4624] [cursor=pointer]:
+          - generic [ref=e4626]:
+            - generic [ref=e4628]: "[TEST B] Jeff, please do this concrete task with a couple of tool calls so I can verify streaming + tool-progress UI:"
+            - generic [ref=e4629]:
+              - generic [ref=e4630]:
+                - generic [ref=e4631]: "1."
+                - generic [ref=e4633]: Read /etc/hostname and show me its content.
+              - generic [ref=e4634]:
+                - generic [ref=e4635]: "2."
+                - generic [ref=e4637]: Then run uname -a and show that output too.
+              - generic [ref=e4638]:
+                - generic [ref=e4639]: "3."
+                - generic [ref=e4641]: Then summarize in 1 sentence what kind of machine you’re on.
+            - generic [ref=e4643]: Just do steps 1–3 and reply with each piece, no extra preamble.
+          - generic [ref=e4644]:
+            - generic [ref=e4646]: 3:35 PM
+            - img [ref=e4648]
+            - img [ref=e4652]
+            - img [ref=e4656]
+        - generic [ref=e4281] [cursor=pointer]:
+          - generic [ref=e4284]:
+            - generic [ref=e4286]: Ran them. Captured output below, preserving line breaks.
+            - generic [ref=e4287]: "### 1) python -c \"import hermes_channel_bgos; print('VERSION:', hermes_channel_bgos.version)\" Traceback (most recent call last): File \"<string>\", line 1, in <module> AttributeError: module 'hermes_channel_bgos' has no attribute 'version' ### 2) pip show hermes-channel-bgos | grep -E \"^(Name|Version|Location)\" WARNING: Package(s) not found: hermes-channel-bgos ### 3) cat ~/.hermes/bgos_last_id 2>/dev/null || echo \"MISSING\" 7307 ### 4a) journalctl --user -u hermes-gateway.service -n 20 --no-pager May 15 10:59:23 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: kc 3914937 0.0 0.0 17632 6160 ? S 10:59 0:00 systemctl --user restart hermes-gateway.service May 15 11:00:24 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: WARNING gateway.run: Gateway drain timed out after 60.0s with 1 active agent(s); interrupting remaining work. May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: WARNING hermes_channel_bgos.bgos_ws: bgos_ws.disconnected May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: ┌─────────────────────────────────────────────────────────┐ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: │ ⚕ Hermes Gateway Starting... │ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: ├─────────────────────────────────────────────────────────┤ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: │ Messaging platforms + cron scheduler │ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: │ Press Ctrl+C to stop │ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: └─────────────────────────────────────────────────────────┘ May 15 11:00:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3674995]: ⚡ Interrupted during API call. May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: hermes-gateway.service: Main process exited, code=exited, status=1/FAILURE May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: hermes-gateway.service: Failed with result 'exit-code'. May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: Stopped hermes-gateway.service - Hermes Agent Gateway - Messaging Platform Integration. May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: hermes-gateway.service: Consumed 31.456s CPU time, 257.8M memory peak, 0B memory swap peak. May 15 11:00:29 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 systemd[1028]: Started hermes-gateway.service - Hermes Agent Gateway - Messaging Platform Integration. May 15 11:00:35 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING hermes_channel_bgos.bgos_adapter: no Hermes agents discovered — Hermes Integrations card will show an empty catalog. Set BGOS_AGENTS (e.g. 'hades:Hades,ramy:Ramy') or BGOS_AGENTS_JSON env var. May 15 11:00:39 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING gateway.run: Unauthorized user: user_369zDLAr4cjQbDgJDdd6f1DagQh (None) on bgos May 15 11:01:28 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING gateway.run: Unauthorized user: user_369zDLAr4cjQbDgJDdd6f1DagQh (None) on bgos May 15 11:06:16 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING gateway.run: Unauthorized user: user_369zDLAr4cjQbDgJDdd6f1DagQh (None) on bgos May 15 11:27:57 n8n-1765026509617-s-4vcpu-16gb-amd-sgp1-01 python[3918062]: WARNING gateway.run: Unauthorized user: user_369zDLAr4cjQbDgJDdd6f1DagQh (None) on bgos ### 4b) journalctl -u hermes-agent -n 20 --no-pager Hint: You are currently not seeing messages from other users and the system. Users in groups 'adm', 'systemd-journal' can see all messages. Pass -q to turn off this notice. -- No entries --"
+            - generic [ref=e4289]: "I also checked the interpreter used by the active gateway process, because plain python/pip is not the gateway venv:"
+            - generic [ref=e4290]: "### gateway MainPID 3918062 ### ps -p $PID -o pid,user,cmd PID USER CMD 3918062 kc /home/kc/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main gateway run --replace ### /home/kc/.hermes/hermes-agent/venv/bin/python -c importlib.metadata.version VERSION: 0.5.7 ### /home/kc/.hermes/hermes-agent/venv/bin/python -c module attrs FILE: /home/kc/hermes-channel-bgos/src/hermes_channel_bgos/__init__.py __version__: 0.5.7 version: None ### /home/kc/.hermes/hermes-agent/venv/bin/python -m pip show hermes-channel-bgos | grep -E \"^(Name|Version|Location)\" /home/kc/.hermes/hermes-agent/venv/bin/python: No module named pip"
+            - generic [ref=e4292]: "Conclusion: the active Hermes gateway venv is seeing hermes-channel-bgos 0.5.7, but the module exposes __version__, not version, so your first check fails even though the gateway package appears to be upgraded. The plain shell python/pip is not using the gateway environment."
+          - img [ref=e4295]
+        - generic [ref=e4301] [cursor=pointer]:
+          - generic [ref=e4304]: "💻 terminal: \"set -o pipefail PY=/home/kc/.hermes/h...\""
+          - img [ref=e4307]
+        - generic [ref=e22797] [cursor=pointer]:
+          - generic [ref=e22800]: Conversation reset. Next message starts fresh.
+          - img [ref=e22803]
+        - generic [ref=e22809] [cursor=pointer]:
+          - generic [ref=e22812]: Conversation reset. Next message starts fresh.
+          - img [ref=e22815]
+        - generic [ref=e22821] [cursor=pointer]:
+          - generic [ref=e22824]: Conversation reset. Next message starts fresh.
+          - img [ref=e22827]
+        - generic [ref=e22833] [cursor=pointer]:
+          - generic [ref=e22836]: Conversation reset. Next message starts fresh.
+          - img [ref=e22839]
+        - generic [ref=e22845] [cursor=pointer]:
+          - generic [ref=e22848]: Conversation reset. Next message starts fresh.
+          - img [ref=e22851]
+        - generic [ref=e22857] [cursor=pointer]:
+          - generic [ref=e22860]: Conversation reset. Next message starts fresh.
+          - img [ref=e22863]
+        - generic [ref=e22869] [cursor=pointer]:
+          - generic [ref=e22872]: Conversation reset. Next message starts fresh.
+          - img [ref=e22875]
+        - generic [ref=e22881] [cursor=pointer]:
+          - generic [ref=e22884]: Conversation reset. Next message starts fresh.
+          - img [ref=e22887]
+        - generic [ref=e22893] [cursor=pointer]:
+          - generic [ref=e22896]: Conversation reset. Next message starts fresh.
+          - img [ref=e22899]
+        - generic [ref=e22905] [cursor=pointer]:
+          - generic [ref=e22908]: Conversation reset. Next message starts fresh.
+          - img [ref=e22911]
+        - generic [ref=e22917] [cursor=pointer]:
+          - generic [ref=e22920]: Conversation reset. Next message starts fresh.
+          - img [ref=e22923]
+        - generic [ref=e22929] [cursor=pointer]:
+          - generic [ref=e22932]: Conversation reset. Next message starts fresh.
+          - img [ref=e22935]
+        - generic [ref=e22941] [cursor=pointer]:
+          - generic [ref=e22944]: Conversation reset. Next message starts fresh.
+          - img [ref=e22947]
+        - generic [ref=e22953] [cursor=pointer]:
+          - generic [ref=e22956]: Conversation reset. Next message starts fresh.
+          - img [ref=e22959]
+        - generic [ref=e22965] [cursor=pointer]:
+          - generic [ref=e22968]: Conversation reset. Next message starts fresh.
+          - img [ref=e22971]
+        - generic [ref=e22977] [cursor=pointer]:
+          - generic [ref=e22980]: Conversation reset. Next message starts fresh.
+          - img [ref=e22983]
+        - generic [ref=e22989] [cursor=pointer]:
+          - generic [ref=e22992]: Conversation reset. Next message starts fresh.
+          - img [ref=e22995]
+        - generic [ref=e23001] [cursor=pointer]:
+          - generic [ref=e23004]: Conversation reset. Next message starts fresh.
+          - img [ref=e23007]
+        - generic [ref=e23013] [cursor=pointer]:
+          - generic [ref=e23016]: Conversation reset. Next message starts fresh.
+          - img [ref=e23019]
+        - generic [ref=e23025] [cursor=pointer]:
+          - generic [ref=e23028]: Conversation reset. Next message starts fresh.
+          - img [ref=e23031]
+        - generic [ref=e23037] [cursor=pointer]:
+          - generic [ref=e23040]: Conversation reset. Next message starts fresh.
+          - img [ref=e23043]
+        - generic [ref=e23049] [cursor=pointer]:
+          - generic [ref=e23052]: Conversation reset. Next message starts fresh.
+          - img [ref=e23055]
+        - generic [ref=e23061] [cursor=pointer]:
+          - generic [ref=e23064]: Conversation reset. Next message starts fresh.
+          - img [ref=e23067]
+        - generic [ref=e23073] [cursor=pointer]:
+          - generic [ref=e23076]: Conversation reset. Next message starts fresh.
+          - img [ref=e23079]
+        - generic [ref=e23085] [cursor=pointer]:
+          - generic [ref=e23088]: Conversation reset. Next message starts fresh.
+          - img [ref=e23091]
+        - generic [ref=e23097] [cursor=pointer]:
+          - generic [ref=e23100]: Conversation reset. Next message starts fresh.
+          - img [ref=e23103]
+        - generic [ref=e23109] [cursor=pointer]:
+          - generic [ref=e23112]: Conversation reset. Next message starts fresh.
+          - img [ref=e23115]
+        - generic [ref=e23121] [cursor=pointer]:
+          - generic [ref=e23124]: Conversation reset. Next message starts fresh.
+          - img [ref=e23127]
+        - generic [ref=e23133] [cursor=pointer]:
+          - generic [ref=e23136]: Conversation reset. Next message starts fresh.
+          - img [ref=e23139]
+        - generic [ref=e23145] [cursor=pointer]:
+          - generic [ref=e23148]: Conversation reset. Next message starts fresh.
+          - img [ref=e23151]
+        - generic [ref=e23157] [cursor=pointer]:
+          - generic [ref=e23160]: Conversation reset. Next message starts fresh.
+          - img [ref=e23163]
+        - generic [ref=e23169] [cursor=pointer]:
+          - generic [ref=e23172]: Conversation reset. Next message starts fresh.
+          - img [ref=e23175]
+        - generic [ref=e23181] [cursor=pointer]:
+          - generic [ref=e23184]: Conversation reset. Next message starts fresh.
+          - img [ref=e23187]
+        - generic [ref=e23193] [cursor=pointer]:
+          - generic [ref=e23196]: Conversation reset. Next message starts fresh.
+          - img [ref=e23199]
+        - generic [ref=e23205] [cursor=pointer]:
+          - generic [ref=e23208]: Conversation reset. Next message starts fresh.
+          - img [ref=e23211]
+        - generic [ref=e23217] [cursor=pointer]:
+          - generic [ref=e23220]: Conversation reset. Next message starts fresh.
+          - img [ref=e23223]
+        - generic [ref=e23229] [cursor=pointer]:
+          - generic [ref=e23232]: Conversation reset. Next message starts fresh.
+          - img [ref=e23235]
+        - generic [ref=e23241] [cursor=pointer]:
+          - generic [ref=e23244]: Conversation reset. Next message starts fresh.
+          - img [ref=e23247]
+        - generic [ref=e23253] [cursor=pointer]:
+          - generic [ref=e23256]: Conversation reset. Next message starts fresh.
+          - img [ref=e23259]
+        - generic [ref=e23265] [cursor=pointer]:
+          - generic [ref=e23268]: Conversation reset. Next message starts fresh.
+          - img [ref=e23271]
+        - generic [ref=e23277] [cursor=pointer]:
+          - generic [ref=e23280]: Conversation reset. Next message starts fresh.
+          - img [ref=e23283]
+        - generic [ref=e23289] [cursor=pointer]:
+          - generic [ref=e23292]: Conversation reset. Next message starts fresh.
+          - img [ref=e23295]
+        - generic [ref=e23301] [cursor=pointer]:
+          - generic [ref=e23304]: Conversation reset. Next message starts fresh.
+          - img [ref=e23307]
+      - generic [ref=e1010]:
+        - generic [ref=e1012]:
+          - textbox "Type a message..." [active] [ref=e1014]
+          - generic [ref=e1015]:
+            - img [ref=e1017] [cursor=pointer]
+            - img [ref=e23312] [cursor=pointer]
+            - img [ref=e1026] [cursor=pointer]
+        - generic [ref=e1027]: Guardian Jeff can make mistakes. Please double-check responses.

@@ -33,6 +33,15 @@ from .config import BgosConfig
 log = logging.getLogger(__name__)
 
 _PROD_BASE_URL = "https://api.brandgrowthos.ai"
+
+# Upper bound on an accepted served capability canon. The real canon is a few
+# KB; this is ~50x headroom. SECURITY: the served text becomes the agent's
+# platform hint (system prompt), so a compromised or MITM'd backend returning a
+# multi-MB body would be both a memory-DoS and an unbounded prompt-injection
+# surface. The fetch below streams with this cap and falls back to the bundled
+# BGOS_PLATFORM_HINT past it.
+_MAX_CANON_BYTES = 256 * 1024
+
 _STANDALONE_MEDIA_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
 _STANDALONE_MEDIA_CACHE_DIRS = (
     "media_cache",
@@ -420,30 +429,60 @@ def resolve_platform_hint() -> str:
         timeout = 4.0
     url = base_url.rstrip("/") + "/api/v1/integrations/capabilities"
     try:
-        resp = httpx.get(
+        # SECURITY: stream with a hard byte cap so a compromised or MITM'd
+        # backend cannot buffer a multi-MB body into memory (DoS) or inject an
+        # unbounded system prompt. Bail early on an oversized declared length,
+        # then stop reading past the cap regardless of the header.
+        with httpx.stream(
+            "GET",
             url,
             params={"channel": "hermes"},
             headers={"X-BGOS-Pairing": token},
             timeout=timeout,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            text = data.get("text") if isinstance(data, dict) else None
-            if (
-                isinstance(text, str)
-                and "BGOS Channel" in text
-                and "Agent Capabilities" in text
-            ):
-                log.info(
-                    "fetched served capability canon (version=%s, chars=%d)",
-                    data.get("version"),
-                    len(text),
-                )
-                return text
-        log.info(
-            "capability canon fetch returned status=%s; using bundled hint",
-            resp.status_code,
-        )
+        ) as resp:
+            if resp.status_code == 200:
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > _MAX_CANON_BYTES:
+                    log.info(
+                        "capability canon declares %s bytes (> %d cap); using "
+                        "bundled hint",
+                        declared,
+                        _MAX_CANON_BYTES,
+                    )
+                    return BGOS_PLATFORM_HINT
+                chunks: list[bytes] = []
+                total = 0
+                oversized = False
+                for chunk in resp.iter_bytes():
+                    total += len(chunk)
+                    if total > _MAX_CANON_BYTES:
+                        oversized = True
+                        break
+                    chunks.append(chunk)
+                if oversized:
+                    log.info(
+                        "capability canon exceeded the %d byte cap; using "
+                        "bundled hint",
+                        _MAX_CANON_BYTES,
+                    )
+                    return BGOS_PLATFORM_HINT
+                data = json.loads(b"".join(chunks))
+                text = data.get("text") if isinstance(data, dict) else None
+                if (
+                    isinstance(text, str)
+                    and "BGOS Channel" in text
+                    and "Agent Capabilities" in text
+                ):
+                    log.info(
+                        "fetched served capability canon (version=%s, chars=%d)",
+                        data.get("version"),
+                        len(text),
+                    )
+                    return text
+            log.info(
+                "capability canon fetch returned status=%s; using bundled hint",
+                resp.status_code,
+            )
     except Exception as exc:  # noqa: BLE001 - never fail registration on a fetch
         log.info(
             "capability canon fetch failed (%s); using bundled hint",

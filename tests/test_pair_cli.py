@@ -102,6 +102,10 @@ async def test_pair_cli_secret_file_is_mode_0600(mock_bgos_server, tmp_secrets_d
     ])
     mode = secrets_path().stat().st_mode & 0o777
     assert mode == 0o600
+    # The secrets dir must also be owner-only (created 0700 up front, not a
+    # world-listable 0755 that briefly exposes the token filename).
+    dir_mode = secrets_path().parent.stat().st_mode & 0o777
+    assert dir_mode == 0o700
 
 
 async def test_device_label_is_required(mock_bgos_server, tmp_secrets_dir):

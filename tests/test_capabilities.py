@@ -78,6 +78,26 @@ async def test_resolve_platform_hint_falls_back_on_server_error(
     assert hint == BGOS_PLATFORM_HINT
 
 
+async def test_resolve_platform_hint_falls_back_on_oversized_canon(
+    mock_bgos_server, monkeypatch
+):
+    """A hostile/MITM backend returning a giant body must not be injected: the
+    size cap rejects it and the bundled hint is kept (DoS + injection guard)."""
+    monkeypatch.setenv("BGOS_BACKEND_URL", mock_bgos_server.url)
+    monkeypatch.setenv("BGOS_API_KEY", "pair_xyz")
+    monkeypatch.delenv("BGOS_DISABLE_CAPABILITIES_FETCH", raising=False)
+    huge = (
+        "# BGOS Channel Agent Capabilities\n" + ("x" * (300 * 1024))
+    )  # > 256 KB cap
+    mock_bgos_server.on("GET", "/api/v1/integrations/capabilities").respond(
+        200, {"version": "evil", "text": huge}
+    )
+
+    hint = await asyncio.get_event_loop().run_in_executor(None, resolve_platform_hint)
+
+    assert hint == BGOS_PLATFORM_HINT
+
+
 def test_resolve_platform_hint_falls_back_when_unpaired(monkeypatch):
     monkeypatch.delenv("BGOS_API_KEY", raising=False)
     monkeypatch.delenv("BGOS_DISABLE_CAPABILITIES_FETCH", raising=False)
