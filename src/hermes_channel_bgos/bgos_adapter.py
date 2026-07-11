@@ -127,6 +127,68 @@ S3_THRESHOLD = 500 * 1024
 # above this are skipped with a warning rather than read.
 _MEDIA_MAX_BYTES = 100 * 1024 * 1024
 
+# System locations that always hold secrets or credentials. SECURITY: outbound
+# MEDIA:/path markers and send_image/file local sources are agent-emitted, and
+# the agent is steered by inbound user messages plus the backend-served canon
+# (both attacker-influenced under the threat model). Without this guard a
+# prompt-injected agent could emit `MEDIA:~/.hermes/secrets/bgos.json` (the
+# pairing token), `MEDIA:/etc/passwd`, or `MEDIA:~/.ssh/id_rsa` and exfiltrate
+# it into the chat. The standalone plugin send path already enforces an
+# allowlist; the live gateway path (_build_media_attachments / _fetch_media
+# _source) previously did not. A denylist (not a strict allowlist) is used here
+# so legitimate agent media written anywhere non-sensitive still sends.
+_SENSITIVE_MEDIA_SYSTEM_PREFIXES: tuple[str, ...] = (
+    "/etc",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/root",
+    "/var/run",
+    "/run/secrets",
+)
+
+
+def _sensitive_media_roots() -> list[Path]:
+    home = Path.home()
+    roots = [Path(p) for p in _SENSITIVE_MEDIA_SYSTEM_PREFIXES]
+    roots += [
+        home / ".ssh",
+        home / ".aws",
+        home / ".gnupg",
+        home / ".config" / "gcloud",
+        home / ".kube",
+    ]
+    # The pairing-token store is the single most sensitive file on the host.
+    hermes_home = Path(
+        os.environ.get("HERMES_HOME", home / ".hermes")
+    ).expanduser()
+    roots.append(hermes_home / "secrets")
+    return roots
+
+
+def _media_path_is_sensitive(raw_path: str) -> bool:
+    """True when a resolved local media path lands in a secret-bearing or system
+    location an agent must never exfiltrate via a MEDIA: marker. Resolves
+    symlinks first (so a symlink into ~/.ssh is caught) and fails safe: an
+    unresolvable path is treated as sensitive."""
+    try:
+        resolved = Path(os.path.expanduser(raw_path)).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    for root in _sensitive_media_roots():
+        try:
+            root_resolved = root.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if resolved == root_resolved:
+            return True
+        try:
+            resolved.relative_to(root_resolved)
+            return True
+        except ValueError:
+            continue
+    return False
+
 # Agent-emitted outbound-media marker. The agent writes `MEDIA:/abs/path` on
 # its own line (per PLATFORM_HINTS["bgos"] "Sending files and media") and the
 # adapter turns each into a real BGOS attachment, stripping the marker from
@@ -2302,6 +2364,13 @@ class BGOSAdapter(BasePlatformAdapter):
         attachments: list[dict] = []
         for raw_path in paths:
             try:
+                if _media_path_is_sensitive(raw_path):
+                    log.warning(
+                        "MEDIA: refusing to send from a sensitive location, "
+                        "skipping: %r",
+                        raw_path,
+                    )
+                    continue
                 path = Path(raw_path).expanduser()
                 if not path.is_file():
                     log.warning("MEDIA: not a file, skipping: %r", raw_path)
@@ -2416,9 +2485,17 @@ class BGOSAdapter(BasePlatformAdapter):
                 resolved_mime = resolved_mime or ctype
             else:
                 parsed = urlparse(src)
-                path = Path(
-                    unquote(parsed.path if parsed.scheme == "file" else src)
-                ).expanduser()
+                local_src = unquote(parsed.path if parsed.scheme == "file" else src)
+                if _media_path_is_sensitive(local_src):
+                    log.warning(
+                        "media source in a sensitive location, refusing: %r", src
+                    )
+                    return (
+                        None,
+                        name or "download",
+                        resolved_mime or "application/octet-stream",
+                    )
+                path = Path(local_src).expanduser()
                 data = await asyncio.to_thread(path.read_bytes)
                 name = name or path.name
         except Exception:
