@@ -859,6 +859,9 @@ class BGOSAdapter(BasePlatformAdapter):
         # _handle_callback. Telegram-parity 3-button UX for non-destructive
         # but expensive commands (current caller: /reload-mcp).
         self._slash_confirm_state: dict[str, str] = {}
+        # Tidy callback bodies need the original title because eventMeta is
+        # create-only on the current backend PATCH contract.
+        self._slash_confirm_title_by_id: dict[str, str] = {}
         # REST poll loop — fallback for server-side WS push gap (see
         # _poll_loop for details). Started in connect(), cancelled in
         # disconnect().
@@ -871,11 +874,18 @@ class BGOSAdapter(BasePlatformAdapter):
         self._edit_throttle_seconds: float = 1.5
         self._pending_edits: dict[int, asyncio.Task] = {}
         self._last_edit_at: dict[int, float] = {}
-        # chat_id -> (message_id, cleaned_text, options, render_mode) —
-        # the latest content waiting for the deferred flush. Later
-        # writes inside the window supersede earlier ones (coalesce).
+        # Latest content and suppression task waiting for deferred flush.
+        # Writes inside the window supersede earlier ones (coalesce).
         self._pending_edit_content: dict[
-            int, tuple[int, str, list[dict] | None, str | None],
+            int,
+            tuple[
+                int,
+                str,
+                list[dict] | None,
+                str | None,
+                str | None,
+                asyncio.Task | None,
+            ],
         ] = {}
         # tool_progress card tracking — chat_id → message_id of the
         # currently-active "Tool calls" card. Populated on first emoji
@@ -908,6 +918,8 @@ class BGOSAdapter(BasePlatformAdapter):
         # window exceeds both, so real prose cancels promotion while a turn
         # that produced only robot talk cannot end silently.
         self._quiet_suppressed_text: dict[int, str] = {}
+        self._quiet_suppressed_session_handle: dict[int, str | None] = {}
+        self._quiet_suppressed_reply_to_id: dict[int, int | None] = {}
         self._quiet_failsafe_tasks: dict[int, asyncio.Task] = {}
         # Adaptive text-batching for rapid inbound user messages. Mobile
         # clients sometimes split a long transcription or paste into multiple
@@ -962,8 +974,15 @@ class BGOSAdapter(BasePlatformAdapter):
     def _chat_style_for(self, chat_key: int) -> str:
         """Resolve the latest per-assistant style for one outbound call."""
         return self._chat_style_store.style_for(
-            self._state.assistant_id_by_chat.get(chat_key)
+            self._style_assistant_id_for_chat(chat_key)
         )
+
+    def _style_assistant_id_for_chat(self, chat_key: int) -> int | None:
+        """Return the addressed assistant, with the owner as fallback."""
+        addressed = self._state.addressed_assistant_id_by_chat.get(chat_key)
+        if addressed is not None:
+            return addressed
+        return self._state.assistant_id_by_chat.get(chat_key)
 
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
@@ -1572,6 +1591,8 @@ class BGOSAdapter(BasePlatformAdapter):
             task.cancel()
         self._quiet_failsafe_tasks.clear()
         self._quiet_suppressed_text.clear()
+        self._quiet_suppressed_session_handle.clear()
+        self._quiet_suppressed_reply_to_id.clear()
         if quiet_tasks:
             await asyncio.gather(*quiet_tasks, return_exceptions=True)
         # tool_progress card tracking — clear so a reconnect doesn't reuse
@@ -1626,6 +1647,8 @@ class BGOSAdapter(BasePlatformAdapter):
         except Exception:
             log.debug("failed to resolve assistant_id for chat=%s", chat_id, exc_info=True)
             return cached
+        if isinstance(chat, dict) and isinstance(chat.get("kind"), str):
+            self._state.chat_kind_by_chat[chat_id] = chat["kind"]
         assistant_id = chat.get("assistantId", chat.get("assistant_id")) if isinstance(chat, dict) else None
         try:
             assistant_id_int = int(assistant_id)
@@ -1633,6 +1656,77 @@ class BGOSAdapter(BasePlatformAdapter):
             return None
         self._state.assistant_id_by_chat[chat_id] = assistant_id_int
         return assistant_id_int
+
+    async def _a2a_owner_id_for_chat(self, chat_id: int) -> int | None:
+        """Resolve the owner only when the target is an a2a side thread."""
+        cached_owner = self._state.assistant_id_by_chat.get(chat_id)
+        cached_kind = self._state.chat_kind_by_chat.get(chat_id)
+        try:
+            chat = await self._api.get_chat(chat_id)
+        except Exception:
+            log.debug(
+                "failed to resolve a2a chat owner for chat=%s",
+                chat_id,
+                exc_info=True,
+            )
+            return cached_owner if cached_kind == "a2a" else None
+        if not isinstance(chat, dict):
+            return None
+        kind = chat.get("kind")
+        if isinstance(kind, str):
+            self._state.chat_kind_by_chat[chat_id] = kind
+        else:
+            kind = cached_kind
+        if kind != "a2a":
+            return None
+        assistant_id = chat.get("assistantId", chat.get("assistant_id"))
+        try:
+            assistant_id_int = int(assistant_id)
+        except (TypeError, ValueError):
+            return cached_owner
+        self._state.assistant_id_by_chat[chat_id] = assistant_id_int
+        return assistant_id_int
+
+    async def _post_quiet_final_message(
+        self,
+        *,
+        chat_key: int,
+        text: str,
+        message_type: str,
+        event_meta: dict | None = None,
+        bridge_session_handle: str | None = None,
+        direct_session_handle: str | None = None,
+        bridge_reply_to_id: int | None = None,
+    ) -> int | None:
+        """Post a quiet final through the a2a bridge when required."""
+        owner_id = await self._a2a_owner_id_for_chat(chat_key)
+        if owner_id is not None:
+            resp = await self._api.post_send_message(
+                chat_id=chat_key,
+                assistant_id=owner_id,
+                text=text,
+                sender="assistant",
+                message_type=message_type,
+                event_meta=event_meta,
+                reply_to_id=bridge_reply_to_id,
+                session_handle=bridge_session_handle,
+            )
+            message_obj = resp.get("message") if isinstance(resp, dict) else None
+            message_id = (
+                message_obj.get("id") if isinstance(message_obj, dict) else None
+            )
+            return message_id if isinstance(message_id, int) else None
+
+        resp = await self._api.post_message(
+            chat_id=chat_key,
+            text=text,
+            sender="assistant",
+            message_type=message_type,
+            event_meta=event_meta,
+            session_handle=direct_session_handle,
+        )
+        message_id = resp.get("id") if isinstance(resp, dict) else None
+        return message_id if isinstance(message_id, int) else None
 
     def format_message(self, content: str) -> str:
         """Translate the agent's outbound text into BGOS-native form.
@@ -1749,6 +1843,7 @@ class BGOSAdapter(BasePlatformAdapter):
         )
 
         chat_style = self._chat_style_for(chat_key)
+        suppressed_task = self._quiet_failsafe_tasks.get(chat_key)
 
         # tool_progress intercept on the SEND path too — the gateway's
         # progress loop calls `adapter.send()` for the FIRST tool of a
@@ -1786,6 +1881,12 @@ class BGOSAdapter(BasePlatformAdapter):
         if quiet_robot is not None and quiet_robot.kind == "error":
             parsed_tools = None
         if parsed_tools is not None:
+            if chat_style != EVERYTHING:
+                self._quiet_set_delivery_context(
+                    chat_key,
+                    session_handle=session_handle,
+                    reply_to_id=effective_reply_to,
+                )
             return await self._handle_tool_progress_edit(
                 chat_key, 0, parsed_tools, None,
             )
@@ -1793,6 +1894,12 @@ class BGOSAdapter(BasePlatformAdapter):
         if chat_style != EVERYTHING:
             robot = quiet_robot
             if robot is not None and robot.kind == "tool_dump":
+                self._quiet_record_suppressed(
+                    chat_key,
+                    robot.details,
+                    session_handle=session_handle,
+                    reply_to_id=effective_reply_to,
+                )
                 result = _send_result(message_id=None)
                 if robot.rows:
                     result = await self._handle_tool_progress_edit(
@@ -1802,7 +1909,6 @@ class BGOSAdapter(BasePlatformAdapter):
                         None,
                         replace=False,
                     )
-                self._quiet_record_suppressed(chat_key, robot.details)
                 return result
 
             if robot is not None and robot.kind == "error":
@@ -1814,20 +1920,23 @@ class BGOSAdapter(BasePlatformAdapter):
                         chat_key,
                         exc_info=True,
                     )
-                resp = await self._api.post_message(
-                    chat_id=chat_key,
+                event_meta = {
+                    "source": "agent",
+                    "title": robot.friendly[:300],
+                    "payload": {"details": robot.details},
+                }
+                message_id = await self._post_quiet_final_message(
+                    chat_key=chat_key,
                     text=robot.friendly,
-                    sender="assistant",
                     message_type="agent_error",
-                    event_meta={
-                        "source": "agent",
-                        "title": robot.friendly[:300],
-                        "payload": {"details": robot.details},
-                    },
-                    session_handle=session_handle,
+                    event_meta=event_meta,
+                    bridge_session_handle=session_handle,
+                    direct_session_handle=session_handle,
+                    bridge_reply_to_id=effective_reply_to,
                 )
-                message_id = resp.get("id") if isinstance(resp, dict) else None
-                self._quiet_clear_suppressed(chat_key)
+                self._quiet_clear_suppressed_if_current(
+                    chat_key, suppressed_task,
+                )
                 self._offer_voice_reply(chat_key, robot.friendly)
                 if isinstance(message_id, int):
                     self._state.last_assistant_message_by_chat[
@@ -1930,7 +2039,9 @@ class BGOSAdapter(BasePlatformAdapter):
             last_result = _send_result(message_id=message_id)
         if last_message_id is not None:
             if chat_style != EVERYTHING:
-                self._quiet_clear_suppressed(chat_key)
+                self._quiet_clear_suppressed_if_current(
+                    chat_key, suppressed_task,
+                )
             self._state.last_assistant_message_by_chat[chat_key] = last_message_id
             # Voice reply capture: a real agent reply (tool_progress and
             # media-only paths never reach here with text) posted while a
@@ -2021,7 +2132,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # adapter never received inbound. PATCH targets a message id, but the
         # chat scope must still be one the agent was legitimately addressed in.
         try:
-            chat_key, _ = self._resolve_outbound_target(chat_id)
+            chat_key, session_handle = self._resolve_outbound_target(chat_id)
         except UnknownChatTarget as exc:
             log.warning("edit_message rejected: %s", exc)
             return SendResult(  # type: ignore[call-arg]
@@ -2078,6 +2189,12 @@ class BGOSAdapter(BasePlatformAdapter):
                         "args": robot.friendly[:120],
                         "status": "error",
                     }]
+                self._quiet_record_suppressed(
+                    chat_key,
+                    robot.details,
+                    session_handle=session_handle,
+                    preserve_delivery_context=True,
+                )
                 if rows:
                     await self._handle_tool_progress_edit(
                         chat_key,
@@ -2086,7 +2203,6 @@ class BGOSAdapter(BasePlatformAdapter):
                         user_id,
                         replace=False,
                     )
-                self._quiet_record_suppressed(chat_key, robot.details)
                 return _send_result(message_id=mid_int)
             cleaned_text = strip_voice_prefixes(cleaned_text)
 
@@ -2099,6 +2215,7 @@ class BGOSAdapter(BasePlatformAdapter):
         now = asyncio.get_running_loop().time()
         last = self._last_edit_at.get(chat_key, 0.0)
         elapsed = now - last
+        suppressed_task = self._quiet_failsafe_tasks.get(chat_key)
         if elapsed >= self._edit_throttle_seconds:
             # Window expired (or first call) — fire immediately, cancel any
             # stale pending flush since we just spoke for this chat.
@@ -2107,7 +2224,13 @@ class BGOSAdapter(BasePlatformAdapter):
                 pending.cancel()
             self._pending_edit_content.pop(chat_key, None)
             result = await self._do_patch(
-                mid_int, cleaned_text, options, render_mode, user_id,
+                chat_key,
+                mid_int,
+                cleaned_text,
+                options,
+                render_mode,
+                user_id,
+                suppressed_task,
             )
             self._last_edit_at[chat_key] = now
             return result
@@ -2116,7 +2239,12 @@ class BGOSAdapter(BasePlatformAdapter):
         # any earlier-stashed write for the same chat), schedule deferred
         # flush if one isn't already pending.
         self._pending_edit_content[chat_key] = (
-            mid_int, cleaned_text, options, render_mode, user_id,
+            mid_int,
+            cleaned_text,
+            options,
+            render_mode,
+            user_id,
+            suppressed_task,
         )
         existing = self._pending_edits.get(chat_key)
         if existing is None or existing.done():
@@ -2128,15 +2256,24 @@ class BGOSAdapter(BasePlatformAdapter):
 
     async def _do_patch(
         self,
+        chat_key: int,
         mid_int: int,
         text: str,
         options: list[dict] | None,
         render_mode: str | None,
         user_id: str | None,
+        suppressed_task: asyncio.Task | None,
     ) -> SendResult:
         """The actual PATCH call — extracted so the throttle path can share
         it with the deferred flush path. Returns SendResult(success=False,
         error=not_editable_*) on 4xx; re-raises 5xx."""
+        visible_text = bool(text.strip())
+        paused_suppression = (
+            visible_text
+            and self._quiet_pause_suppressed_if_current(
+                chat_key, suppressed_task,
+            )
+        )
         try:
             await self._api.patch_message(
                 mid_int,
@@ -2146,6 +2283,8 @@ class BGOSAdapter(BasePlatformAdapter):
                 user_id=user_id,
             )
         except BgosApiError as exc:
+            if paused_suppression:
+                self._quiet_resume_paused_suppression(chat_key)
             if 400 <= exc.status < 500:
                 return SendResult(  # type: ignore[call-arg]
                     success=False,
@@ -2153,6 +2292,20 @@ class BGOSAdapter(BasePlatformAdapter):
                     error=f"not_editable_{exc.status}",
                 )
             raise
+        except asyncio.CancelledError:
+            if paused_suppression:
+                self._quiet_resume_paused_suppression(chat_key)
+            raise
+        except Exception:
+            if paused_suppression:
+                self._quiet_resume_paused_suppression(chat_key)
+            raise
+        if visible_text:
+            if paused_suppression:
+                if chat_key not in self._quiet_failsafe_tasks:
+                    self._quiet_clear_suppressed(chat_key)
+            elif self._quiet_failsafe_tasks.get(chat_key) is suppressed_task:
+                self._quiet_clear_suppressed(chat_key)
         return _send_result(message_id=mid_int)
 
     def _patch_user_id_for_chat(self, chat_key: int) -> str | None:
@@ -2322,9 +2475,26 @@ class BGOSAdapter(BasePlatformAdapter):
         card_id = self._tool_progress_card_id_by_chat.get(chat_key)
         return _send_result(message_id=card_id)
 
-    def _quiet_record_suppressed(self, chat_key: int, text: str) -> None:
+    def _quiet_record_suppressed(
+        self,
+        chat_key: int,
+        text: str,
+        *,
+        session_handle: str | None = None,
+        reply_to_id: int | None = None,
+        preserve_delivery_context: bool = False,
+    ) -> None:
         """Retain the latest hidden gateway output and refresh its timer."""
         self._quiet_suppressed_text[chat_key] = text
+        if (
+            not preserve_delivery_context
+            or chat_key not in self._quiet_suppressed_session_handle
+        ):
+            self._quiet_set_delivery_context(
+                chat_key,
+                session_handle=session_handle,
+                reply_to_id=reply_to_id,
+            )
         pending = self._quiet_failsafe_tasks.get(chat_key)
         if pending is not None and not pending.done():
             pending.cancel()
@@ -2332,9 +2502,58 @@ class BGOSAdapter(BasePlatformAdapter):
             self._quiet_failsafe_fire(chat_key)
         )
 
+    def _quiet_set_delivery_context(
+        self,
+        chat_key: int,
+        *,
+        session_handle: str | None,
+        reply_to_id: int | None,
+    ) -> None:
+        """Snapshot a quiet turn's a2a delivery context."""
+        self._quiet_suppressed_session_handle[chat_key] = session_handle
+        self._quiet_suppressed_reply_to_id[chat_key] = reply_to_id
+
+    def _quiet_clear_suppressed_if_current(
+        self,
+        chat_key: int,
+        suppressed_task: asyncio.Task | None,
+    ) -> None:
+        """Clear only the suppression present when visible work began."""
+        if self._quiet_failsafe_tasks.get(chat_key) is suppressed_task:
+            self._quiet_clear_suppressed(chat_key)
+
+    def _quiet_pause_suppressed_if_current(
+        self,
+        chat_key: int,
+        suppressed_task: asyncio.Task | None,
+    ) -> bool:
+        """Pause one fail-safe while its visible edit is on the wire."""
+        if (
+            suppressed_task is None
+            or self._quiet_failsafe_tasks.get(chat_key) is not suppressed_task
+        ):
+            return False
+        self._quiet_failsafe_tasks.pop(chat_key, None)
+        if not suppressed_task.done():
+            suppressed_task.cancel()
+        return True
+
+    def _quiet_resume_paused_suppression(self, chat_key: int) -> None:
+        """Restart promotion after a visible edit fails or is cancelled."""
+        if (
+            chat_key not in self._quiet_suppressed_text
+            or chat_key in self._quiet_failsafe_tasks
+        ):
+            return
+        self._quiet_failsafe_tasks[chat_key] = asyncio.create_task(
+            self._quiet_failsafe_fire(chat_key)
+        )
+
     def _quiet_clear_suppressed(self, chat_key: int) -> None:
         """Cancel promotion once the gateway delivers a visible outcome."""
         self._quiet_suppressed_text.pop(chat_key, None)
+        self._quiet_suppressed_session_handle.pop(chat_key, None)
+        self._quiet_suppressed_reply_to_id.pop(chat_key, None)
         pending = self._quiet_failsafe_tasks.pop(chat_key, None)
         if pending is not None and not pending.done():
             pending.cancel()
@@ -2347,6 +2566,12 @@ class BGOSAdapter(BasePlatformAdapter):
             if self._quiet_failsafe_tasks.get(chat_key) is not current_task:
                 return
             suppressed = self._quiet_suppressed_text.pop(chat_key, None)
+            session_handle = self._quiet_suppressed_session_handle.pop(
+                chat_key, None,
+            )
+            reply_to_id = self._quiet_suppressed_reply_to_id.pop(
+                chat_key, None,
+            )
             if suppressed is None:
                 return
 
@@ -2362,13 +2587,13 @@ class BGOSAdapter(BasePlatformAdapter):
             promoted = suppressed
             if len(promoted) > 2000:
                 promoted = promoted[:2000] + "\n[truncated]"
-            resp = await self._api.post_message(
-                chat_id=chat_key,
+            message_id = await self._post_quiet_final_message(
+                chat_key=chat_key,
                 text=promoted,
-                sender="assistant",
                 message_type="standard",
+                bridge_session_handle=session_handle,
+                bridge_reply_to_id=reply_to_id,
             )
-            message_id = resp.get("id") if isinstance(resp, dict) else None
             if isinstance(message_id, int):
                 self._state.last_assistant_message_by_chat[
                     chat_key
@@ -2430,9 +2655,24 @@ class BGOSAdapter(BasePlatformAdapter):
         pending = self._pending_edit_content.pop(chat_key, None)
         if pending is None:
             return
-        mid_int, text, options, render_mode, user_id = pending
+        (
+            mid_int,
+            text,
+            options,
+            render_mode,
+            user_id,
+            suppressed_task,
+        ) = pending
         try:
-            await self._do_patch(mid_int, text, options, render_mode, user_id)
+            await self._do_patch(
+                chat_key,
+                mid_int,
+                text,
+                options,
+                render_mode,
+                user_id,
+                suppressed_task,
+            )
         except Exception:
             log.warning(
                 "deferred edit flush failed chat=%d msg=%d",
@@ -3204,7 +3444,8 @@ class BGOSAdapter(BasePlatformAdapter):
         ]
         body_text = f"**{title}**\n\n{message}" if title else message
         chat_key = int(chat_id)
-        if self._chat_style_for(chat_key) == EVERYTHING:
+        tidy = self._chat_style_for(chat_key) != EVERYTHING
+        if not tidy:
             resp = await self._api.post_message(
                 chat_id=chat_key,
                 text=body_text,
@@ -3234,6 +3475,12 @@ class BGOSAdapter(BasePlatformAdapter):
                 },
             )
         self._slash_confirm_state[confirm_id] = session_key
+        if tidy:
+            self._slash_confirm_title_by_id[confirm_id] = (
+                title or "Please confirm"
+            )[:300]
+        else:
+            self._slash_confirm_title_by_id.pop(confirm_id, None)
         message_id = resp.get("id") if isinstance(resp, dict) else None
         return _send_result(message_id=message_id)
 
@@ -3411,6 +3658,11 @@ class BGOSAdapter(BasePlatformAdapter):
                 inbound_chat_id,
                 session_handle if isinstance(session_handle, str) else None,
             )
+            addressed_assistant_id = self._int_or_none(assistant_id)
+            if addressed_assistant_id is not None:
+                self._state.addressed_assistant_id_by_chat[inbound_chat_id] = (
+                    addressed_assistant_id
+                )
 
         # A blocking peer helper with waitForReply=true has already consumed
         # this reply from the HTTP response. BGOS may still deliver the same
@@ -3441,10 +3693,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
         event = MessageEvent.from_ws(data, agent_route=route)
-        # Do NOT cache event.assistant_id as the chat owner here. For a2a
-        # peer messages, assistant_id is the addressed Hermes assistant, while
-        # chat.assistantId may be the peer-side thread owner. send() resolves
-        # the owner via GET /chats/:id so /send-message can run the peer bridge.
+        # The addressed assistant was cached separately above. Do not cache it
+        # as the chat owner. For a2a peer messages, chat.assistantId may be the
+        # peer-side thread owner, which send() resolves for the peer bridge.
         # Surface user-attached files into the agent's view of the message.
         # Hermes's MessageEvent only carries `text` to the agent's prompt —
         # there's no first-class files/attachments slot downstream — so the
@@ -3778,7 +4029,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 },
             )
         elif command == "quiet":
-            assistant_id = self._state.assistant_id_by_chat.get(chat_id)
+            assistant_id = self._style_assistant_id_for_chat(chat_id)
             if assistant_id is None:
                 await self._api.post_message(
                     chat_id=chat_id,
@@ -3918,6 +4169,9 @@ class BGOSAdapter(BasePlatformAdapter):
             choice = m_sc.group(1)
             confirm_id = m_sc.group(2)
             session_key = self._slash_confirm_state.pop(confirm_id, None)
+            original_title = self._slash_confirm_title_by_id.pop(
+                confirm_id, None,
+            )
             if session_key is None:
                 log.info("stale slash-confirm click confirm_id=%s", confirm_id)
                 return
@@ -3933,6 +4187,12 @@ class BGOSAdapter(BasePlatformAdapter):
             text = choice_labels.get(choice, choice)
             if user_id_label:
                 text += f" by {user_id_label}"
+            if original_title:
+                # Wire limitation: backend UpdateMessageDto does not whitelist
+                # eventMeta, so PATCH cannot change the collapsed title.
+                # Backend follow-up: add eventMeta to that whitelist. Until
+                # then, lead the mutable body with the outcome and title.
+                text += f": {original_title}"
             msg_id = data.get("message_id") or data.get("messageId")
             chat_id = data.get("chat_id") or data.get("chatId")
             if isinstance(msg_id, int):
@@ -4096,6 +4356,11 @@ class BGOSAdapter(BasePlatformAdapter):
                 click_chat_id,
                 session_handle if isinstance(session_handle, str) else None,
             )
+            addressed_assistant_id = self._int_or_none(assistant_id)
+            if addressed_assistant_id is not None:
+                self._state.addressed_assistant_id_by_chat[click_chat_id] = (
+                    addressed_assistant_id
+                )
 
         # Wrap into a gateway-native MessageEvent when Hermes is installed.
         if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
@@ -4251,6 +4516,11 @@ class BGOSAdapter(BasePlatformAdapter):
         chat_key = self._int_or_none(frame.chat_id)
         if chat_key is not None:
             self._state.record_inbound_chat(chat_key, None)
+            addressed_assistant_id = self._int_or_none(frame.assistant_id)
+            if addressed_assistant_id is not None:
+                self._state.addressed_assistant_id_by_chat[chat_key] = (
+                    addressed_assistant_id
+                )
         log.info(
             "voice_rpc frame op=%s rpc=%s assistant=%s chat=%s",
             frame.op, frame.rpc_id, frame.assistant_id, frame.chat_id,
