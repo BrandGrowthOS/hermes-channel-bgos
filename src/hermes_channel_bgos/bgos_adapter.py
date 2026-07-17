@@ -39,6 +39,7 @@ from .agents import enumerate_agents_from_env
 from .config import BgosConfig
 from .quiet_mode import (
     EVERYTHING,
+    TIDY,
     ChatStyleStore,
     classify_robot_talk,
     strip_voice_prefixes,
@@ -3188,9 +3189,10 @@ class BGOSAdapter(BasePlatformAdapter):
         Buttons: Approve Once / Always Approve / Cancel.
         Callback shape: sc:<choice>:<confirm_id>
 
-        The backend may not recognize messageType=slash_confirm yet — in
-        that case it'll likely render as plain text plus the inline option
-        chips, which is acceptable graceful degradation.
+        The backend rejects unknown messageType values. `slash_confirm` is
+        not in its enum, so that POST returns 400. Tidy chats use the event
+        shape as a reliability fix. Everything mode keeps the legacy
+        `slash_confirm` type for exact compatibility, with that known limit.
         """
         options = [
             {"text": "✅ Approve Once",     "callbackData": f"sc:once:{confirm_id}",
@@ -3201,13 +3203,36 @@ class BGOSAdapter(BasePlatformAdapter):
              "style": "danger",  "row_index": 1},
         ]
         body_text = f"**{title}**\n\n{message}" if title else message
-        resp = await self._api.post_message(
-            chat_id=int(chat_id),
-            text=body_text,
-            sender="assistant",
-            message_type="slash_confirm",
-            options=options,
-        )
+        chat_key = int(chat_id)
+        if self._chat_style_for(chat_key) == EVERYTHING:
+            resp = await self._api.post_message(
+                chat_id=chat_key,
+                text=body_text,
+                sender="assistant",
+                message_type="slash_confirm",
+                options=options,
+            )
+        else:
+            peek = next(
+                (
+                    line.strip()
+                    for line in message.splitlines()
+                    if line.strip()
+                ),
+                "",
+            )[:300]
+            resp = await self._api.post_message(
+                chat_id=chat_key,
+                text=body_text,
+                sender="assistant",
+                message_type="event",
+                options=options,
+                event_meta={
+                    "source": "confirm",
+                    "title": (title or "Please confirm")[:300],
+                    "peek": peek,
+                },
+            )
         self._slash_confirm_state[confirm_id] = session_key
         message_id = resp.get("id") if isinstance(resp, dict) else None
         return _send_result(message_id=message_id)
@@ -3253,13 +3278,36 @@ class BGOSAdapter(BasePlatformAdapter):
             {"text": "✗ No",  "callbackData": "update_prompt:n",
              "style": "default", "row_index": 0},
         ]
-        resp = await self._api.post_message(
-            chat_id=int(chat_id),
-            text=text,
-            sender="assistant",
-            message_type="standard",
-            options=options,
-        )
+        chat_key = int(chat_id)
+        if self._chat_style_for(chat_key) == EVERYTHING:
+            resp = await self._api.post_message(
+                chat_id=chat_key,
+                text=text,
+                sender="assistant",
+                message_type="standard",
+                options=options,
+            )
+        else:
+            peek = next(
+                (
+                    line.strip()
+                    for line in prompt.splitlines()
+                    if line.strip()
+                ),
+                "",
+            )[:300]
+            resp = await self._api.post_message(
+                chat_id=chat_key,
+                text=text,
+                sender="assistant",
+                message_type="event",
+                options=options,
+                event_meta={
+                    "source": "update",
+                    "title": "Small update ready",
+                    "peek": peek,
+                },
+            )
         message_id = resp.get("id") if isinstance(resp, dict) else None
         return _send_result(message_id=message_id)
 
@@ -3300,7 +3348,7 @@ class BGOSAdapter(BasePlatformAdapter):
         emits them differently and the adapter has to absorb both. See
         `_normalize_inbound_payload` for the alias table.
 
-        Bridge-local slash commands (`/new`, `/retry`, `/status`) are
+        Bridge-local slash commands (`/new`, `/retry`, `/status`, `/quiet`) are
         intercepted here and handled adapter-side — they never reach the
         Hermes agent. Everything else flows through `handle_message`.
 
@@ -3339,7 +3387,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # consumes the message exactly once, so the cursor must advance
         # regardless of which branch handles it. Without this guard, the
         # bridge-local short-circuit below skipped the save and the REST
-        # poll loop would keep re-finding /new (or /retry / /status) in
+        # poll loop would keep re-finding a bridge-local command in
         # `inbound?since_message_id=<stale_cursor>` every 5 seconds and
         # re-dispatching them — producing the live-server "50 conversation
         # reset acks in a row" loop caught 2026-05-15.
@@ -3633,9 +3681,7 @@ class BGOSAdapter(BasePlatformAdapter):
             )
 
     async def _handle_bridge_local(self, command: str, data: dict) -> None:
-        """Handle a `/new`, `/retry`, or `/status` slash command locally —
-        no round-trip to Hermes. Posts an ack/result back to BGOS so the
-        user sees a response."""
+        """Handle bridge-local slash commands without a Hermes round trip."""
         chat_id = data.get("chat_id")
         if not isinstance(chat_id, int):
             log.warning("bridge-local slash missing chat_id: %s", data)
@@ -3673,16 +3719,115 @@ class BGOSAdapter(BasePlatformAdapter):
             }
             await self._handle_inbound(replay, batchable=False)
         elif command == "status":
-            lines = [
-                "**BGOS adapter status**",
-                f"- Pairing: {self.pairing_id}",
-                f"- Assistants bound: {len(self._state.assistant_route)}",
-                f"- Last message id seen: {self._ws.last_message_id if self._ws else 0}",
-                f"- Pending approvals: {len(self._approval_state)}",
-            ]
+            assistants_bound = len(self._state.assistant_route)
+            last_message_id = self._ws.last_message_id if self._ws else 0
+            pending_approvals = len(self._approval_state)
+            if self._chat_style_for(chat_id) == EVERYTHING:
+                lines = [
+                    "**BGOS adapter status**",
+                    f"- Pairing: {self.pairing_id}",
+                    f"- Assistants bound: {assistants_bound}",
+                    f"- Last message id seen: {last_message_id}",
+                    f"- Pending approvals: {pending_approvals}",
+                ]
+                await self._api.post_message(
+                    chat_id=chat_id,
+                    text="\n".join(lines),
+                    sender="assistant",
+                    message_type="standard",
+                )
+                return
+
+            agent_word = "agent" if assistants_bound == 1 else "agents"
+            if assistants_bound:
+                verb = "is" if assistants_bound == 1 else "are"
+                summary = (
+                    f"Everything looks healthy. {assistants_bound} "
+                    f"{agent_word} {verb} connected and listening."
+                )
+                title = "Connected and healthy"
+            else:
+                summary = (
+                    "No agents are connected right now. Please check the "
+                    "connection."
+                )
+                title = "Connection needs attention"
+            lines = ["**Connection check**", summary]
+            if pending_approvals:
+                approval_word = (
+                    "approval" if pending_approvals == 1 else "approvals"
+                )
+                lines.append(
+                    f"Waiting on {pending_approvals} {approval_word} from you."
+                )
             await self._api.post_message(
                 chat_id=chat_id,
                 text="\n".join(lines),
+                sender="assistant",
+                message_type="event",
+                event_meta={
+                    "source": "status",
+                    "title": title,
+                    "peek": f"{assistants_bound} {agent_word} online",
+                    "payload": {
+                        "pairingId": self.pairing_id,
+                        "assistantsBound": assistants_bound,
+                        "lastMessageId": last_message_id,
+                        "pendingApprovals": pending_approvals,
+                    },
+                },
+            )
+        elif command == "quiet":
+            assistant_id = self._state.assistant_id_by_chat.get(chat_id)
+            if assistant_id is None:
+                await self._api.post_message(
+                    chat_id=chat_id,
+                    text=(
+                        "The quiet setting is not available yet for this chat."
+                    ),
+                    sender="assistant",
+                    message_type="standard",
+                )
+                return
+
+            raw_args = data.get("command_args")
+            args = (
+                raw_args.strip().lower()
+                if isinstance(raw_args, str)
+                else ""
+            )
+            if not args:
+                if self._chat_style_for(chat_id) == EVERYTHING:
+                    text = (
+                        "This chat shows everything raw. Send /quiet on to "
+                        "fold tool chatter into tidy cards."
+                    )
+                else:
+                    text = (
+                        "This chat is tidy: I keep tool chatter and system "
+                        "noise folded into cards. Send /quiet off to see "
+                        "everything raw."
+                    )
+            elif args == "on":
+                self._chat_style_store.set_style(assistant_id, TIDY)
+                text = (
+                    "Tidy mode is on. Tool chatter and system noise will "
+                    "fold into cards."
+                )
+            elif args == "off":
+                self._chat_style_store.set_style(assistant_id, EVERYTHING)
+                text = (
+                    "Raw mode is on. You will see every line exactly as it "
+                    "arrives."
+                )
+            else:
+                text = (
+                    "Use /quiet on for tidy chat or /quiet off to see "
+                    "everything raw."
+                )
+            await self._api.post_message(
+                chat_id=chat_id,
+                text=text,
                 sender="assistant",
                 message_type="standard",
             )

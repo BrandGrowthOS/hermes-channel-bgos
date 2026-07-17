@@ -764,10 +764,13 @@ async def test_snake_case_takes_precedence_over_camel_alias():
     # (unknown) and dropped → received would be empty.
 
 
-async def test_camelcase_slash_command_routes_to_bridge_local(mock_bgos_server):
+async def test_camelcase_slash_command_routes_to_bridge_local(
+    mock_bgos_server, monkeypatch,
+):
     """Slash commands also have to honor the camelCase shape, since the
     same WS event channel delivers them. Use a bridge-local command
     (/status) so we can verify routing without needing an agent."""
+    monkeypatch.setenv("BGOS_CHAT_STYLE", "everything")
     adapter = BGOSAdapter(BgosConfig(
         base_url=mock_bgos_server.url, pairing_token="pair_xyz",
     ))

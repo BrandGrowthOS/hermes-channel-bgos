@@ -4,8 +4,8 @@ The manifest BGOS stores for a given assistant is the merge of:
 - Hermes's native slash commands (from `hermes_cli.commands` or equivalent —
   the exact discovery API is resolved at runtime; this module falls back to
   an empty list when Hermes isn't installed).
-- Three curated bridge-locals handled adapter-side: `/new`, `/retry`,
-  `/status`. See the design spec §4 for the policy.
+- Four curated bridge-locals handled adapter-side: `/new`, `/retry`,
+  `/status`, `/quiet`. See the design spec §4 for the policy.
 
 Collision resolution: if Hermes defines a command with the same name as a
 bridge-local (most likely `/status`), the bridge-local wins. The adapter is
@@ -18,6 +18,7 @@ BRIDGE_LOCAL_COMMANDS: dict[str, str] = {
     "new": "Start a fresh conversation in this chat (bridge).",
     "retry": "Resend the last message (bridge).",
     "status": "Show adapter + Hermes health (bridge).",
+    "quiet": "Show or change how much behind-the-scenes work shows in this chat",
 }
 
 
@@ -30,7 +31,7 @@ def build_manifest(native: list[dict]) -> list[dict]:
     - Returns entries shaped `{command, description, scope}` with scope="all".
 
     Order: deduped native commands first (in their original order), then the
-    three bridge-locals appended in insertion order.
+    four bridge-locals appended in insertion order.
     """
     seen: set[str] = set()
     out: list[dict] = []
