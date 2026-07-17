@@ -1,6 +1,7 @@
 """Integration coverage for quiet prompt and command surfaces."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -177,6 +178,52 @@ async def test_slash_confirm_tidy_posts_event_and_records_state(
         await adapter.disconnect()
 
 
+async def test_slash_confirm_tidy_callback_leads_with_outcome_and_title(
+    mock_bgos_server, monkeypatch: pytest.MonkeyPatch,
+):
+    message_id = 9011
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(
+        201, {"id": message_id}
+    )
+    mock_bgos_server.on(
+        "PATCH", f"/api/v1/messages/{message_id}",
+    ).respond(200, {"id": message_id})
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm",
+        lambda *_args: None,
+    )
+    adapter = _adapter(mock_bgos_server)
+    try:
+        await adapter.send_slash_confirm(
+            chat_id=CHAT_ID,
+            title="Reload MCP?",
+            message="This invalidates the provider prompt cache.",
+            session_key="sess-1",
+            confirm_id="conf-outcome",
+        )
+        await adapter._handle_callback(
+            {
+                "callback_data": "sc:once:conf-outcome",
+                "user_id": "user_kc",
+                "message_id": message_id,
+                "chat_id": CHAT_ID,
+            }
+        )
+
+        patch = mock_bgos_server.last_request(
+            "PATCH", f"/api/v1/messages/{message_id}"
+        ).json_body
+        assert patch == {
+            "text": "✅ Approved once by user_kc: Reload MCP?",
+            "options": [],
+            "userId": "user_kc",
+        }
+        assert "eventMeta" not in patch
+    finally:
+        await adapter.disconnect()
+
+
 async def test_slash_confirm_everything_preserves_legacy_wire_shape(
     mock_bgos_server,
 ):
@@ -293,6 +340,69 @@ async def test_quiet_off_persists_and_no_arg_reports_raw_mode(
         assert posts[-1]["text"] == (
             "This chat shows everything raw. Send /quiet on to fold tool "
             "chatter into tidy cards."
+        )
+    finally:
+        await adapter.disconnect()
+
+
+async def test_first_inbound_quiet_command_uses_addressed_assistant(
+    mock_bgos_server,
+):
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(
+        201, {"id": 9012}
+    )
+    adapter = _adapter(mock_bgos_server, bind_chat=False)
+    try:
+        await adapter._handle_inbound(
+            {
+                "assistant_id": ASSISTANT_ID,
+                "chat_id": CHAT_ID,
+                "message_id": 1003,
+                "user_id": "user_kc",
+                "text": "/quiet off",
+                "files": [],
+                "message_type": "slash_command",
+                "command_name": "quiet",
+                "command_args": "off",
+            },
+            batchable=False,
+        )
+
+        assert ChatStyleStore().style_for(ASSISTANT_ID) == EVERYTHING
+        assert _message_posts(mock_bgos_server)[-1]["text"] == (
+            "Raw mode is on. You will see every line exactly as it arrives."
+        )
+    finally:
+        await adapter.disconnect()
+
+
+async def test_voice_rpc_records_addressed_assistant(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = BGOSAdapter(
+        BgosConfig(base_url="http://invalid", pairing_token="pair_xyz")
+    )
+
+    class Handler:
+        async def handle(self, _frame) -> None:
+            return None
+
+    monkeypatch.setattr(adapter, "_voice_handler", lambda: Handler())
+    try:
+        await adapter._handle_voice_rpc(
+            {
+                "rpcId": "rpc-1",
+                "op": "consult",
+                "assistantId": ASSISTANT_ID,
+                "agentRoute": "default",
+                "chatId": CHAT_ID,
+                "payload": {},
+            }
+        )
+        await asyncio.sleep(0)
+
+        assert adapter._state.addressed_assistant_id_by_chat[CHAT_ID] == (
+            ASSISTANT_ID
         )
     finally:
         await adapter.disconnect()
