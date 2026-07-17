@@ -22,8 +22,10 @@ from hermes_channel_bgos.config import BgosConfig
 # ---------------------------------------------------------------------------
 
 
-def test_bridge_local_set_is_exactly_three():
-    assert set(BRIDGE_LOCAL_COMMANDS.keys()) == {"new", "retry", "status"}
+def test_bridge_local_set_is_exactly_four():
+    assert set(BRIDGE_LOCAL_COMMANDS.keys()) == {
+        "new", "retry", "status", "quiet",
+    }
 
 
 def test_build_manifest_merges_with_bridge_locals_appended_last():
@@ -33,7 +35,7 @@ def test_build_manifest_merges_with_bridge_locals_appended_last():
     ]
     merged = build_manifest(native)
     names = [c["command"] for c in merged]
-    assert names == ["help", "stop", "new", "retry", "status"]
+    assert names == ["help", "stop", "new", "retry", "status", "quiet"]
 
 
 def test_build_manifest_resolves_status_collision_in_bridge_favor():
@@ -82,8 +84,10 @@ def test_build_manifest_strips_empty_command_names():
     native = [{"command": "", "description": "blank"},
               {"command": "   ", "description": "whitespace"}]
     merged = build_manifest(native)
-    # Only the three bridge-locals
-    assert [c["command"] for c in merged] == ["new", "retry", "status"]
+    # Only the four bridge-locals
+    assert [c["command"] for c in merged] == [
+        "new", "retry", "status", "quiet",
+    ]
 
 
 def test_build_manifest_lowercases_names():
@@ -250,6 +254,7 @@ async def test_bridge_local_retry_with_nothing_to_replay_posts_notice(
 @pytest.mark.asyncio
 async def test_bridge_local_status_posts_summary(mock_bgos_server, monkeypatch):
     mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 903})
+    monkeypatch.setenv("BGOS_CHAT_STYLE", "everything")
 
     handled: list = []
     adapter = await _connected_adapter(mock_bgos_server)
@@ -296,7 +301,7 @@ async def test_sync_commands_for_puts_merged_manifest(mock_bgos_server, monkeypa
             "PUT", "/api/v1/integrations/assistants/7/commands",
         )
         names = [c["command"] for c in req.json_body["commands"]]
-        assert names == ["help", "new", "retry", "status"]
+        assert names == ["help", "new", "retry", "status", "quiet"]
     finally:
         await adapter.disconnect()
 

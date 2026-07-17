@@ -22,7 +22,11 @@ class StateStore:
     conversation_by_chat: dict[int, str] = field(default_factory=dict)
     last_assistant_message_by_chat: dict[int, int] = field(default_factory=dict)
     last_user_id_by_chat: dict[int, str] = field(default_factory=dict)
+    # The assistant addressed by the inbound event. This can differ from the
+    # chat owner for a2a side threads, so style lookup must keep it separate.
+    addressed_assistant_id_by_chat: dict[int, int] = field(default_factory=dict)
     assistant_id_by_chat: dict[int, int] = field(default_factory=dict)
+    chat_kind_by_chat: dict[int, str] = field(default_factory=dict)
     # Server-authoritative chat addressing (2026-05-30 hardening). The
     # adapter must NEVER originate a chat_id the agent invented — every
     # outbound send/edit/get_chat_info MUST target a chat the adapter has

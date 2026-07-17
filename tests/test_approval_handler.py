@@ -264,6 +264,7 @@ async def test_approval_callback_edit_swallows_patch_errors(monkeypatch, caplog)
 
 
 async def test_send_slash_confirm_renders_three_buttons(monkeypatch):
+    monkeypatch.setenv("BGOS_CHAT_STYLE", "everything")
     adapter = _make_adapter()
     captured = []
     async def fake_post(**kw):

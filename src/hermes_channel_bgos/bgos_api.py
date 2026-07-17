@@ -291,6 +291,7 @@ class BgosApi:
         files: list[dict] | None = None,
         options: list[dict] | None = None,
         approval_meta: dict | None = None,
+        event_meta: dict | None = None,
         render_mode: str | None = None,
         reply_to_id: int | None = None,
         turn_state: str | None = None,
@@ -336,6 +337,8 @@ class BgosApi:
             body["options"] = options
         if approval_meta is not None:
             body["approvalMeta"] = approval_meta
+        if event_meta is not None:
+            body["eventMeta"] = event_meta
         if render_mode is not None:
             body["renderMode"] = render_mode
         if reply_to_id is not None:
@@ -441,13 +444,15 @@ class BgosApi:
         files: list[dict] | None = None,
         options: list[dict] | None = None,
         approval_meta: dict | None = None,
+        event_meta: dict | None = None,
         render_mode: str | None = None,
         reply_to_id: int | None = None,
         tool_progress: dict | None = None,
         session_handle: str | None = None,
     ) -> dict:
         """POST to /api/v1/messages. Wire format matches backend CreateMessageDto
-        (camelCase: chatId, messageType, approvalMeta, renderMode, replyToId).
+        (camelCase: chatId, messageType, approvalMeta, eventMeta, renderMode,
+        replyToId).
         `sender` is `"assistant"` (lowercase — matches enum) or `"user"`.
 
         `options` entries should be shaped {text, callbackData, style?} —
@@ -479,6 +484,8 @@ class BgosApi:
             body["options"] = options
         if approval_meta is not None:
             body["approvalMeta"] = approval_meta
+        if event_meta is not None:
+            body["eventMeta"] = event_meta
         if render_mode is not None:
             body["renderMode"] = render_mode
         if reply_to_id is not None:
