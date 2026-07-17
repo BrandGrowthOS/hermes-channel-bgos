@@ -1,10 +1,11 @@
-"""Tests for hermes_channel_bgos.bgos_ws — the Socket.IO client."""
+"""Tests for hermes_channel_bgos.bgos_ws - the Socket.IO client."""
 from __future__ import annotations
 
 import asyncio
 
 import pytest
 
+import hermes_channel_bgos.bgos_ws as bgos_ws_module
 from hermes_channel_bgos.bgos_ws import BgosWs
 from hermes_channel_bgos.config import BgosConfig
 
@@ -143,7 +144,7 @@ async def test_last_message_id_tracked_from_inbound(mock_bgos_server):
         "python-socketio client treats server-initiated sio.disconnect(sid) as a "
         "clean close and does not reconnect. Simulating a true network blip in a "
         "unit test would require restart-with-same-port gymnastics. The on_reconnect "
-        "hook is exercised by real-server E2E in Phase 4 — the code path itself is "
+        "hook is exercised by real-server E2E in Phase 4 - the code path itself is "
         "the `_was_connected` flag + a single callback invocation in the connect "
         "handler, straightforwardly correct by inspection."
     )
@@ -191,7 +192,7 @@ async def test_reconnect_fires_on_reconnect_callback(mock_bgos_server):
 
 async def test_emit_typing_emits_to_server(mock_bgos_server):
     """emit_typing publishes a `typing` Socket.IO event with chatId +
-    assistantId — backend will forward an ephemeral typing indicator to
+    assistantId - backend will forward an ephemeral typing indicator to
     clients viewing this chat."""
     captured: list[dict] = []
 
@@ -218,13 +219,13 @@ async def test_emit_typing_emits_to_server(mock_bgos_server):
 async def test_emit_typing_is_noop_when_disconnected(mock_bgos_server):
     """Best-effort semantics: if the socket isn't connected (never
     started, or dropped), emit_typing returns silently rather than
-    raising — typing indicators are cosmetic."""
+    raising - typing indicators are cosmetic."""
     ws = BgosWs(
         BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
         on_inbound_message=_noop_cb,
         on_callback_result=_noop_cb,
     )
-    # Never called ws.start() — socket is not connected
+    # Never called ws.start() - socket is not connected
     await ws.emit_typing(chat_id=42, assistant_id=3)
     # No assertion needed beyond "did not raise"
 
@@ -256,3 +257,40 @@ async def test_async_callback_is_awaited(mock_bgos_server):
         assert len(received) == 1
     finally:
         await ws.stop()
+
+
+async def test_skills_rpc_dispatches_to_lazy_bridge(monkeypatch):
+    configs: list[BgosConfig] = []
+    frames: list[dict] = []
+
+    class FakeSkillsBridge:
+        def __init__(self, config: BgosConfig) -> None:
+            configs.append(config)
+
+        async def handle_frame(self, frame: dict) -> None:
+            frames.append(frame)
+
+    monkeypatch.setattr(bgos_ws_module, "SkillsBridge", FakeSkillsBridge)
+    config = BgosConfig(
+        base_url="https://bgos.test",
+        pairing_token="pair_xyz",
+    )
+    ws = BgosWs(
+        config,
+        on_inbound_message=_noop_cb,
+        on_callback_result=_noop_cb,
+    )
+    ws.bind_pairing(42)
+    assert configs == []
+    frame = {
+        "rpcId": "rpc-skills-1",
+        "op": "catalog",
+        "assistantId": "7",
+        "payload": {},
+    }
+
+    handler = ws._sio.handlers["/"]["skills_rpc"]
+    await handler(frame)
+
+    assert configs == [config]
+    assert frames == [frame]
