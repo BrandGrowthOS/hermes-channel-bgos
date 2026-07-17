@@ -7,6 +7,7 @@
 #   HERMES_PYTHON=/path/to/hermes/python
 #   BGOS_AGENTS="default:Hermes"
 #   BGOS_PAIR_CODE="BGOS-XXXX-XX"
+#     BGOS_CODE is accepted as a synonym for BGOS_PAIR_CODE.
 #   DEVICE_LABEL="my-server"
 #   HERMES_SERVICE="hermes-gateway.service"
 #   REPO_DIR="$HOME/hermes-channel-bgos"
@@ -166,7 +167,7 @@ EOF
 
 pair_if_requested() {
   local py="$1"
-  local code="${BGOS_PAIR_CODE:-}"
+  local code="${BGOS_PAIR_CODE:-${BGOS_CODE:-}}"
   if [[ -z "$code" && ! -f "$HOME/.hermes/secrets/bgos.json" && -t 0 ]]; then
     echo
     log "Open BGOS → Integrations → Hermes → Connect a new Hermes server."
@@ -229,4 +230,4 @@ main() {
   fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then main "$@"; fi
