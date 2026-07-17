@@ -49,6 +49,7 @@ from .quiet_mode import (
     strip_voice_prefixes,
 )
 from .state_store import StateStore
+from .voice_notes import collect_voice_notes, voice_notes_enabled
 from .voice_rpc import (
     VoiceConfig,
     VoiceRpcDeps,
@@ -4024,14 +4025,66 @@ class BGOSAdapter(BasePlatformAdapter):
                 if event.message_type == "slash_command"
                 else _GatewayMessageType.TEXT  # type: ignore[attr-defined]
             )
-            gateway_event = _GatewayMessageEvent(
-                text=agent_visible_text,
-                message_type=msg_type,
-                source=source,
-                message_id=str(event.message_id),
-                raw_message=event,
-                internal=is_backfill,
-            )
+            voice_media: list[tuple[str, str]] = []
+            if event.message_type != "slash_command":
+                try:
+                    if voice_notes_enabled() and event.files:
+                        voice_media = await collect_voice_notes(event.files)
+                except Exception:
+                    log.warning(
+                        "failed to collect inbound BGOS voice notes",
+                        exc_info=True,
+                    )
+            try:
+                voice_type = getattr(_GatewayMessageType, "VOICE", None)
+            except Exception:
+                log.warning("failed to resolve Hermes VOICE type", exc_info=True)
+                voice_type = None
+            if voice_media and voice_type is not None:
+                msg_type = voice_type
+            try:
+                gateway_event = _GatewayMessageEvent(
+                    text=agent_visible_text,
+                    message_type=msg_type,
+                    source=source,
+                    message_id=str(event.message_id),
+                    raw_message=event,
+                    internal=is_backfill,
+                )
+            except Exception:
+                if not voice_media or voice_type is None:
+                    raise
+                log.warning(
+                    "failed to construct inbound BGOS VOICE event",
+                    exc_info=True,
+                )
+                voice_media = []
+                gateway_event = _GatewayMessageEvent(
+                    text=agent_visible_text,
+                    message_type=_GatewayMessageType.TEXT,
+                    source=source,
+                    message_id=str(event.message_id),
+                    raw_message=event,
+                    internal=is_backfill,
+                )
+            if voice_media and voice_type is not None:
+                try:
+                    gateway_event.media_urls = [path for path, _ in voice_media]
+                    gateway_event.media_types = [mime for _, mime in voice_media]
+                except Exception:
+                    log.warning(
+                        "failed to attach inbound BGOS voice note media",
+                        exc_info=True,
+                    )
+                    for attr, value in (
+                        ("message_type", _GatewayMessageType.TEXT),
+                        ("media_urls", []),
+                        ("media_types", []),
+                    ):
+                        try:
+                            setattr(gateway_event, attr, value)
+                        except Exception:
+                            pass
             await self.handle_message(gateway_event)
         else:
             event.text = agent_visible_text

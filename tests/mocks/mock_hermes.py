@@ -12,7 +12,8 @@ changes its surface, we revisit.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 
@@ -97,6 +98,25 @@ class BasePlatformAdapter:
     # (gateway/run.py:12580). Defining it here would let the production-
     # incompatible identity-style override-gate check pass in tests but
     # fail on a real Hermes install — caught live on kc's server 2026-05-12.
+
+
+class MessageType(Enum):
+    TEXT = "text"
+    COMMAND = "command"
+    VOICE = "voice"
+    AUDIO = "audio"
+
+
+@dataclass
+class MessageEvent:
+    text: str
+    message_type: MessageType
+    source: Any
+    message_id: str | None = None
+    raw_message: Any = None
+    internal: bool = False
+    media_urls: list[str] = field(default_factory=list)
+    media_types: list[str] = field(default_factory=list)
 
 
 @dataclass
