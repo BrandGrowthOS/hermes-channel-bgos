@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import asyncio
+import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable
@@ -17,11 +18,18 @@ from hermes_channel_bgos.config import BgosConfig
 pytestmark = pytest.mark.asyncio
 
 
-def _write_skill(skills_dir: Path, name: str, description: str) -> Path:
+def _write_skill(
+    skills_dir: Path,
+    name: str,
+    description: str,
+    *,
+    frontmatter_name: str | None = None,
+) -> Path:
     skill_dir = skills_dir / name
     skill_dir.mkdir(parents=True, exist_ok=True)
+    display_name = frontmatter_name or name
     (skill_dir / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: {description}\n---\n\nInstructions.\n",
+        f"---\nname: {display_name}\ndescription: {description}\n---\n\nInstructions.\n",
         encoding="utf-8",
     )
     return skill_dir
@@ -168,6 +176,7 @@ async def test_list_installed_classifies_bundled_hub_and_self_taught(monkeypatch
     )
     _write_skill(skills_dir, "bundled-skill", "Bundled description")
     _write_skill(skills_dir, "hub-skill", "Hub description")
+    _write_skill(skills_dir, "official-skill", "Official description")
     _write_skill(skills_dir, "learned-skill", "Learned description")
     _install_fake_machinery(
         monkeypatch,
@@ -176,7 +185,8 @@ async def test_list_installed_classifies_bundled_hub_and_self_taught(monkeypatch
                 "source": "github",
                 "trust_level": "trusted",
                 "installed_at": "2026-07-01T12:00:00Z",
-            }
+            },
+            "official-skill": {"source": "official"},
         },
     )
     bridge, posts = _make_bridge(monkeypatch)
@@ -188,7 +198,18 @@ async def test_list_installed_classifies_bundled_hub_and_self_taught(monkeypatch
     result = _result_bodies(posts)[0]
     assert result["ok"] is True
     by_name = {item["name"]: item for item in result["payload"]["skills"]}
-    assert set(by_name) == {"bundled-skill", "hub-skill", "learned-skill"}
+    assert set(by_name) == {
+        "bundled-skill",
+        "hub-skill",
+        "official-skill",
+        "learned-skill",
+    }
+    assert {item["identifier"] for item in by_name.values()} == {
+        "bundled-skill",
+        "hub-skill",
+        "official-skill",
+        "learned-skill",
+    }
     assert (by_name["bundled-skill"]["provenance"], by_name["bundled-skill"]["removable"]) == (
         "bundled",
         False,
@@ -200,11 +221,53 @@ async def test_list_installed_classifies_bundled_hub_and_self_taught(monkeypatch
     assert by_name["hub-skill"]["source"] == "github"
     assert by_name["hub-skill"]["trust"] == "trusted"
     assert by_name["hub-skill"]["installedAt"] == "2026-07-01T12:00:00Z"
+    assert (
+        by_name["official-skill"]["provenance"],
+        by_name["official-skill"]["removable"],
+    ) == ("official", True)
+    assert by_name["official-skill"]["source"] == "official"
     assert (by_name["learned-skill"]["provenance"], by_name["learned-skill"]["removable"]) == (
         "self_taught",
         False,
     )
     assert "learnedAt" in by_name["learned-skill"]
+
+
+async def test_list_installed_uses_lock_install_path_before_leaf_name(monkeypatch):
+    skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
+    _write_skill(
+        skills_dir,
+        "shared-leaf",
+        "Root skill",
+        frontmatter_name="Root Display",
+    )
+    _write_skill(
+        skills_dir / "category",
+        "shared-leaf",
+        "Nested store skill",
+        frontmatter_name="Nested Display",
+    )
+    _install_fake_machinery(
+        monkeypatch,
+        hub_records={
+            "shared-leaf": {
+                "source": "github",
+                "install_path": "category/shared-leaf",
+            }
+        },
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-install-path-list", "op": "list_installed", "payload": {}}
+    )
+
+    skills = _result_bodies(posts)[0]["payload"]["skills"]
+    by_name = {item["name"]: item for item in skills}
+    assert by_name["Root Display"]["provenance"] == "self_taught"
+    assert by_name["Root Display"]["removable"] is False
+    assert by_name["Nested Display"]["provenance"] == "hub"
+    assert by_name["Nested Display"]["removable"] is True
 
 
 async def test_catalog_without_query_browses_and_maps_installed_flags(monkeypatch):
@@ -357,6 +420,164 @@ async def test_install_happy_path_posts_progress_and_verified_result(monkeypatch
     }
 
 
+async def test_install_display_name_hint_verifies_new_slug_lock_record(monkeypatch):
+    records: dict[str, dict[str, Any]] = {}
+
+    def install(identifier: str, _console: Any, _name_override: str) -> None:
+        records["internal-bundle-key"] = {
+            "source": "github",
+            "identifier": identifier,
+        }
+
+    _install_fake_machinery(
+        monkeypatch,
+        hub_records=records,
+        install_impl=install,
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-display-name",
+            "op": "install",
+            "payload": {
+                "identifier": "owner/repo/source-skill",
+                "name": "Catalog Display Name",
+            },
+        }
+    )
+
+    assert _result_bodies(posts)[0] == {
+        "ok": True,
+        "payload": {"name": "Catalog Display Name"},
+    }
+
+
+async def test_install_verifies_new_local_directory_against_identifier_slug(monkeypatch):
+    skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
+
+    def install(_identifier: str, _console: Any, _name_override: str) -> None:
+        _write_skill(
+            skills_dir,
+            "local-slug",
+            "Installed locally",
+            frontmatter_name="Internal Frontmatter Name",
+        )
+
+    _install_fake_machinery(monkeypatch, install_impl=install)
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-local-slug",
+            "op": "install",
+            "payload": {
+                "identifier": "owner/repo/local-slug",
+                "name": "Catalog Local Name",
+            },
+        }
+    )
+
+    assert _result_bodies(posts)[0] == {
+        "ok": True,
+        "payload": {"name": "Catalog Local Name"},
+    }
+
+
+async def test_install_does_not_treat_rewritten_local_path_as_new(monkeypatch):
+    skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
+    _write_skill(
+        skills_dir,
+        "existing-directory",
+        "Existing local skill",
+        frontmatter_name="Old Frontmatter Name",
+    )
+
+    def install(_identifier: str, _console: Any, _name_override: str) -> None:
+        _write_skill(
+            skills_dir,
+            "existing-directory",
+            "Rewritten local skill",
+            frontmatter_name="target-slug",
+        )
+
+    _install_fake_machinery(monkeypatch, install_impl=install)
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-rewritten-local",
+            "op": "install",
+            "payload": {"identifier": "owner/repo/target-slug"},
+        }
+    )
+
+    assert _result_bodies(posts)[0]["error"]["code"] == "install_failed"
+
+
+async def test_concurrent_installs_run_machinery_sequentially(monkeypatch):
+    records: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release_first = threading.Event()
+
+    def install(identifier: str, _console: Any, _name_override: str) -> None:
+        slug = identifier.rsplit("/", 1)[-1]
+        order.append(f"start:{slug}")
+        if slug == "first-skill":
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        else:
+            second_started.set()
+        records[slug] = {"source": "github", "identifier": identifier}
+        order.append(f"end:{slug}")
+
+    _install_fake_machinery(
+        monkeypatch,
+        hub_records=records,
+        install_impl=install,
+    )
+    bridge, _posts = _make_bridge(monkeypatch)
+    first_task = asyncio.create_task(
+        bridge.handle_frame(
+            {
+                "rpcId": "rpc-first-concurrent",
+                "op": "install",
+                "payload": {"identifier": "owner/repo/first-skill"},
+            }
+        )
+    )
+    second_task: asyncio.Task[None] | None = None
+
+    try:
+        assert await asyncio.to_thread(first_started.wait, 1)
+        second_task = asyncio.create_task(
+            bridge.handle_frame(
+                {
+                    "rpcId": "rpc-second-concurrent",
+                    "op": "install",
+                    "payload": {"identifier": "owner/repo/second-skill"},
+                }
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not second_started.is_set()
+    finally:
+        release_first.set()
+        tasks = [first_task]
+        if second_task is not None:
+            tasks.append(second_task)
+        await asyncio.gather(*tasks)
+
+    assert order == [
+        "start:first-skill",
+        "end:first-skill",
+        "start:second-skill",
+        "end:second-skill",
+    ]
+
+
 async def test_install_already_installed_does_not_call_installer(monkeypatch):
     state = _install_fake_machinery(
         monkeypatch,
@@ -415,11 +636,14 @@ async def test_install_could_not_fetch_console_output_maps_to_not_found(monkeypa
     assert _result_bodies(posts)[0]["error"]["code"] == "not_found"
 
 
-async def test_install_verifies_the_expected_name_not_only_identifier(monkeypatch):
+async def test_install_rejects_unrelated_new_lock_record(monkeypatch):
     records: dict[str, dict[str, Any]] = {}
 
     def install(identifier: str, _console: Any, _name_override: str) -> None:
-        records["different-name"] = {"identifier": identifier, "source": "github"}
+        records["source-skill"] = {
+            "identifier": "owner/repo/unrelated-skill",
+            "source": "github",
+        }
 
     _install_fake_machinery(
         monkeypatch,
@@ -440,6 +664,82 @@ async def test_install_verifies_the_expected_name_not_only_identifier(monkeypatc
     )
 
     assert _result_bodies(posts)[0]["error"]["code"] == "install_failed"
+
+
+async def test_ack_failure_does_not_skip_install(monkeypatch):
+    records: dict[str, dict[str, Any]] = {}
+
+    def install(identifier: str, _console: Any, _name_override: str) -> None:
+        records["ack-skill"] = {"source": "github", "identifier": identifier}
+
+    state = _install_fake_machinery(
+        monkeypatch,
+        hub_records=records,
+        install_impl=install,
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    async def fail_ack(path: str, body: dict[str, Any]) -> None:
+        posts.append((path, body))
+        if path.endswith("/ack"):
+            raise RuntimeError("ack unavailable")
+
+    monkeypatch.setattr(bridge, "_post", fail_ack)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-ack-failure",
+            "op": "install",
+            "payload": {"identifier": "owner/repo/ack-skill"},
+        }
+    )
+
+    assert len(state["install_calls"]) == 1
+    assert _result_bodies(posts)[0] == {
+        "ok": True,
+        "payload": {"name": "ack-skill"},
+    }
+
+
+@pytest.mark.parametrize("failed_stage", ["starting", "installing", "verifying"])
+async def test_progress_failure_is_advisory_for_install(monkeypatch, failed_stage):
+    records: dict[str, dict[str, Any]] = {}
+
+    def install(identifier: str, _console: Any, _name_override: str) -> None:
+        records["progress-skill"] = {"source": "github", "identifier": identifier}
+
+    _install_fake_machinery(
+        monkeypatch,
+        hub_records=records,
+        install_impl=install,
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    async def fail_progress(path: str, body: dict[str, Any]) -> None:
+        posts.append((path, body))
+        if path.endswith("/progress") and body.get("stage") == failed_stage:
+            raise RuntimeError("progress unavailable")
+
+    monkeypatch.setattr(bridge, "_post", fail_progress)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": f"rpc-progress-{failed_stage}",
+            "op": "install",
+            "payload": {"identifier": "owner/repo/progress-skill"},
+        }
+    )
+
+    assert _result_bodies(posts)[0] == {
+        "ok": True,
+        "payload": {"name": "progress-skill"},
+    }
+
+
+async def test_install_timeout_is_aligned_with_broker_cap():
+    from hermes_channel_bgos import skills_bridge
+
+    assert 290.0 <= skills_bridge._INSTALL_TIMEOUT_SECONDS < 300.0
 
 
 async def test_import_error_reports_machinery_unavailable(monkeypatch):
@@ -526,6 +826,59 @@ async def test_result_post_retries_one_transport_error(monkeypatch):
     assert result_attempts == 2
 
 
+async def test_result_post_retries_one_server_error(monkeypatch):
+    bridge, posts = _make_bridge(monkeypatch)
+    result_attempts = 0
+
+    async def flaky_result(path: str, body: dict[str, Any]) -> None:
+        nonlocal result_attempts
+        posts.append((path, body))
+        if path.endswith("/result"):
+            result_attempts += 1
+            if result_attempts == 1:
+                request = httpx.Request("POST", "https://bgos.test/result")
+                response = httpx.Response(503, request=request)
+                raise httpx.HTTPStatusError(
+                    "service unavailable",
+                    request=request,
+                    response=response,
+                )
+
+    monkeypatch.setattr(bridge, "_post", flaky_result)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-retry-server", "op": "wat", "payload": {}}
+    )
+
+    assert result_attempts == 2
+
+
+async def test_result_post_does_not_retry_client_error(monkeypatch):
+    bridge, posts = _make_bridge(monkeypatch)
+    result_attempts = 0
+
+    async def rejected_result(path: str, body: dict[str, Any]) -> None:
+        nonlocal result_attempts
+        posts.append((path, body))
+        if path.endswith("/result"):
+            result_attempts += 1
+            request = httpx.Request("POST", "https://bgos.test/result")
+            response = httpx.Response(409, request=request)
+            raise httpx.HTTPStatusError(
+                "conflict",
+                request=request,
+                response=response,
+            )
+
+    monkeypatch.setattr(bridge, "_post", rejected_result)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-client-error", "op": "wat", "payload": {}}
+    )
+
+    assert result_attempts == 1
+
+
 async def test_list_installed_ignores_stale_records_without_skill_dirs(monkeypatch):
     skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
     skills_dir.mkdir(parents=True)
@@ -544,6 +897,205 @@ async def test_list_installed_ignores_stale_records_without_skill_dirs(monkeypat
     )
 
     assert _result_bodies(posts)[0]["payload"]["skills"] == []
+
+
+async def test_list_installed_skips_dependency_and_skill_support_trees(monkeypatch):
+    skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
+    _write_skill(skills_dir, "parent-skill", "Real parent skill")
+    for support_dir in ("references", "templates", "assets", "scripts"):
+        _write_skill(
+            skills_dir / "parent-skill" / support_dir,
+            f"phantom-{support_dir}",
+            "Nested support package",
+        )
+    for excluded_dir in (
+        ".git",
+        ".github",
+        ".hub",
+        ".archive",
+        ".venv",
+        "venv",
+        "node_modules",
+        "site-packages",
+        "__pycache__",
+        ".tox",
+        ".nox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    ):
+        _write_skill(
+            skills_dir / excluded_dir,
+            f"phantom-{excluded_dir.replace('.', 'dot')}",
+            "Dependency package",
+        )
+    _write_skill(
+        skills_dir / "references",
+        "legit-category-skill",
+        "A support-like category is valid here",
+    )
+    _install_fake_machinery(monkeypatch)
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-filter-list", "op": "list_installed", "payload": {}}
+    )
+
+    skills = _result_bodies(posts)[0]["payload"]["skills"]
+    assert {item["name"] for item in skills} == {
+        "parent-skill",
+        "legit-category-skill",
+    }
+
+
+async def test_list_installed_combines_machinery_and_fallback_exclusions(monkeypatch):
+    skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
+    _write_skill(skills_dir, "kept-skill", "Visible skill")
+    _write_skill(skills_dir, "machinery-hidden", "Hidden by machinery")
+    _write_skill(skills_dir, "parent-skill", "Parent skill")
+    _write_skill(
+        skills_dir / "parent-skill" / "references",
+        "fallback-hidden",
+        "Hidden by the fallback",
+    )
+    calls: list[Path] = []
+
+    def legacy_excluder(path: Path) -> bool:
+        calls.append(path)
+        return "machinery-hidden" in path.parts
+
+    _install_fake_machinery(monkeypatch)
+    tools_module = sys.modules["tools.skills_hub"]
+    tools_module.is_excluded_skill_path = legacy_excluder  # type: ignore[attr-defined]
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-combined-filter", "op": "list_installed", "payload": {}}
+    )
+
+    skills = _result_bodies(posts)[0]["payload"]["skills"]
+    assert {item["name"] for item in skills} == {"kept-skill", "parent-skill"}
+    assert len(calls) == 4
+
+
+async def test_list_and_remove_use_canonical_lock_key_for_display_name(monkeypatch):
+    skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
+    _write_skill(
+        skills_dir,
+        "canonical-slug",
+        "Friendly description",
+        frontmatter_name="Friendly Display",
+    )
+    records: dict[str, dict[str, Any]] = {
+        "canonical-slug": {"source": "github"},
+    }
+
+    def uninstall(name: str, _console: Any) -> None:
+        records.pop(name, None)
+
+    state = _install_fake_machinery(
+        monkeypatch,
+        hub_records=records,
+        uninstall_impl=uninstall,
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-canonical-list", "op": "list_installed", "payload": {}}
+    )
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-canonical-remove",
+            "op": "remove",
+            "payload": {"name": "Friendly Display"},
+        }
+    )
+
+    listed = _result_bodies(posts)[0]["payload"]["skills"]
+    assert listed == [
+        {
+            "name": "Friendly Display",
+            "identifier": "canonical-slug",
+            "description": "Friendly description",
+            "provenance": "hub",
+            "removable": True,
+            "source": "github",
+        }
+    ]
+    assert state["uninstall_calls"][0]["name"] == "canonical-slug"
+    assert _result_bodies(posts)[1] == {"ok": True, "payload": {}}
+
+
+async def test_remove_prefers_identifier_over_display_name(monkeypatch):
+    records: dict[str, dict[str, Any]] = {
+        "canonical-slug": {"source": "official"},
+    }
+
+    def uninstall(name: str, _console: Any) -> None:
+        records.pop(name, None)
+
+    state = _install_fake_machinery(
+        monkeypatch,
+        hub_records=records,
+        uninstall_impl=uninstall,
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-identifier-remove",
+            "op": "remove",
+            "payload": {
+                "identifier": "canonical-slug",
+                "name": "Wrong Display Name",
+            },
+        }
+    )
+
+    assert state["uninstall_calls"][0]["name"] == "canonical-slug"
+    assert _result_bodies(posts)[0] == {"ok": True, "payload": {}}
+
+
+async def test_remove_display_name_wins_over_another_skill_lock_key(monkeypatch):
+    skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
+    _write_skill(
+        skills_dir,
+        "first-key",
+        "First skill",
+        frontmatter_name="second-key",
+    )
+    _write_skill(
+        skills_dir,
+        "second-key",
+        "Second skill",
+        frontmatter_name="Second Display",
+    )
+    records: dict[str, dict[str, Any]] = {
+        "first-key": {"source": "github"},
+        "second-key": {"source": "github"},
+    }
+
+    def uninstall(name: str, _console: Any) -> None:
+        records.pop(name, None)
+
+    state = _install_fake_machinery(
+        monkeypatch,
+        hub_records=records,
+        uninstall_impl=uninstall,
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-colliding-display",
+            "op": "remove",
+            "payload": {"name": "second-key"},
+        }
+    )
+
+    assert state["uninstall_calls"][0]["name"] == "first-key"
+    assert "second-key" in records
+    assert _result_bodies(posts)[0] == {"ok": True, "payload": {}}
 
 
 async def test_remove_refuses_non_hub_and_removes_hub_skill(monkeypatch):

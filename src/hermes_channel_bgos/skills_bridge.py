@@ -25,10 +25,31 @@ log = logging.getLogger(__name__)
 _RPC_ROOT = "/api/v1/integrations/skills-rpc"
 _HTTP_TIMEOUT_SECONDS = 10.0
 _CATALOG_TIMEOUT_SECONDS = 15.0
-_INSTALL_TIMEOUT_SECONDS = 240.0
+# asyncio.to_thread workers cannot be cancelled safely. The broker owns the
+# 300 second operation cap, so leave its final 10 seconds for result delivery.
+_INSTALL_TIMEOUT_SECONDS = 290.0
 _SEEN_RPC_CAP = 256
 _SUPPORTED_OPS = {"list_installed", "catalog", "install", "remove"}
 _MACHINERY_UNAVAILABLE = "skills machinery unavailable on this host"
+_EXCLUDED_SKILL_DIRS = frozenset(
+    {
+        ".git",
+        ".github",
+        ".hub",
+        ".archive",
+        ".venv",
+        "venv",
+        "node_modules",
+        "site-packages",
+        "__pycache__",
+        ".tox",
+        ".nox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
+)
+_SKILL_SUPPORT_DIRS = frozenset({"references", "templates", "assets", "scripts"})
 
 
 @dataclass(frozen=True)
@@ -54,7 +75,11 @@ class _LocalSkill:
 class _InstalledSnapshot:
     hub_records: dict[str, dict[str, Any]]
     bundled_names: set[str]
-    local_names: set[str]
+    local_entries: dict[Path, tuple[str, str]]
+
+    @property
+    def local_names(self) -> set[str]:
+        return {name for entry in self.local_entries.values() for name in entry}
 
     @property
     def names(self) -> set[str]:
@@ -278,7 +303,34 @@ def _parse_skill(skill_md: Path) -> tuple[str, str]:
     return name, description
 
 
-def _local_skills(skills_dir: Path) -> list[_LocalSkill]:
+def _fallback_is_excluded_skill_path(path: Path) -> bool:
+    """Mirror Hermes agent.skill_utils.is_excluded_skill_path."""
+    parts = path.parts
+    if any(part in _EXCLUDED_SKILL_DIRS for part in parts):
+        return True
+    for index, part in enumerate(parts[:-1]):
+        if part not in _SKILL_SUPPORT_DIRS or index == 0:
+            continue
+        skill_root = Path(*parts[:index])
+        if (skill_root / "SKILL.md").exists():
+            return True
+    return False
+
+
+def _skill_path_excluder(machinery: _Machinery) -> Callable[[Path], bool]:
+    predicate = getattr(machinery.tools_module, "is_excluded_skill_path", None)
+    if callable(predicate):
+        def combined(path: Path) -> bool:
+            return bool(predicate(path)) or _fallback_is_excluded_skill_path(path)
+
+        return combined
+    return _fallback_is_excluded_skill_path
+
+
+def _local_skills(
+    skills_dir: Path,
+    is_excluded: Callable[[Path], bool] = _fallback_is_excluded_skill_path,
+) -> list[_LocalSkill]:
     if not skills_dir.is_dir():
         return []
     rows: list[_LocalSkill] = []
@@ -287,11 +339,7 @@ def _local_skills(skills_dir: Path) -> list[_LocalSkill]:
     except OSError:
         return []
     for skill_md in skill_files:
-        try:
-            relative = skill_md.relative_to(skills_dir)
-        except ValueError:
-            continue
-        if any(part.startswith(".") for part in relative.parts[:-1]):
+        if is_excluded(skill_md):
             continue
         name, description = _parse_skill(skill_md)
         rows.append(
@@ -305,16 +353,19 @@ def _local_skills(skills_dir: Path) -> list[_LocalSkill]:
     return rows
 
 
-def _installed_snapshot(lock_type: type) -> _InstalledSnapshot:
+def _installed_snapshot(
+    lock_type: type,
+    is_excluded: Callable[[Path], bool] = _fallback_is_excluded_skill_path,
+) -> _InstalledSnapshot:
     skills_dir = _skills_dir()
-    local_names: set[str] = set()
-    for local in _local_skills(skills_dir):
-        local_names.add(local.name)
-        local_names.add(local.directory_name)
+    local_entries = {
+        local.path: (local.name, local.directory_name)
+        for local in _local_skills(skills_dir, is_excluded)
+    }
     return _InstalledSnapshot(
         hub_records=_hub_records(lock_type),
         bundled_names=_read_bundled_manifest(skills_dir),
-        local_names=local_names,
+        local_entries=local_entries,
     )
 
 
@@ -360,24 +411,52 @@ def _learned_at(path: Path) -> str | None:
     return datetime.fromtimestamp(modified, tz=timezone.utc).isoformat()
 
 
-def _list_installed(lock_type: type) -> list[dict[str, Any]]:
+def _hub_key_for_local(
+    local: _LocalSkill,
+    hub_records: Mapping[str, Mapping[str, Any]],
+    skills_dir: Path,
+) -> str | None:
+    try:
+        relative_path = local.path.relative_to(skills_dir).as_posix()
+    except ValueError:
+        relative_path = ""
+    records_without_path: set[str] = set()
+    for lock_key, record in hub_records.items():
+        install_path = _record_value(record, "install_path", "installPath")
+        if install_path is None:
+            records_without_path.add(lock_key)
+        elif (
+            relative_path
+            and str(install_path).replace("\\", "/").strip("/") == relative_path
+        ):
+            return lock_key
+    for candidate in (local.directory_name, local.name):
+        if candidate in records_without_path:
+            return candidate
+    return None
+
+
+def _list_installed(
+    lock_type: type,
+    is_excluded: Callable[[Path], bool] = _fallback_is_excluded_skill_path,
+) -> list[dict[str, Any]]:
     skills_dir = _skills_dir()
     hub_records = _hub_records(lock_type)
     bundled_names = _read_bundled_manifest(skills_dir)
-    local_skills = _local_skills(skills_dir)
+    local_skills = _local_skills(skills_dir, is_excluded)
     items: dict[str, dict[str, Any]] = {}
 
     for local in local_skills:
-        hub_name = next(
-            (name for name in (local.name, local.directory_name) if name in hub_records),
-            None,
-        )
+        hub_name = _hub_key_for_local(local, hub_records, skills_dir)
         bundled_name = next(
-            (name for name in (local.name, local.directory_name) if name in bundled_names),
+            (name for name in (local.directory_name, local.name) if name in bundled_names),
             None,
         )
         if hub_name is not None:
-            provenance = "hub"
+            source = _record_value(hub_records[hub_name], "source")
+            provenance = (
+                "official" if str(source).casefold() == "official" else "hub"
+            )
         elif bundled_name is not None:
             provenance = "bundled"
         else:
@@ -385,9 +464,10 @@ def _list_installed(lock_type: type) -> list[dict[str, Any]]:
 
         item: dict[str, Any] = {
             "name": local.name,
+            "identifier": hub_name or local.directory_name,
             "description": local.description,
             "provenance": provenance,
-            "removable": provenance == "hub",
+            "removable": hub_name is not None,
         }
         if hub_name is not None:
             _add_hub_fields(item, hub_records[hub_name])
@@ -398,6 +478,33 @@ def _list_installed(lock_type: type) -> list[dict[str, Any]]:
         items[local.name] = item
 
     return sorted(items.values(), key=lambda item: item["name"].casefold())
+
+
+def _removal_key(
+    lock_type: type,
+    identifier: str,
+    display_name: str,
+    is_excluded: Callable[[Path], bool],
+) -> str | None:
+    hub_records = _hub_records(lock_type)
+    if identifier:
+        return identifier if identifier in hub_records else None
+
+    keys_by_name: dict[str, str] = {}
+    skills_dir = _skills_dir()
+    for local in _local_skills(skills_dir, is_excluded):
+        lock_key = _hub_key_for_local(local, hub_records, skills_dir)
+        if lock_key is None:
+            continue
+        keys_by_name.setdefault(local.name, lock_key)
+        keys_by_name.setdefault(local.directory_name, lock_key)
+    for lock_key, record in hub_records.items():
+        record_name = _record_value(record, "display_name", "displayName")
+        if record_name is not None:
+            keys_by_name.setdefault(str(record_name), lock_key)
+    for lock_key in hub_records:
+        keys_by_name.setdefault(lock_key, lock_key)
+    return keys_by_name.get(display_name)
 
 
 def _item_value(item: Any, key: str) -> Any:
@@ -506,24 +613,45 @@ def _expected_skill_name(identifier: str, name_override: str) -> str:
     return identifier.rstrip("/").rsplit("/", 1)[-1].strip()
 
 
+def _install_name_candidates(identifier: str, name_hint: str) -> set[str]:
+    identifier_slug = identifier.rstrip("/").rsplit("/", 1)[-1].strip()
+    return {name for name in (identifier_slug, name_hint) if name}
+
+
 def _snapshot_has_skill(
     snapshot: _InstalledSnapshot,
-    expected_name: str,
     identifier: str,
+    name_hint: str,
 ) -> bool:
-    if expected_name in snapshot.names:
+    candidates = _install_name_candidates(identifier, name_hint)
+    if candidates & snapshot.names:
         return True
-    for record in snapshot.hub_records.values():
-        if str(record.get("identifier") or "") == identifier:
+    for lock_key, record in snapshot.hub_records.items():
+        if lock_key in candidates:
+            return True
+        if str(_record_value(record, "identifier") or "") == identifier:
             return True
     return False
 
 
-def _verify_install(lock_type: type, expected_name: str) -> bool:
-    if _hub_record(lock_type, expected_name) is not None:
-        return True
-    snapshot = _installed_snapshot(lock_type)
-    return expected_name in snapshot.local_names
+def _verify_install(
+    before: _InstalledSnapshot,
+    after: _InstalledSnapshot,
+    identifier: str,
+    name_hint: str,
+) -> bool:
+    candidates = _install_name_candidates(identifier, name_hint)
+    new_lock_keys = set(after.hub_records) - set(before.hub_records)
+    for lock_key in new_lock_keys:
+        record = after.hub_records[lock_key]
+        if str(_record_value(record, "identifier") or "") == identifier:
+            return True
+
+    new_local_paths = set(after.local_entries) - set(before.local_entries)
+    return any(
+        candidates.intersection(after.local_entries[path])
+        for path in new_local_paths
+    )
 
 
 def _short_message(value: str, fallback: str) -> str:
@@ -581,6 +709,7 @@ class SkillsBridge:
 
     def __init__(self, config: BgosConfig) -> None:
         self._config = config
+        self._mutation_lock = asyncio.Lock()
         self._inflight_rpc_ids: set[str] = set()
         self._recent_rpc_ids: set[str] = set()
         self._recent_rpc_order: deque[str] = deque()
@@ -604,6 +733,13 @@ class SkillsBridge:
         try:
             try:
                 await self._post(f"{_RPC_ROOT}/{rpc_id}/ack", {})
+            except Exception:
+                log.warning(
+                    "skills_bridge ack post failed rpc=%s",
+                    rpc_id,
+                    exc_info=True,
+                )
+            try:
                 if op not in _SUPPORTED_OPS:
                     result = _error("install_failed", "unsupported op")
                 else:
@@ -649,14 +785,21 @@ class SkillsBridge:
         payload: dict[str, Any],
         machinery: _Machinery,
     ) -> dict[str, Any]:
+        is_excluded = _skill_path_excluder(machinery)
         if op == "list_installed":
-            skills = await asyncio.to_thread(_list_installed, machinery.hub_lock_file)
+            skills = await asyncio.to_thread(
+                _list_installed,
+                machinery.hub_lock_file,
+                is_excluded,
+            )
             return _ok({"skills": skills})
         if op == "catalog":
             return await self._handle_catalog(payload, machinery)
         if op == "install":
-            return await self._handle_install(rpc_id, payload, machinery)
-        return await self._handle_remove(payload, machinery)
+            async with self._mutation_lock:
+                return await self._handle_install(rpc_id, payload, machinery)
+        async with self._mutation_lock:
+            return await self._handle_remove(payload, machinery)
 
     async def _handle_catalog(
         self,
@@ -680,7 +823,11 @@ class SkillsBridge:
                 "install_failed",
                 "catalog fetch timed out on the agent host",
             )
-        snapshot = await asyncio.to_thread(_installed_snapshot, machinery.hub_lock_file)
+        snapshot = await asyncio.to_thread(
+            _installed_snapshot,
+            machinery.hub_lock_file,
+            _skill_path_excluder(machinery),
+        )
         return _ok(_catalog_payload(raw, page, snapshot.names))
 
     async def _handle_install(
@@ -699,8 +846,13 @@ class SkillsBridge:
         if not expected_name:
             return _error("not_found", "skill name could not be determined")
 
-        snapshot = await asyncio.to_thread(_installed_snapshot, machinery.hub_lock_file)
-        if _snapshot_has_skill(snapshot, expected_name, identifier):
+        is_excluded = _skill_path_excluder(machinery)
+        snapshot = await asyncio.to_thread(
+            _installed_snapshot,
+            machinery.hub_lock_file,
+            is_excluded,
+        )
+        if _snapshot_has_skill(snapshot, identifier, name_override):
             return _error("already_installed", "skill is already installed")
 
         await self._post_progress(rpc_id, "starting")
@@ -724,11 +876,12 @@ class SkillsBridge:
             )
 
         await self._post_progress(rpc_id, "verifying")
-        verified = await asyncio.to_thread(
-            _verify_install,
+        after = await asyncio.to_thread(
+            _installed_snapshot,
             machinery.hub_lock_file,
-            expected_name,
+            is_excluded,
         )
+        verified = _verify_install(snapshot, after, identifier, name_override)
         if verified:
             return _ok({"name": expected_name})
         return _install_failure(capture)
@@ -738,12 +891,20 @@ class SkillsBridge:
         payload: dict[str, Any],
         machinery: _Machinery,
     ) -> dict[str, Any]:
+        raw_identifier = payload.get("identifier")
+        identifier = raw_identifier.strip() if isinstance(raw_identifier, str) else ""
         raw_name = payload.get("name")
-        if not isinstance(raw_name, str) or not raw_name.strip():
+        display_name = raw_name.strip() if isinstance(raw_name, str) else ""
+        if not identifier and not display_name:
             return _error("install_failed", "skill name is required")
-        name = raw_name.strip()
-        installed = await asyncio.to_thread(_hub_record, machinery.hub_lock_file, name)
-        if installed is None:
+        name = await asyncio.to_thread(
+            _removal_key,
+            machinery.hub_lock_file,
+            identifier,
+            display_name,
+            _skill_path_excluder(machinery),
+        )
+        if name is None:
             return _error(
                 "install_failed",
                 "only store-installed skills can be removed here",
@@ -774,13 +935,43 @@ class SkillsBridge:
         body: dict[str, Any] = {"stage": stage}
         if detail:
             body["detail"] = detail
-        await self._post(f"{_RPC_ROOT}/{rpc_id}/progress", body)
+        try:
+            await self._post(f"{_RPC_ROOT}/{rpc_id}/progress", body)
+        except Exception:
+            log.warning(
+                "skills_bridge progress post failed rpc=%s stage=%s",
+                rpc_id,
+                stage,
+                exc_info=True,
+            )
 
     async def _post_result(self, rpc_id: str, body: dict[str, Any]) -> None:
         path = f"{_RPC_ROOT}/{rpc_id}/result"
         for attempt in range(2):
             try:
                 await self._post(path, body)
+                return
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if 500 <= status_code < 600 and attempt == 0:
+                    log.warning(
+                        "skills_bridge result server error, retrying rpc=%s status=%s",
+                        rpc_id,
+                        status_code,
+                    )
+                    continue
+                if 500 <= status_code < 600:
+                    log.exception(
+                        "skills_bridge result post failed after retry rpc=%s status=%s",
+                        rpc_id,
+                        status_code,
+                    )
+                else:
+                    log.exception(
+                        "skills_bridge result post rejected rpc=%s status=%s",
+                        rpc_id,
+                        status_code,
+                    )
                 return
             except (httpx.TransportError, ConnectionError):
                 if attempt == 0:
