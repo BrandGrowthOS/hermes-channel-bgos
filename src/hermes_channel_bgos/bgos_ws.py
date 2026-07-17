@@ -7,7 +7,7 @@ callbacks. Supports sync or async callbacks.
 
 Reconnect behavior is delegated to python-socketio's built-in exponential
 backoff. After each successful (re)connection beyond the first, the optional
-`on_reconnect` callback fires with the highest `message_id` seen so far —
+`on_reconnect` callback fires with the highest `message_id` seen so far -
 the caller uses it to drive a REST backfill via
 `GET /api/v1/integrations/inbound?since_message_id=...`.
 """
@@ -22,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 import socketio
 
 from .config import BgosConfig
+from .skills_bridge import SkillsBridge
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class BgosWs:
         self._on_reconnect = on_reconnect
         self._on_inbound_click = on_inbound_click
         self._on_voice_rpc = on_voice_rpc
+        self._skills_bridge: SkillsBridge | None = None
 
         self._assistants: set[int] = set()
         self._pairing_id: int | None = None
@@ -112,7 +114,7 @@ class BgosWs:
         ephemeral typing indicator to clients viewing this chat.
 
         Best-effort: if the WS isn't connected, returns silently. The
-        backend may not handle this event yet — Socket.IO drops unknown
+        backend may not handle this event yet - Socket.IO drops unknown
         events server-side, so this is forward-safe.
         """
         if not self._sio.connected:
@@ -163,11 +165,11 @@ class BgosWs:
         @self._sio.on("inbound_message")  # type: ignore[misc]
         async def _inbound(data: dict) -> None:
             # Backend may send snake_case (REST backfill path) or camelCase
-            # (live WS — see _INBOUND_CAMEL_ALIASES in bgos_adapter.py).
+            # (live WS - see _INBOUND_CAMEL_ALIASES in bgos_adapter.py).
             # Read both so the DEBUG line is informative and the cursor
             # advances no matter which shape the transport delivered.
             # Without the camelCase fallback this log printed None even
-            # though the downstream adapter saw real values — caught live
+            # though the downstream adapter saw real values - caught live
             # on kc's server 2026-05-13.
             mid = data.get("message_id") or data.get("messageId")
             log.debug(
@@ -206,7 +208,7 @@ class BgosWs:
 
         @self._sio.on("voice_rpc")  # type: ignore[misc]
         async def _voice_rpc(data: dict) -> None:
-            # Native in-app voice control frames (spec §6.2/§6.3) — the
+            # Native in-app voice control frames (spec §6.2/§6.3) - the
             # backend pushes these into the pairing:<id> room. Validation
             # and op whitelisting happen downstream in
             # voice_rpc.normalize_voice_rpc; this layer only dispatches.
@@ -217,6 +219,18 @@ class BgosWs:
                 await _maybe_await(self._on_voice_rpc(data))
             except Exception:
                 log.exception("bgos_ws.on_voice_rpc callback failed")
+
+        @self._sio.on("skills_rpc")  # type: ignore[misc]
+        async def _skills_rpc(data: dict) -> None:
+            try:
+                await self._skills_bridge_dispatch(data)
+            except Exception:
+                log.exception("bgos_ws.skills_rpc handler failed")
+
+    async def _skills_bridge_dispatch(self, data: dict) -> None:
+        if self._skills_bridge is None:
+            self._skills_bridge = SkillsBridge(self._config)
+        await self._skills_bridge.handle_frame(data)
 
     async def _join_current_rooms(self) -> None:
         if self._pairing_id is not None:
