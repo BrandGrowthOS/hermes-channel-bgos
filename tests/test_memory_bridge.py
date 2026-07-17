@@ -130,6 +130,66 @@ def _install_fake_threats(
     return calls
 
 
+def _install_fake_hermes_state(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+    sessions: dict[Any, dict[str, Any] | None] | None = None,
+    search_error: Exception | None = None,
+) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "rows": list(rows or []),
+        "sessions": dict(sessions or {}),
+        "constructor_calls": 0,
+        "search_calls": [],
+        "get_session_calls": [],
+    }
+
+    class FakeSessionDB:
+        def __init__(self) -> None:
+            state["constructor_calls"] += 1
+
+        def search_messages(
+            self,
+            query: str,
+            *,
+            exclude_sources: list[str],
+            limit: int,
+        ) -> list[dict[str, Any]]:
+            state["search_calls"].append((query, exclude_sources, limit))
+            if search_error is not None:
+                raise search_error
+            return list(state["rows"])
+
+        def get_session(self, session_id: Any) -> dict[str, Any] | None:
+            state["get_session_calls"].append(session_id)
+            return state["sessions"].get(session_id)
+
+    hermes_state_module = ModuleType("hermes_state")
+    hermes_state_module.SessionDB = FakeSessionDB  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hermes_state", hermes_state_module)
+    return state
+
+
+def _search_row(
+    session_id: Any,
+    source: str,
+    snippet: str,
+    *,
+    timestamp: Any = 12345,
+) -> dict[str, Any]:
+    return {
+        "id": f"message-{session_id}-{snippet}",
+        "session_id": session_id,
+        "role": "assistant",
+        "snippet": snippet,
+        "timestamp": timestamp,
+        "source": source,
+        "model": "test-model",
+        "session_started": "2026-07-17T00:00:00Z",
+    }
+
+
 def _make_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Any, list[tuple[str, dict[str, Any]]]]:
@@ -472,6 +532,384 @@ async def test_store_is_not_cached_across_frames(monkeypatch):
     ]
 
 
+async def test_search_keeps_owned_bgos_and_non_bgos_hits(monkeypatch):
+    rows = [
+        _search_row(17, "bgos", "Owned match", timestamp=12345),
+        _search_row("tg-1", "telegram", "Telegram match", timestamp=None),
+    ]
+    state = _install_fake_hermes_state(
+        monkeypatch,
+        rows=rows,
+        sessions={
+            17: {"user_id": 42, "title": "Owned chat", "chat_id": 900},
+            "tg-1": {"title": "Telegram session", "chat_id": "not-exposed"},
+        },
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-search-happy",
+            "op": "search",
+            "payload": {"query": "  launch plan  ", "ownerUserId": "42"},
+        }
+    )
+
+    assert state["constructor_calls"] == 1
+    assert state["search_calls"] == [
+        ("  launch plan  ", ["subagent", "tool"], 50)
+    ]
+    assert state["get_session_calls"] == [17, "tg-1"]
+    assert posts == [
+        (f"{_RPC_ROOT}/rpc-search-happy/ack", {}),
+        (
+            f"{_RPC_ROOT}/rpc-search-happy/result",
+            {
+                "ok": True,
+                "payload": {
+                    "hits": [
+                        {
+                            "sessionId": "17",
+                            "title": "Owned chat",
+                            "when": "12345",
+                            "source": "bgos",
+                            "snippet": "Owned match",
+                            "chatId": "900",
+                            "openable": True,
+                        },
+                        {
+                            "sessionId": "tg-1",
+                            "title": "Telegram session",
+                            "when": None,
+                            "source": "telegram",
+                            "snippet": "Telegram match",
+                            "chatId": None,
+                            "openable": False,
+                        },
+                    ],
+                    "count": 2,
+                },
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("owner_user_id", "session"),
+    [
+        pytest.param("owner-a", {"user_id": "owner-b"}, id="owner-mismatch"),
+        pytest.param("owner-a", {"title": "No user column"}, id="missing-user-id"),
+        pytest.param(None, {"user_id": "owner-a"}, id="missing-payload-owner"),
+    ],
+)
+async def test_search_drops_bgos_hits_unless_owner_matches(
+    monkeypatch,
+    owner_user_id,
+    session,
+):
+    state = _install_fake_hermes_state(
+        monkeypatch,
+        rows=[_search_row("bgos-1", "bgos", "Private match")],
+        sessions={"bgos-1": session},
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+    payload: dict[str, Any] = {"query": "private query"}
+    if owner_user_id is not None:
+        payload["ownerUserId"] = owner_user_id
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-private", "op": "search", "payload": payload}
+    )
+
+    assert state["get_session_calls"] == ["bgos-1"]
+    assert _result_bodies(posts) == [
+        {"ok": True, "payload": {"hits": [], "count": 0}}
+    ]
+
+
+async def test_search_demotes_cron_rows_stably(monkeypatch):
+    rows = [
+        _search_row("cron-1", "cron", "Cron first"),
+        _search_row("telegram-1", "telegram", "Telegram first"),
+        _search_row("cron-2", "cron", "Cron second"),
+        _search_row("cli-1", "cli", "CLI second"),
+    ]
+    _install_fake_hermes_state(monkeypatch, rows=rows)
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-cron", "op": "search", "payload": {"query": "jobs"}}
+    )
+
+    payload = _result_bodies(posts)[0]["payload"]
+    assert [hit["sessionId"] for hit in payload["hits"]] == [
+        "telegram-1",
+        "cli-1",
+        "cron-1",
+        "cron-2",
+    ]
+    assert [hit["snippet"] for hit in payload["hits"]] == [
+        "Telegram first",
+        "CLI second",
+        "Cron first",
+        "Cron second",
+    ]
+    assert payload["count"] == 4
+
+
+async def test_search_dedupes_session_id_before_partition(monkeypatch):
+    rows = [
+        _search_row("same", "cron", "First ranked row"),
+        _search_row("same", "telegram", "Later duplicate"),
+        _search_row("other", "telegram", "Other row"),
+    ]
+    state = _install_fake_hermes_state(monkeypatch, rows=rows)
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-dedupe", "op": "search", "payload": {"query": "same"}}
+    )
+
+    hits = _result_bodies(posts)[0]["payload"]["hits"]
+    assert [(hit["sessionId"], hit["source"], hit["snippet"]) for hit in hits] == [
+        ("other", "telegram", "Other row"),
+        ("same", "cron", "First ranked row"),
+    ]
+    assert state["get_session_calls"] == ["same", "other"]
+
+
+@pytest.mark.parametrize(
+    ("raw_limit", "expected_limit"),
+    [
+        pytest.param(None, 10, id="default"),
+        pytest.param(99, 10, id="clamp-high"),
+        pytest.param(0, 1, id="clamp-low"),
+        pytest.param("2", 2, id="coerce-string"),
+    ],
+)
+async def test_search_coerces_clamps_and_applies_limit_after_partition(
+    monkeypatch,
+    raw_limit,
+    expected_limit,
+):
+    rows = [_search_row("cron-first", "cron", "Cron row")]
+    rows.extend(
+        _search_row(f"regular-{index}", "telegram", f"Regular {index}")
+        for index in range(1, 13)
+    )
+    state = _install_fake_hermes_state(monkeypatch, rows=rows)
+    bridge, posts = _make_bridge(monkeypatch)
+    payload: dict[str, Any] = {"query": "limit query"}
+    if raw_limit is not None:
+        payload["limit"] = raw_limit
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-limit", "op": "search", "payload": payload}
+    )
+
+    result_payload = _result_bodies(posts)[0]["payload"]
+    assert result_payload["count"] == expected_limit
+    assert [hit["sessionId"] for hit in result_payload["hits"]] == [
+        f"regular-{index}" for index in range(1, expected_limit + 1)
+    ]
+    assert state["search_calls"] == [
+        ("limit query", ["subagent", "tool"], 50)
+    ]
+    assert len(state["get_session_calls"]) == len(rows)
+
+
+async def test_search_keeps_owned_bgos_hit_when_chat_id_column_is_absent(monkeypatch):
+    _install_fake_hermes_state(
+        monkeypatch,
+        rows=[_search_row("old-hermes", "bgos", "Compatible row")],
+        sessions={
+            "old-hermes": {"user_id": "owner-1", "title": "Hermes 0.15.1"}
+        },
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-search-old-hermes",
+            "op": "search",
+            "payload": {"query": "compatible", "ownerUserId": "owner-1"},
+        }
+    )
+
+    assert _result_bodies(posts) == [
+        {
+            "ok": True,
+            "payload": {
+                "hits": [
+                    {
+                        "sessionId": "old-hermes",
+                        "title": "Hermes 0.15.1",
+                        "when": "12345",
+                        "source": "bgos",
+                        "snippet": "Compatible row",
+                        "chatId": None,
+                        "openable": False,
+                    }
+                ],
+                "count": 1,
+            },
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"query": 7},
+        {"query": " x "},
+        {"query": "x" * 201},
+    ],
+)
+async def test_search_rejects_invalid_query_without_importing_hermes_state(
+    monkeypatch,
+    payload,
+):
+    from hermes_channel_bgos import memory_bridge
+
+    imports: list[str] = []
+    real_import = memory_bridge.importlib.import_module
+
+    def record_import(name: str, package: str | None = None) -> Any:
+        imports.append(name)
+        return real_import(name, package)
+
+    monkeypatch.setattr(memory_bridge.importlib, "import_module", record_import)
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-invalid", "op": "search", "payload": payload}
+    )
+
+    error = _result_bodies(posts)[0]["error"]
+    assert error["code"] == "bad_request"
+    assert error["message"] != "unsupported op"
+    assert "hermes_state" not in imports
+
+
+async def test_search_import_error_reports_unavailable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_state", None)
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-unavailable", "op": "search", "payload": {"query": "find"}}
+    )
+
+    assert _result_bodies(posts) == [
+        {
+            "ok": False,
+            "error": {
+                "code": "unavailable",
+                "message": "memory machinery unavailable on this host",
+            },
+        }
+    ]
+
+
+async def test_search_missing_session_db_reports_unavailable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_state", ModuleType("hermes_state"))
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-no-db", "op": "search", "payload": {"query": "find"}}
+    )
+
+    assert _result_bodies(posts)[0]["error"] == {
+        "code": "unavailable",
+        "message": "memory machinery unavailable on this host",
+    }
+
+
+async def test_search_database_error_reports_search_failed(monkeypatch):
+    state = _install_fake_hermes_state(
+        monkeypatch,
+        search_error=RuntimeError("database unavailable"),
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-failed", "op": "search", "payload": {"query": "find"}}
+    )
+
+    assert state["constructor_calls"] == 1
+    assert _result_bodies(posts) == [
+        {
+            "ok": False,
+            "error": {
+                "code": "search_failed",
+                "message": "search failed on the agent host",
+            },
+        }
+    ]
+
+
+async def test_search_none_session_drops_bgos_but_keeps_non_bgos(monkeypatch):
+    state = _install_fake_hermes_state(
+        monkeypatch,
+        rows=[
+            _search_row("bgos-none", "bgos", "Private row"),
+            _search_row("telegram-none", "telegram", "Public row", timestamp=None),
+        ],
+    )
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {
+            "rpcId": "rpc-search-none-session",
+            "op": "search",
+            "payload": {"query": "rows", "ownerUserId": "owner-1"},
+        }
+    )
+
+    assert state["get_session_calls"] == ["bgos-none", "telegram-none"]
+    assert _result_bodies(posts) == [
+        {
+            "ok": True,
+            "payload": {
+                "hits": [
+                    {
+                        "sessionId": "telegram-none",
+                        "title": None,
+                        "when": None,
+                        "source": "telegram",
+                        "snippet": "Public row",
+                        "chatId": None,
+                        "openable": False,
+                    }
+                ],
+                "count": 1,
+            },
+        }
+    ]
+
+
+async def test_search_creates_fresh_session_db_for_each_frame(monkeypatch):
+    state = _install_fake_hermes_state(monkeypatch)
+    bridge, posts = _make_bridge(monkeypatch)
+
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-first", "op": "search", "payload": {"query": "first"}}
+    )
+    await bridge.handle_frame(
+        {"rpcId": "rpc-search-second", "op": "search", "payload": {"query": "second"}}
+    )
+
+    assert state["constructor_calls"] == 2
+    assert state["search_calls"] == [
+        ("first", ["subagent", "tool"], 50),
+        ("second", ["subagent", "tool"], 50),
+    ]
+    assert _result_bodies(posts) == [
+        {"ok": True, "payload": {"hits": [], "count": 0}},
+        {"ok": True, "payload": {"hits": [], "count": 0}},
+    ]
+
+
 async def test_duplicate_rpc_id_is_dropped_after_first_frame(monkeypatch):
     state = _install_fake_memory(monkeypatch)
     bridge, posts = _make_bridge(monkeypatch)
@@ -484,8 +922,8 @@ async def test_duplicate_rpc_id_is_dropped_after_first_frame(monkeypatch):
     assert state["load_calls"] == 1
 
 
-@pytest.mark.parametrize("op", ["search", ""])
-async def test_unknown_op_including_search_is_bad_request(monkeypatch, op):
+@pytest.mark.parametrize("op", ["purge", ""])
+async def test_unknown_op_is_bad_request(monkeypatch, op):
     bridge, posts = _make_bridge(monkeypatch)
 
     await bridge.handle_frame(
@@ -518,7 +956,7 @@ async def test_result_post_retries_one_transport_error(monkeypatch):
 
     monkeypatch.setattr(bridge, "_post", flaky_result)
 
-    await bridge.handle_frame({"rpcId": "rpc-transport", "op": "search", "payload": {}})
+    await bridge.handle_frame({"rpcId": "rpc-transport", "op": "purge", "payload": {}})
 
     assert result_attempts == 2
 
@@ -543,7 +981,7 @@ async def test_result_post_retries_one_server_error_then_succeeds(monkeypatch):
 
     monkeypatch.setattr(bridge, "_post", flaky_result)
 
-    await bridge.handle_frame({"rpcId": "rpc-server", "op": "search", "payload": {}})
+    await bridge.handle_frame({"rpcId": "rpc-server", "op": "purge", "payload": {}})
 
     assert result_attempts == 2
 
@@ -567,7 +1005,7 @@ async def test_result_post_does_not_retry_client_error(monkeypatch):
 
     monkeypatch.setattr(bridge, "_post", rejected_result)
 
-    await bridge.handle_frame({"rpcId": "rpc-client", "op": "search", "payload": {}})
+    await bridge.handle_frame({"rpcId": "rpc-client", "op": "purge", "payload": {}})
 
     assert result_attempts == 1
 

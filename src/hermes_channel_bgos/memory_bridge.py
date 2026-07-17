@@ -20,8 +20,11 @@ _HTTP_TIMEOUT_SECONDS = 10.0
 _SEEN_RPC_CAP = 256
 _MAX_TEXT_LENGTH = 4000
 _MAX_ERROR_LENGTH = 300
+_MAX_QUERY_LENGTH = 200
+_DEFAULT_SEARCH_LIMIT = 10
+_MAX_SEARCH_LIMIT = 10
 _ENTRY_DELIMITER = "\n§\n"
-_SUPPORTED_OPS = {"list", "add", "replace", "remove"}
+_SUPPORTED_OPS = {"list", "add", "replace", "remove", "search"}
 _MACHINERY_UNAVAILABLE = "memory machinery unavailable on this host"
 _TARGETS = ("memory", "user")
 
@@ -103,6 +106,71 @@ def _load_stores_payload() -> dict[str, Any]:
     return _stores_payload(_load_store())
 
 
+def _load_session_db() -> Any:
+    try:
+        state_module = importlib.import_module("hermes_state")
+        session_db_type = getattr(state_module, "SessionDB")
+    except (ImportError, AttributeError) as exc:
+        raise _MachineryUnavailable(_MACHINERY_UNAVAILABLE) from exc
+    return session_db_type()
+
+
+def _search_payload(
+    query: str,
+    limit: int,
+    owner_user_id: str,
+) -> dict[str, Any]:
+    db = _load_session_db()
+    rows = db.search_messages(
+        query,
+        exclude_sources=["subagent", "tool"],
+        limit=50,
+    )
+
+    seen_session_ids: set[Any] = set()
+    non_cron_hits: list[dict[str, Any]] = []
+    cron_hits: list[dict[str, Any]] = []
+    for row in rows:
+        session_id = row.get("session_id")
+        if session_id in seen_session_ids:
+            continue
+        seen_session_ids.add(session_id)
+
+        session = db.get_session(session_id) or {}
+        source = row.get("source")
+        if source == "bgos":
+            session_user_id = session.get("user_id")
+            if (
+                not owner_user_id
+                or session_user_id is None
+                or str(session_user_id) != str(owner_user_id)
+            ):
+                continue
+
+        chat_id = None
+        if source == "bgos":
+            raw_chat_id = session.get("chat_id")
+            if raw_chat_id not in (None, ""):
+                chat_id = str(raw_chat_id)
+        timestamp = row.get("timestamp")
+        hit = {
+            "sessionId": str(session_id),
+            "title": session.get("title") or None,
+            "when": str(timestamp) if timestamp is not None else None,
+            "source": source,
+            "snippet": row.get("snippet"),
+            "chatId": chat_id,
+            "openable": bool(chat_id),
+        }
+        if source == "cron":
+            cron_hits.append(hit)
+        else:
+            non_cron_hits.append(hit)
+
+    hits = (non_cron_hits + cron_hits)[:limit]
+    return {"hits": hits, "count": len(hits)}
+
+
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "error": {"code": code, "message": message}}
 
@@ -126,6 +194,18 @@ def _validate_payload(op: str, payload: Any) -> dict[str, Any] | None:
         return _error("bad_request", "payload must be an object")
     if op == "list":
         return None
+    if op == "search":
+        query = payload.get("query")
+        if (
+            not isinstance(query, str)
+            or len(query.strip()) < 2
+            or len(query) > _MAX_QUERY_LENGTH
+        ):
+            return _error(
+                "bad_request",
+                f"query must be a string between 2 and {_MAX_QUERY_LENGTH} chars",
+            )
+        return None
     if payload.get("target") not in _TARGETS:
         return _error("bad_request", "target must be memory or user")
     if op == "add":
@@ -143,6 +223,14 @@ def _sanitize_error_message(message: str) -> str:
     while "  " in sanitized:
         sanitized = sanitized.replace("  ", " ")
     return sanitized[:_MAX_ERROR_LENGTH]
+
+
+def _coerce_search_limit(value: Any) -> int:
+    try:
+        limit = int(value)
+    except (TypeError, ValueError, OverflowError):
+        limit = _DEFAULT_SEARCH_LIMIT
+    return max(1, min(_MAX_SEARCH_LIMIT, limit))
 
 
 def _write_error(result: dict[str, Any]) -> dict[str, Any]:
@@ -254,6 +342,31 @@ class MemoryBridge:
         if op == "list":
             stores = await asyncio.to_thread(_load_stores_payload)
             return _ok(stores)
+        if op == "search":
+            query = payload["query"]
+            limit = _coerce_search_limit(
+                payload.get("limit", _DEFAULT_SEARCH_LIMIT)
+            )
+            raw_owner_user_id = payload.get("ownerUserId", "")
+            owner_user_id = (
+                raw_owner_user_id if isinstance(raw_owner_user_id, str) else ""
+            )
+            try:
+                search_payload = await asyncio.to_thread(
+                    _search_payload,
+                    query,
+                    limit,
+                    owner_user_id,
+                )
+            except _MachineryUnavailable:
+                raise
+            except Exception:
+                log.exception("memory_bridge search failed")
+                return _error(
+                    "search_failed",
+                    "search failed on the agent host",
+                )
+            return _ok(search_payload)
 
         async with self._mutation_lock:
             store = await asyncio.to_thread(_load_store)
