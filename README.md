@@ -22,6 +22,8 @@ BGOS_AGENTS="default:Hermes" \
 bash <(curl -fsSL https://raw.githubusercontent.com/BrandGrowthOS/hermes-channel-bgos/main/install.sh)
 ```
 
+`BGOS_CODE` is accepted as a synonym for the canonical `BGOS_PAIR_CODE`.
+
 Advanced overrides: `HERMES_INSTALL`, `HERMES_PYTHON`, `REPO_DIR`, `DEVICE_LABEL`, and `HERMES_SERVICE`.
 
 **v0.10.4 (2026-05-29) — Root install + cross-process waitForReply race fix.** Adds `install.sh` so Hermes servers can install/update the BGOS channel with one command. Fixes the peer `waitForReply` echo race found by Jeff's Hermes agent: the live gateway now refreshes consumed-reply receipts written by helper processes, writes a pending marker before the HTTP request starts, waits briefly during the WS race window for that marker to become a concrete receipt, and drops only exact already-returned peer replies instead of enqueueing them into Hermes. This prevents echo chains when an external tool/cron/helper calls `send_peer(wait_for_reply=True)` while preserving legitimate later peer turns.
