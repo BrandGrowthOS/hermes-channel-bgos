@@ -37,6 +37,12 @@ from .commands_sync import (
 )
 from .agents import enumerate_agents_from_env
 from .config import BgosConfig
+from .quiet_mode import (
+    EVERYTHING,
+    ChatStyleStore,
+    classify_robot_talk,
+    strip_voice_prefixes,
+)
 from .state_store import StateStore
 from .voice_rpc import (
     VoiceConfig,
@@ -796,6 +802,7 @@ class BGOSAdapter(BasePlatformAdapter):
     """
 
     platform_name = "bgos"
+    _quiet_failsafe_seconds: float = 5.0
 
     def __init__(self, config: Any = None) -> None:
         """Hermes's gateway passes its own per-platform config object here —
@@ -828,6 +835,7 @@ class BGOSAdapter(BasePlatformAdapter):
         self._config = bgos_config
         self._api = BgosApi(bgos_config)
         self._state = StateStore()
+        self._chat_style_store = ChatStyleStore()
         self._consumed_peer_wait_replies_mtime_ns: int | None = None
         self._load_consumed_peer_wait_replies()
         self._ws: BgosWs | None = None
@@ -878,6 +886,10 @@ class BGOSAdapter(BasePlatformAdapter):
         #   docs/superpowers/specs/2026-05-15-tool-progress-message-type-design.md
         self._tool_progress_card_id_by_chat: dict[int, int] = {}
         self._tool_progress_tools_by_chat: dict[int, list[dict]] = {}
+        # Quiet dump rows are incremental, unlike the full accumulated emoji
+        # list from upstream gateway/run.py:14454. Keep them separate so the
+        # next authoritative emoji refresh cannot erase suppressed content.
+        self._tool_progress_quiet_rows_by_chat: dict[int, list[dict]] = {}
         # Maps the gateway's streaming-preview message_id to the chat_id —
         # so when delete_message fires on a preview, we know which card to
         # finalize. Cleared after card transitions to done.
@@ -889,6 +901,13 @@ class BGOSAdapter(BasePlatformAdapter):
         # orphaned (state=running forever, never finalized). Reviewer flag
         # 2026-05-15.
         self._tool_progress_lock_by_chat: dict[int, asyncio.Lock] = {}
+        # Quiet suppression mirrors the gateway preview lifecycle. A final
+        # reply normally follows preview deletion in under a second, and the
+        # gateway/run.py:14382 edit pace is 1.5 seconds. This five second
+        # window exceeds both, so real prose cancels promotion while a turn
+        # that produced only robot talk cannot end silently.
+        self._quiet_suppressed_text: dict[int, str] = {}
+        self._quiet_failsafe_tasks: dict[int, asyncio.Task] = {}
         # Adaptive text-batching for rapid inbound user messages. Mobile
         # clients sometimes split a long transcription or paste into multiple
         # sub-4KB messages — without batching, the agent gets N separate
@@ -933,6 +952,17 @@ class BGOSAdapter(BasePlatformAdapter):
         # resolve a consult with a partial preview.
         self._voice_turn_poll_seconds: float = 0.2
         self._voice_settle_seconds: float = 2.5
+
+    @property
+    def chat_style_store(self) -> ChatStyleStore:
+        """Expose style controls without allowing the store to be replaced."""
+        return self._chat_style_store
+
+    def _chat_style_for(self, chat_key: int) -> str:
+        """Resolve the latest per-assistant style for one outbound call."""
+        return self._chat_style_store.style_for(
+            self._state.assistant_id_by_chat.get(chat_key)
+        )
 
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
@@ -1530,12 +1560,26 @@ class BGOSAdapter(BasePlatformAdapter):
             await asyncio.gather(*pending_text_tasks, return_exceptions=True)
         self._pending_text_tasks.clear()
         self._pending_text_batches.clear()
+        # A quiet fail-safe can finalize and post, so fully unwind these tasks
+        # before closing the API client just like deferred gateway edits.
+        quiet_tasks = [
+            task
+            for task in self._quiet_failsafe_tasks.values()
+            if not task.done()
+        ]
+        for task in quiet_tasks:
+            task.cancel()
+        self._quiet_failsafe_tasks.clear()
+        self._quiet_suppressed_text.clear()
+        if quiet_tasks:
+            await asyncio.gather(*quiet_tasks, return_exceptions=True)
         # tool_progress card tracking — clear so a reconnect doesn't reuse
         # a card id from before the disconnect (the gateway would never
         # signal end-of-turn for that card on the new session, and the
         # frontend would see the stale card stuck in state=running).
         self._tool_progress_card_id_by_chat.clear()
         self._tool_progress_tools_by_chat.clear()
+        self._tool_progress_quiet_rows_by_chat.clear()
         self._tool_progress_preview_to_chat.clear()
         self._tool_progress_lock_by_chat.clear()
         # Cancel in-flight voice_rpc op tasks (mint/consult/dispatch). Same
@@ -1703,6 +1747,8 @@ class BGOSAdapter(BasePlatformAdapter):
             int(reply_to) if reply_to is not None else marker_reply_to
         )
 
+        chat_style = self._chat_style_for(chat_key)
+
         # tool_progress intercept on the SEND path too — the gateway's
         # progress loop calls `adapter.send()` for the FIRST tool of a
         # turn (no prior progress_msg_id), then `edit_message` for
@@ -1723,10 +1769,78 @@ class BGOSAdapter(BasePlatformAdapter):
             if not options and not media_paths
             else None
         )
+        quiet_robot = (
+            classify_robot_talk(cleaned_text)
+            if (
+                chat_style != EVERYTHING
+                and not options
+                and not media_paths
+            )
+            else None
+        )
+        # Upstream gateway/run.py:13782 emits failures with a leading symbol,
+        # which also matches the legacy emoji tool grammar. Tidy reserves only
+        # classifier-confirmed failures for agent_error; everything retains the
+        # prior intercept behavior.
+        if quiet_robot is not None and quiet_robot.kind == "error":
+            parsed_tools = None
         if parsed_tools is not None:
             return await self._handle_tool_progress_edit(
                 chat_key, 0, parsed_tools, None,
             )
+
+        if chat_style != EVERYTHING:
+            robot = quiet_robot
+            if robot is not None and robot.kind == "tool_dump":
+                result = _send_result(message_id=None)
+                if robot.rows:
+                    result = await self._handle_tool_progress_edit(
+                        chat_key,
+                        0,
+                        robot.rows,
+                        None,
+                        replace=False,
+                    )
+                self._quiet_record_suppressed(chat_key, robot.details)
+                return result
+
+            if robot is not None and robot.kind == "error":
+                try:
+                    await self._finalize_tool_progress_card(chat_key)
+                except Exception:
+                    log.warning(
+                        "tool_progress pre-send finalize failed chat=%s",
+                        chat_key,
+                        exc_info=True,
+                    )
+                resp = await self._api.post_message(
+                    chat_id=chat_key,
+                    text=robot.friendly,
+                    sender="assistant",
+                    message_type="agent_error",
+                    event_meta={
+                        "source": "agent",
+                        "title": robot.friendly[:300],
+                        "payload": {"details": robot.details},
+                    },
+                    session_handle=session_handle,
+                )
+                message_id = resp.get("id") if isinstance(resp, dict) else None
+                self._quiet_clear_suppressed(chat_key)
+                self._offer_voice_reply(chat_key, robot.friendly)
+                if isinstance(message_id, int):
+                    self._state.last_assistant_message_by_chat[
+                        chat_key
+                    ] = message_id
+                return _send_result(message_id=message_id)
+
+            cleaned_text = strip_voice_prefixes(cleaned_text)
+            if (
+                not cleaned_text.strip()
+                and not media_paths
+                and not options
+            ):
+                return _send_result(message_id=None)
 
         # End-of-turn signal: this send() is delivering a plain agent reply
         # (no tool markers). If we still have an open tool_progress card for
@@ -1814,6 +1928,8 @@ class BGOSAdapter(BasePlatformAdapter):
                 last_message_id = message_id
             last_result = _send_result(message_id=message_id)
         if last_message_id is not None:
+            if chat_style != EVERYTHING:
+                self._quiet_clear_suppressed(chat_key)
             self._state.last_assistant_message_by_chat[chat_key] = last_message_id
             # Voice reply capture: a real agent reply (tool_progress and
             # media-only paths never reach here with text) posted while a
@@ -1925,6 +2041,8 @@ class BGOSAdapter(BasePlatformAdapter):
         # chain chat → assistant → user for this pairing.
         user_id = self._patch_user_id_for_chat(chat_key)
 
+        chat_style = self._chat_style_for(chat_key)
+
         # tool_progress intercept — if the gateway is editing the streaming
         # preview with emoji-prefixed tool text, route to a separate
         # tool_progress card so the visual treatment matches what users
@@ -1935,10 +2053,42 @@ class BGOSAdapter(BasePlatformAdapter):
         # REPLACE the tracked tools each time.
         # Spec: docs/superpowers/specs/2026-05-15-tool-progress-message-type-design.md
         parsed_tools = _parse_tool_progress_text(cleaned_text)
+        quiet_robot = (
+            classify_robot_talk(cleaned_text)
+            if chat_style != EVERYTHING
+            else None
+        )
+        # Keep the same Tidy-only gateway failure reservation as send().
+        if quiet_robot is not None and quiet_robot.kind == "error":
+            parsed_tools = None
         if parsed_tools is not None:
             return await self._handle_tool_progress_edit(
                 chat_key, mid_int, parsed_tools, user_id,
             )
+
+        if chat_style != EVERYTHING:
+            robot = quiet_robot
+            if robot is not None:
+                rows = robot.rows
+                if robot.kind == "error":
+                    rows = [{
+                        "icon": "⚠️",
+                        "name": "error",
+                        "args": robot.friendly[:120],
+                        "status": "error",
+                    }]
+                if rows:
+                    await self._handle_tool_progress_edit(
+                        chat_key,
+                        mid_int,
+                        rows,
+                        user_id,
+                        replace=False,
+                    )
+                self._quiet_record_suppressed(chat_key, robot.details)
+                return _send_result(message_id=mid_int)
+            cleaned_text = strip_voice_prefixes(cleaned_text)
+
         # Voice reply capture (streaming path): the gateway's stream
         # consumer delivers the reply as a preview send + progressive
         # edits — the LAST edit before turn end carries the full text.
@@ -2030,6 +2180,8 @@ class BGOSAdapter(BasePlatformAdapter):
         preview_mid: int,
         parsed_tools: list[dict],
         user_id: str | None,
+        *,
+        replace: bool = True,
     ) -> SendResult:
         """The gateway is editing the streaming-preview message with
         tool-progress content (one or more emoji-prefixed lines). Absorb
@@ -2037,9 +2189,15 @@ class BGOSAdapter(BasePlatformAdapter):
 
         The gateway accumulates ALL tool lines and re-sends the full
         list every edit (upstream gateway/run.py:14454,
-        `full_text = "\\n".join(progress_lines)`), so the parsed list IS
-        the new authoritative state — we REPLACE the tracked tools each
-        call rather than appending.
+        `full_text = "\\n".join(progress_lines)`), so the parsed list is
+        authoritative for the emoji portion. It replaces that portion while
+        filed quiet rows remain appended as a separate suffix.
+
+        Quiet dump routing is incremental because the gateway can emit raw
+        function narration after its accumulated emoji list. Quiet rows remain
+        separate, then compose after every authoritative emoji refresh so no
+        suppressed content disappears. The combined backend list keeps the
+        newest 50 entries.
 
         First call per agent turn: POST a new tool_progress message.
         Subsequent calls: PATCH the same card with the refreshed list.
@@ -2066,18 +2224,48 @@ class BGOSAdapter(BasePlatformAdapter):
             chat_key, asyncio.Lock(),
         )
         async with lock:
-            # Replace, don't accumulate — the gateway's content is the
-            # full accumulated list.
-            self._tool_progress_tools_by_chat[chat_key] = list(parsed_tools)
+            if replace:
+                # The gateway's emoji content is the full accumulated list.
+                emoji_rows = list(parsed_tools)
+                quiet_rows = self._tool_progress_quiet_rows_by_chat.get(
+                    chat_key, []
+                )
+            else:
+                current_tools = self._tool_progress_tools_by_chat.get(
+                    chat_key, []
+                )
+                quiet_rows = self._tool_progress_quiet_rows_by_chat.setdefault(
+                    chat_key, []
+                )
+                prior_quiet_count = len(quiet_rows)
+                quiet_rows.extend(parsed_tools)
+                current_emoji_count = max(
+                    0, len(current_tools) - prior_quiet_count
+                )
+                emoji_rows = list(current_tools[:current_emoji_count])
+
+            tools_list = [*emoji_rows, *quiet_rows]
+            # This cap belongs to quiet composition. Emoji-only replacement
+            # keeps the legacy everything-mode behavior unchanged.
+            if quiet_rows and len(tools_list) > 50:
+                tools_list = tools_list[-50:]
+            retained_quiet_count = min(len(quiet_rows), len(tools_list))
+            if retained_quiet_count:
+                self._tool_progress_quiet_rows_by_chat[chat_key] = list(
+                    tools_list[-retained_quiet_count:]
+                )
+            else:
+                self._tool_progress_quiet_rows_by_chat.pop(chat_key, None)
+            self._tool_progress_tools_by_chat[chat_key] = tools_list
             # Map the streaming-preview message_id → chat. delete_message
             # uses this to know "the agent's turn is wrapping up; flip my
             # card to done". preview_mid=0 is used by send()-path callers
             # (no preview exists yet) and we skip the mapping for that.
-            if preview_mid > 0:
+            if replace and preview_mid > 0:
                 self._tool_progress_preview_to_chat[preview_mid] = chat_key
 
-            summary = _build_tool_progress_summary(parsed_tools, done=False)
-            card_payload = {"state": "running", "tools": parsed_tools}
+            summary = _build_tool_progress_summary(tools_list, done=False)
+            card_payload = {"state": "running", "tools": tools_list}
             existing_card_id = self._tool_progress_card_id_by_chat.get(chat_key)
 
             try:
@@ -2106,7 +2294,8 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
                 self._tool_progress_card_id_by_chat.pop(chat_key, None)
                 self._tool_progress_tools_by_chat.pop(chat_key, None)
-                if preview_mid > 0:
+                self._tool_progress_quiet_rows_by_chat.pop(chat_key, None)
+                if replace and preview_mid > 0:
                     self._tool_progress_preview_to_chat.pop(preview_mid, None)
             except Exception:
                 log.warning(
@@ -2116,7 +2305,8 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
                 self._tool_progress_card_id_by_chat.pop(chat_key, None)
                 self._tool_progress_tools_by_chat.pop(chat_key, None)
-                if preview_mid > 0:
+                self._tool_progress_quiet_rows_by_chat.pop(chat_key, None)
+                if replace and preview_mid > 0:
                     self._tool_progress_preview_to_chat.pop(preview_mid, None)
 
         # Return the right message id to the gateway so its
@@ -2131,6 +2321,69 @@ class BGOSAdapter(BasePlatformAdapter):
         card_id = self._tool_progress_card_id_by_chat.get(chat_key)
         return _send_result(message_id=card_id)
 
+    def _quiet_record_suppressed(self, chat_key: int, text: str) -> None:
+        """Retain the latest hidden gateway output and refresh its timer."""
+        self._quiet_suppressed_text[chat_key] = text
+        pending = self._quiet_failsafe_tasks.get(chat_key)
+        if pending is not None and not pending.done():
+            pending.cancel()
+        self._quiet_failsafe_tasks[chat_key] = asyncio.create_task(
+            self._quiet_failsafe_fire(chat_key)
+        )
+
+    def _quiet_clear_suppressed(self, chat_key: int) -> None:
+        """Cancel promotion once the gateway delivers a visible outcome."""
+        self._quiet_suppressed_text.pop(chat_key, None)
+        pending = self._quiet_failsafe_tasks.pop(chat_key, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+
+    async def _quiet_failsafe_fire(self, chat_key: int) -> None:
+        """Promote hidden output when the gateway never sends final prose."""
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self._quiet_failsafe_seconds)
+            if self._quiet_failsafe_tasks.get(chat_key) is not current_task:
+                return
+            suppressed = self._quiet_suppressed_text.pop(chat_key, None)
+            if suppressed is None:
+                return
+
+            try:
+                await self._finalize_tool_progress_card(chat_key)
+            except Exception:
+                log.warning(
+                    "tool_progress quiet promotion finalize failed chat=%s",
+                    chat_key,
+                    exc_info=True,
+                )
+
+            promoted = suppressed
+            if len(promoted) > 2000:
+                promoted = promoted[:2000] + "\n[truncated]"
+            resp = await self._api.post_message(
+                chat_id=chat_key,
+                text=promoted,
+                sender="assistant",
+                message_type="standard",
+            )
+            message_id = resp.get("id") if isinstance(resp, dict) else None
+            if isinstance(message_id, int):
+                self._state.last_assistant_message_by_chat[
+                    chat_key
+                ] = message_id
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.warning(
+                "quiet fail-safe promotion failed chat=%s",
+                chat_key,
+                exc_info=True,
+            )
+        finally:
+            if self._quiet_failsafe_tasks.get(chat_key) is current_task:
+                self._quiet_failsafe_tasks.pop(chat_key, None)
+
     async def _finalize_tool_progress_card(self, chat_key: int) -> None:
         """Transition the active tool_progress card for this chat from
         state='running' to state='done' so the frontend auto-collapses it.
@@ -2142,6 +2395,7 @@ class BGOSAdapter(BasePlatformAdapter):
         """
         card_id = self._tool_progress_card_id_by_chat.pop(chat_key, None)
         tools_list = self._tool_progress_tools_by_chat.pop(chat_key, [])
+        self._tool_progress_quiet_rows_by_chat.pop(chat_key, None)
         if card_id is None:
             return
         # Mark every tool entry as done — the gateway emits one line per
