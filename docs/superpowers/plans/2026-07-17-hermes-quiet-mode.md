@@ -11,7 +11,7 @@
 ## Global constraints
 
 - Quiet ("tidy") is the DEFAULT. "everything" mode reproduces v0.18.1 behavior byte-for-byte (tool card interception stays; no stripping; no new card routing).
-- NO em dashes and NO en dashes in any new code, comment, or copy (regex `[–—]` must find nothing in the diff).
+- NO em dashes and NO en dashes in any new code, comment, or copy (a scan for U+2013 and U+2014 must find nothing in added lines).
 - No version bumps, no deploys, no publishes, no merges to main.
 - Classifier bias: when in doubt, classify as prose (show it). Suppression must never lose content: everything suppressed lands in a card row or the fail-safe promotion.
 - Stay off files owned by sibling branches (add-agent wizard UI + installer; copy sweep). Adapter files are safe; in the app touch ONLY `MessageBubble.tsx`, `EventCard.tsx`, and the new `AgentErrorCard.tsx`.
@@ -173,6 +173,6 @@ class ChatStyleStore:
 - [ ] Full adapter suite green, output pasted in report (`python -m pytest -q`).
 - [ ] New tests exist and pass: function-call suppression as chat + status card surfacing, allowlist (prose passes), off switch (everything mode), fail-safe promotion.
 - [ ] `npx tsc --noEmit` exits 0 in `frontend/expo-app` (app worktree touched).
-- [ ] `grep -RInE '[–—]'` over the diff of both repos finds nothing in added lines.
+- [ ] A U+2013/U+2014 scan over the diff of both repos finds nothing in added lines.
 - [ ] Full diff adversarially reviewed; fix-loop log in report.
 - [ ] Branch `feat/hermes-quiet-mode` pushed in both repos; PRs opened, not merged; no version bumps.
