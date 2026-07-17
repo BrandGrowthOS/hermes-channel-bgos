@@ -347,6 +347,9 @@ Then run `hermes-bgos-doctor` to confirm everything's green.
 | `BGOS_POLL_INTERVAL` | `5` | No | Seconds between REST-poll backup checks for inbound messages. Only relevant while the WS push path has server-side gaps. Set to `0` to disable polling once WS push is reliable. |
 | `BGOS_SCOPE_REFRESH_COOLDOWN` | `10` | No | Seconds between hot-refresh `whoami` calls when inbound arrives for an unknown `assistant_id` (i.e. an agent exposed after the gateway started). Lower = faster recovery; higher = less backend load. |
 | `BGOS_CHAT_STYLE` | `tidy` | No | Host default for quiet mode. Only `everything` selects the pre-quiet behavior; a stored nondefault `/quiet` override takes precedence for that agent. |
+| `BGOS_VOICE_NOTES` | `on` | No | Set to `off` to disable inbound voice note transcription routing. |
+| `BGOS_VOICE_SETUP_CARD` | `on` | No | Set to `off` to disable the first run voice setup progress card. |
+| `BGOS_STT_MODEL` | `base` | No | faster-whisper model name used only to locate the cache for the voice setup card. |
 | `BGOS_OPENAI_API_KEY` | — | Fallback only | Fallback OpenAI API key (Realtime access) for minting ephemeral in-app voice-call sessions (`voice_rpc` mint, spec §6.2). A Home of Agents call already carries the caller's own key on the mint frame (`payload.openaiApiKey`) and is minted with THAT key, so this env var is used only by a standalone host, or by a backend predating the per-user key. Falls back to `OPENAI_API_KEY`. With neither a caller key nor an env key, voice calls fail with a descriptive "voice not configured" error; text chat is unaffected. |
 | `BGOS_VOICE_MODEL` | `gpt-realtime-2.1` | No | OpenAI Realtime model for in-app voice calls. |
 | `BGOS_VOICE_VOICE` | `marin` | No | OpenAI Realtime voice name for in-app voice calls. |
