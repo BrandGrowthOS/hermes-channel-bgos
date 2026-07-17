@@ -168,6 +168,7 @@ Two kinds:
 - `/new`, reset this chat's conversation binding; next message starts fresh
 - `/retry`, re-send the user's last message through the agent
 - `/status`, show adapter health
+- `/quiet on|off`, change this agent's chat style; no argument reports the current style
 
 Adapter intercepts these before `handle_message` is called. Agent never sees them.
 
@@ -332,11 +333,13 @@ Machine-generated traffic, dashboard button dispatches, reply-watcher pushes, ex
 
 **Delivery semantics are identical to a normal inbound user message**, wake, unread, notifications, WS push all unchanged. Reply/act normally; your reply renders as a standard assistant message.
 
+**Outbound maintenance exception:** channel adapters may also post `messageType: "event"` messages with `sender: "assistant"` for maintenance surfaces such as update prompts, confirmations, and status cards. BGOS renders these as the same quiet event card; because they are outbound assistant messages, they do not wake or dispatch the agent.
+
 **Transitional shim (backend-side, temporary):** until all senders pass `eventMeta` natively, the backend auto-upgrades inbound user messages whose `text` starts with `📋 ` / `📞 ` / `🕓 ` / `📬 ` to `messageType: "event"` with a synthesized `eventMeta`. Removable once the five n8n senders adopt the structured contract (n8n node "Event" message type, phase 2).
 
 **Use for:** any machine-originated notification delivered INTO a chat for the agent to process, dispatches, transcripts, watcher hits, scheduled digests.
 
-**Do NOT use for:** the agent's own replies (use `standard` as `assistant`), tool activity (use `tool_progress`), approvals (`approval_request`), or anything the human actually typed.
+**Do NOT use for:** the agent's ordinary text replies (use `standard` as `assistant`), tool activity (use `tool_progress`), approvals (`approval_request`), or anything the human actually typed.
 
 Spec: `docs/superpowers/specs/2026-06-11-event-messages-design.md` (BGOS monorepo).
 
@@ -533,13 +536,40 @@ Hermes agents learn about BGOS via a `PLATFORM_HINTS` entry in `agent/prompt_bui
 - **`format_message` MDv2 escape stripping**, Telegram-tuned prompt-emitted escapes (`\,` `\!` `\.` etc.) cleaned; CommonMark escapes (`\*` `\_` `\[` `\(`) preserved.
 - **`send_multiple_images`**, up to 10 images into a single multi-file POST.
 - **Adaptive inbound text batching**, rapid plain-text messages coalesce; adaptive flush window (≤0.24s short / ≤0.4s mid / 1.0s for ≥4KB chunks / 0.6s default). Slash commands and file-bearing messages bypass. `last_user_text_by_chat` gets the merged text so `/retry` replays the full input.
+- **Quiet mode (chat style)**, `tidy` is the default. The classifier accepts only narrow gateway shapes, so ordinary prose remains chat text.
+  - **Robot talk**, otherwise unclassified plain-text JSON call dumps and compact call-syntax lines append to the per-turn `tool_progress` card as completed generic rows instead of assistant chat text, creating the card when needed. Bare `(×N)` dedup tails are suppressed but do not create rows of their own. If the latest suppressed text is not cleared by a later visible send, a fail-safe finalizes any active card and promotes the text's first 2,000 characters to a `standard` assistant message after about 5 seconds, marking longer text `[truncated]`, so the chat cannot end silent.
+  - **Gateway failures**, when `send()` receives a plain-text reply with no buttons or media whose first nonblank line begins `❌` or `⚠️`, it posts `messageType="agent_error"`; `text` is up to 200 characters of that line with the leading failure symbol removed and `eventMeta.payload.details` retains the full text passed into the quiet classifier. The same shape seen only in a streaming `edit_message()` becomes an error row in the progress card and remains eligible for fail-safe promotion.
+  - **Voice replies**, exactly one leading `[voice consult]` or `[voice dispatch]` prefix, plus following whitespace, is stripped before display in tidy mode.
+  - **Maintenance cards**, `send_update_prompt` and `send_slash_confirm` post `messageType="event"` with `eventMeta.source` set to `"update"` or `"confirm"`, plus the same option buttons. This replaces the old `slash_confirm` message type, which the backend enum rejects with a silent 400. `/status` posts a friendly connection-health event card with `eventMeta.source="status"` and technical fields in `eventMeta.payload`.
+  - **Per-agent switch**, bridge-local `/quiet on` selects tidy and `/quiet off` selects everything. Nondefault per-agent overrides persist at `$HERMES_HOME/bgos_chat_style.json`; selecting the current host default removes the redundant override. Set `BGOS_CHAT_STYLE=everything` for the host default. Everything mode reproduces the pre-quiet behavior byte-for-byte, including the legacy `slash_confirm` wire shape and its known 400.
 
-All these unlock because the adapter overrides the relevant `BasePlatformAdapter` methods (`edit_message`, `delete_message`, `send_typing`, `send_slash_confirm`, `send_update_prompt`), the gates Hermes's gateway probes. No fork-patch changes required.
+**`agent_error` wire (Hermes tidy send path):**
+```ts
+{
+  sender: "assistant",
+  messageType: "agent_error",
+  text: "Hermes update failed.",
+  eventMeta?: {
+    source: "agent",
+    title: "Hermes update failed.",
+    payload: {
+      details: "❌ Hermes update failed.\n...full gateway text..."
+    }
+  }
+}
+```
+
+`text` is the short human sentence. `eventMeta` is optional on the wire; Hermes includes it with the full text passed into the quiet classifier in `payload.details`. BGOS renders the message as a soft error card with a details toggle when those details are present. OpenClaw's `BgosOutbound.sendAgentError` remains the other emitter.
+
+**Use for:** classifier-confirmed gateway failure output on Hermes's `send()` path.
+
+**Do NOT use for:** ordinary assistant error explanations, tool-level failures inside `tool_progress`, approvals, or user-authored text.
+
+The gateway-driven UX above is enabled because the adapter overrides the `BasePlatformAdapter` hooks Hermes probes (`edit_message`, `delete_message`, `send_typing`, `send_slash_confirm`) and separately implements the duck-typed `send_update_prompt` hook. Quiet routing also lives in `send()`, `edit_message()`, and bridge-local command handling. No fork-patch changes required.
 
 **Backend dependencies still in flight (graceful degradation if missing):**
 - `DELETE /api/v1/messages/{id}`, needed for streaming-preview cleanup; without it, preview stays visible (cosmetic).
 - WS `typing` event handler, without it, no typing indicator (cosmetic).
-- `messageType="slash_confirm"` whitelist, without it, renders as `standard` with chips intact (buttons still work).
 - Approval `style` / `row_index` on options, without it, buttons render flat (already documented in v0.4 troubleshooting).
 
 **When you update this canonical, also update:** `hermes-channel-bgos/hermes-fork-patch/`, regenerate `0001-bgos-integration.patch` with the new `PLATFORM_HINTS` entry. Have users `git pull` + re-apply the patch on their fork, then restart Hermes.
@@ -616,6 +646,7 @@ When a BGOS frontend capability changes (new `MessageType`, new DTO field, new U
 - [ ] **`n8n-nodes-bgos`**, if the change adds an agent action (e.g. a new operation), add/adjust the `BGOSAction` node operation + its docs. Bump the package version.
 - [ ] **Meeting turn-protocol events (capability #13)**, if the change touches the meeting turn engine or its WS events (`meeting_turn_changed`, `meeting_state_resync`, etc.), update capability #13 here AND every plugin that subscribes. Today only `bgos-claude-plugin` does; Hermes / OpenClaw / Gobot only document the contract for when they add support. The `meeting_state_resync` reconnect catch-up (added 2026-06-22) is the canonical example.
 - [ ] **New inbound sender / provenance (capability #14, system messages)**, if the change adds or alters a `sender` value or how the agent learns "who is speaking", update capability #14 here AND every plugin's inbound handling + agent-facing hints, AND add the additive DB enum migration. The `system` sender (added 2026-06-22) is the canonical example: backend `SenderEnum.SYSTEM` + in-content origin marker; n8n `BGOSAction` "System" sender option; `senderType: 'system'` on `inbound_message` / `system: true` on the webhook; SystemCard on the frontend; and a `system`-aware hint in all four plugins.
+- [ ] **Quiet mode, `agent_error`, and assistant-sender event cards (Hermes-first, 2026-07-17)**, this combined capability shipped in `hermes-channel-bgos`. `openclaw-channel-bgos`, `gobot-channel-bgos`, `bgos-claude-plugin`, and `codex-channel-bgos` have NOT adopted the full three-part capability; propagation is pending and was not performed in this PR. OpenClaw retains its pre-existing `BgosOutbound.sendAgentError` emitter but has not adopted quiet routing or assistant-sender maintenance cards. Gobot, Claude Code, and Codex have not adopted `agent_error` emission either.
 - [ ] **Sanity check**, cross-read the plugin docs side-by-side: do they describe the same capability the same way? Fix drift before shipping.
 
 **Who owns propagation:** whichever developer/agent shipped the frontend change. Don't merge the frontend PR until the plugin updates are also staged (or at least issues are filed).

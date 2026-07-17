@@ -46,6 +46,7 @@ Advanced overrides: `HERMES_INSTALL`, `HERMES_PYTHON`, `REPO_DIR`, `DEVICE_LABEL
 Backend dependencies still in flight: `DELETE /api/v1/messages/{id}` (for streaming-preview cleanup; missing → preview stays visible, cosmetic only) and a WS `typing` event handler (missing → no typing indicator, cosmetic only). Both degrade gracefully; no exceptions.
 
 ## Contents
+- [Quiet mode](#quiet-mode)
 - [Quick start with Claude Code (recommended)](#quick-start-with-claude-code-recommended)
 - [Prerequisites](#prerequisites)
 - [Manual setup](#manual-setup)
@@ -57,6 +58,25 @@ Backend dependencies still in flight: `DELETE /api/v1/messages/{id}` (for stream
 - [Troubleshooting](#troubleshooting)
 - [Architecture](#architecture)
 - [Running the tests](#running-the-tests)
+
+---
+
+## Quiet mode
+
+Quiet mode keeps behind-the-scenes gateway narration out of the conversation while leaving useful activity visible in BGOS cards. `tidy` is the default, so ordinary replies and normal streaming still appear as chat text.
+
+| Gateway output | Tidy behavior |
+|---|---|
+| JSON call dumps and compact call-syntax lines | Append to a `tool_progress` card as completed generic rows, creating the card when needed. |
+| Bare dedup tails such as `(×3)` | Are initially suppressed but do not create rows of their own. |
+| A plain-text `send()` whose first nonblank line begins `❌` or `⚠️` | Renders as a soft `agent_error` card with a short first line whose leading failure symbol is removed, plus the full classified text behind the details toggle. |
+| The same failure shape seen only during a streaming edit | Folds into `tool_progress` as an error row and remains covered by the fail-safe. |
+| A reply beginning with `[voice consult]` or `[voice dispatch]` | Loses exactly one leading transport prefix, plus its following whitespace, before display. |
+| Update prompts, slash confirmations, and `/status` | Render as assistant-sender event cards. Prompts keep the same option buttons; technical status fields live in `eventMeta.payload`. |
+
+If the latest hidden robot text is not cleared by a later visible send, the adapter finalizes any active progress card and promotes the text's first 2,000 characters to a standard message after about 5 seconds, marking longer text `[truncated]`. This fail-safe keeps a suppressed-only turn from ending silently.
+
+Use `/quiet off` for the current agent to select `everything`, or `/quiet on` to restore tidy mode. Nondefault per-agent overrides are stored at `$HERMES_HOME/bgos_chat_style.json`; selecting the current host default removes the redundant override. Set `BGOS_CHAT_STYLE=everything` for the host default. Everything mode is byte-for-byte the pre-quiet adapter behavior, including the legacy `slash_confirm` message type that the backend enum rejects.
 
 ---
 
@@ -326,11 +346,12 @@ Then run `hermes-bgos-doctor` to confirm everything's green.
 | `BGOS_ALLOWED_USERS` | — | No (alternative) | Comma-separated Clerk user IDs authorized to chat with this Hermes. |
 | `BGOS_POLL_INTERVAL` | `5` | No | Seconds between REST-poll backup checks for inbound messages. Only relevant while the WS push path has server-side gaps. Set to `0` to disable polling once WS push is reliable. |
 | `BGOS_SCOPE_REFRESH_COOLDOWN` | `10` | No | Seconds between hot-refresh `whoami` calls when inbound arrives for an unknown `assistant_id` (i.e. an agent exposed after the gateway started). Lower = faster recovery; higher = less backend load. |
+| `BGOS_CHAT_STYLE` | `tidy` | No | Host default for quiet mode. Only `everything` selects the pre-quiet behavior; a stored nondefault `/quiet` override takes precedence for that agent. |
 | `BGOS_OPENAI_API_KEY` | — | For voice calls | OpenAI API key (Realtime access) used to mint ephemeral in-app voice-call sessions (`voice_rpc` mint, spec §6.2). Falls back to `OPENAI_API_KEY`. Without either, voice calls fail with a descriptive "voice not configured" error; text chat is unaffected. |
 | `BGOS_VOICE_MODEL` | `gpt-realtime-2` | No | OpenAI Realtime model for in-app voice calls. |
 | `BGOS_VOICE_VOICE` | `marin` | No | OpenAI Realtime voice name for in-app voice calls. |
 | `BGOS_VOICE_PERSONA` | head of `$HERMES_HOME/SOUL.md` | No | Extra persona text baked into the voice session instructions. Defaults to the first ~4000 chars of the profile's `SOUL.md` when unset. |
-| `HERMES_HOME` | `~/.hermes` | No | Root for Hermes config + secrets + the persisted `bgos_last_id` cursor. **For a named-profile Hermes install, point this at the profile dir** (e.g. `~/.hermes/profiles/david`) so the secrets file, the `bgos_last_id` cursor, and the systemd `EnvironmentFile=` all resolve under the same root. |
+| `HERMES_HOME` | `~/.hermes` | No | Root for Hermes config + secrets + the persisted `bgos_last_id` cursor and `bgos_chat_style.json` preferences. **For a named-profile Hermes install, point this at the profile dir** (e.g. `~/.hermes/profiles/david`) so the secrets file, cursor, preferences, and systemd `EnvironmentFile=` all resolve under the same root. |
 
 **Minimum working `.env`:**
 ```bash
@@ -420,13 +441,14 @@ Security boundary: pairing/integration tokens may read peer and introduction sta
 
 ## Bridge-local slash commands
 
-Three commands are handled by this adapter locally — they never reach your Hermes agent. Useful in every paired chat:
+Four commands are handled by this adapter locally; they never reach your Hermes agent. Useful in every paired chat:
 
 | Command | What it does |
 |---|---|
 | `/new` | Reset this chat's conversation binding. Your next message starts fresh. |
 | `/retry` | Resend the last user message in this chat through the agent. |
-| `/status` | Show adapter health: pairing id, assistants bound, last message id seen, pending approvals. |
+| `/status` | Show connection health. Tidy mode keeps pairing, cursor, and approval details in the event card payload. |
+| `/quiet on|off` | Select tidy or everything mode for this agent. With no argument, report the current style. |
 
 Everything else (`/help`, `/stop`, `/approve`, `/deny`, etc.) goes straight to Hermes as-is.
 
@@ -519,7 +541,7 @@ Then `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.
 - `BGOSAdapter` (`bgos_adapter.py`) — subclass of `BasePlatformAdapter`. Resolves config from (priority order) BgosConfig → Hermes config attrs → env vars → `~/.hermes/secrets/bgos.json`. Implements the 4 abstract methods + optional `send_image/voice/video/document/animation` + `send_exec_approval` with 4-button Telegram parity.
 - `StateStore` (`state_store.py`) — in-process state: assistant→route map, retry cache, conversation bindings. Not persisted; rebuilt from `whoami()` + REST backfill on reconnect. When inbound arrives for an unknown `assistant_id`, the adapter re-runs `whoami()` and reconciles the map in place (hot-refresh), so agents exposed after startup work without a restart.
 - `bgos_last_id` file (`$HERMES_HOME/bgos_last_id`) — persisted cursor for the last seen message id. Monotonically advances. Prevents history-replay on restart.
-- `commands_sync.py` — merges Hermes's native slash manifest with the 3 bridge-local commands, pushes via `PUT /integrations/assistants/:id/commands`.
+- `commands_sync.py`: merges Hermes's native slash manifest with the 4 bridge-local commands, then pushes it via `PUT /integrations/assistants/:id/commands`.
 - `agents.py` — shared `route:Display Name` spec parser + env enumeration; the single source of truth used by the adapter's catalog push, the pair CLI's `--agents`, and the doctor.
 - `pair_cli.py` — the `hermes-pair-bgos` console script (`--agents` publishes the catalog at pair time; `--wait-for-exposure` polls until you tick agents).
 - `doctor.py` — the `hermes-bgos-doctor` console script. Non-interactive health check (package, fork patch, pairing token, env, catalog, live `whoami`, gateway process) with inline fixes; `--json` for scripted/agent use, exit 1 on any FAIL.
