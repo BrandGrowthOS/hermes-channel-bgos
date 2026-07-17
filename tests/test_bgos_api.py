@@ -110,6 +110,31 @@ async def test_patch_message_sends_changes(mock_bgos_server):
     await api.close()
 
 
+async def test_patch_message_serializes_event_meta(mock_bgos_server):
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("PATCH", "/api/v1/messages/43").respond(200, {"id": 43})
+    event_meta = {
+        "source": "voice_setup",
+        "title": "Voice setup",
+        "payload": {"progress": {"stage": "ready"}},
+    }
+
+    await api.patch_message(
+        43,
+        text="Voice is ready.",
+        event_meta=event_meta,
+        user_id="user-43",
+    )
+
+    req = mock_bgos_server.last_request("PATCH", "/api/v1/messages/43")
+    assert req.json_body == {
+        "text": "Voice is ready.",
+        "eventMeta": event_meta,
+        "userId": "user-43",
+    }
+    await api.close()
+
+
 async def test_delete_message_sends_delete_request(mock_bgos_server):
     """DELETE /api/v1/messages/{id} carries the pairing header and uses
     the DELETE verb. Backend may return 204 No Content — _request handles

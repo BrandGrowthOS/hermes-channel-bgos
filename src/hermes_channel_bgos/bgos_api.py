@@ -528,6 +528,7 @@ class BgosApi:
         *,
         text: str | None = None,
         approval_meta: dict | None = None,
+        event_meta: dict | None = None,
         options: list[dict] | None = None,
         render_mode: str | None = None,
         user_id: str | None = None,
@@ -538,6 +539,7 @@ class BgosApi:
         `options=[]` is meaningful (clears any prior keyboard) and is
         distinct from omitting the field; the adapter's edit_message uses
         that semantic for streaming edits that drop the inline chips.
+        `event_meta` edits drive the voice_setup progress card.
 
         `user_id` is REQUIRED by the backend's DTO validation (caught
         live 2026-05-13: PATCH without it returns 400 with messages
@@ -556,6 +558,8 @@ class BgosApi:
             body["text"] = text
         if approval_meta is not None:
             body["approvalMeta"] = approval_meta
+        if event_meta is not None:
+            body["eventMeta"] = event_meta
         if options is not None:
             body["options"] = options
         if render_mode is not None:

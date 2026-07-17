@@ -49,6 +49,7 @@ from .quiet_mode import (
     strip_voice_prefixes,
 )
 from .state_store import StateStore
+from .stt_setup import SttSetupNotifier
 from .voice_notes import collect_voice_notes, voice_notes_enabled
 from .voice_rpc import (
     VoiceConfig,
@@ -990,6 +991,11 @@ class BGOSAdapter(BasePlatformAdapter):
         self._config = bgos_config
         self._api = BgosApi(bgos_config)
         self._state = StateStore()
+        self._stt_setup = SttSetupNotifier(
+            self._post_stt_setup_event,
+            self._edit_stt_setup_event,
+        )
+        self._stt_setup_tasks: set[asyncio.Task] = set()
         self._chat_style_store = ChatStyleStore()
         self._consumed_peer_wait_replies_mtime_ns: int | None = None
         self._load_consumed_peer_wait_replies()
@@ -1811,6 +1817,14 @@ class BGOSAdapter(BasePlatformAdapter):
             await asyncio.gather(*doctor_tasks, return_exceptions=True)
         self._doctor_tasks.clear()
         self._doctor_rpc_in_flight.clear()
+        setup_tasks = [
+            task for task in self._stt_setup_tasks if not task.done()
+        ]
+        for task in setup_tasks:
+            task.cancel()
+        if setup_tasks:
+            await asyncio.gather(*setup_tasks, return_exceptions=True)
+        self._stt_setup_tasks.clear()
         if self._poll_task is not None:
             self._poll_task.cancel()
             self._poll_task = None
@@ -1856,6 +1870,78 @@ class BGOSAdapter(BasePlatformAdapter):
             return None
         self._state.assistant_id_by_chat[chat_id] = assistant_id_int
         return assistant_id_int
+
+    async def _post_stt_setup_event(
+        self,
+        chat_id: str,
+        text: str,
+        event_meta: dict,
+    ) -> int | str | None:
+        chat_key = int(chat_id)
+        assistant_id = await self._assistant_id_for_chat(chat_key)
+        if assistant_id is None:
+            log.warning(
+                "voice setup card has no assistant route for chat=%s",
+                chat_key,
+            )
+            return None
+        response = await self._api.post_send_message(
+            chat_id=chat_key,
+            assistant_id=assistant_id,
+            text=text,
+            sender="assistant",
+            message_type="event",
+            event_meta=event_meta,
+            session_handle=self._state.session_handle_for_chat(chat_key),
+        )
+        message = response.get("message") if isinstance(response, dict) else None
+        message_id = (
+            message.get("id")
+            if isinstance(message, dict)
+            else response.get("id") if isinstance(response, dict) else None
+        )
+        return message_id if isinstance(message_id, (int, str)) else None
+
+    async def _edit_stt_setup_event(
+        self,
+        chat_id: str,
+        message_id: int | str,
+        text: str,
+        event_meta: dict,
+    ) -> None:
+        chat_key = int(chat_id)
+        # Backend PATCH accepts eventMeta starting with the voice notes release.
+        # Older backends update text while keeping the posted payload values.
+        await self._api.patch_message(
+            int(message_id),
+            text=text,
+            event_meta=event_meta,
+            user_id=self._patch_user_id_for_chat(chat_key),
+        )
+
+    def _schedule_stt_setup(self, chat_id: int) -> None:
+        setup_coro = None
+        try:
+            setup_coro = self._stt_setup.maybe_notify(str(chat_id))
+            task = asyncio.create_task(setup_coro)
+            self._stt_setup_tasks.add(task)
+            task.add_done_callback(self._stt_setup_tasks.discard)
+        except Exception:
+            if setup_coro is not None:
+                close = getattr(setup_coro, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        log.warning(
+                            "failed to close unscheduled voice setup task",
+                            exc_info=True,
+                        )
+            log.warning(
+                "failed to schedule voice setup card for chat=%s",
+                chat_id,
+                exc_info=True,
+            )
 
     async def _a2a_owner_id_for_chat(self, chat_id: int) -> int | None:
         """Resolve the owner only when the target is an a2a side thread."""
@@ -4071,6 +4157,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 try:
                     gateway_event.media_urls = [path for path, _ in voice_media]
                     gateway_event.media_types = [mime for _, mime in voice_media]
+                    self._schedule_stt_setup(event.chat_id)
                 except Exception:
                     log.warning(
                         "failed to attach inbound BGOS voice note media",
