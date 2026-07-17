@@ -22,7 +22,7 @@ import platform
 import re
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,7 @@ from .commands_sync import (
 )
 from .agents import enumerate_agents_from_env
 from .config import BgosConfig
+from .doctor import run_checks
 from .quiet_mode import (
     EVERYTHING,
     TIDY,
@@ -232,6 +233,8 @@ S3_THRESHOLD = 500 * 1024
 # as the ceiling so a pathological path can't OOM the gateway process. Files
 # above this are skipped with a warning rather than read.
 _MEDIA_MAX_BYTES = 100 * 1024 * 1024
+
+_DOCTOR_RPC_TIMEOUT_SECONDS = 45.0
 
 # System locations that always hold secrets or credentials. SECURITY: outbound
 # MEDIA:/path markers and send_image/file local sources are agent-emitted, and
@@ -1113,6 +1116,8 @@ class BGOSAdapter(BasePlatformAdapter):
         self._voice_rpc: VoiceRpcHandler | None = None
         self._voice_waiters: dict[int, list[_VoiceTurnWaiter]] = {}
         self._voice_tasks: set[asyncio.Task] = set()
+        self._doctor_rpc_in_flight: set[str] = set()
+        self._doctor_tasks: set[asyncio.Task] = set()
         # Poll cadence for turn-completion detection, and the quiet window
         # after the last captured reply that resolves a turn when session
         # tracking is unavailable. The settle window MUST exceed the
@@ -1263,6 +1268,7 @@ class BGOSAdapter(BasePlatformAdapter):
             on_reconnect=self._on_reconnect,
             on_inbound_click=self._handle_inbound_click,
             on_voice_rpc=self._handle_voice_rpc,
+            on_doctor_rpc=self._handle_doctor_rpc,
         )
         if self.pairing_id is not None:
             self._ws.bind_pairing(self.pairing_id)
@@ -1797,6 +1803,13 @@ class BGOSAdapter(BasePlatformAdapter):
             await asyncio.gather(*voice_tasks, return_exceptions=True)
         self._voice_tasks.clear()
         self._voice_waiters.clear()
+        doctor_tasks = [t for t in self._doctor_tasks if not t.done()]
+        for task in doctor_tasks:
+            task.cancel()
+        if doctor_tasks:
+            await asyncio.gather(*doctor_tasks, return_exceptions=True)
+        self._doctor_tasks.clear()
+        self._doctor_rpc_in_flight.clear()
         if self._poll_task is not None:
             self._poll_task.cancel()
             self._poll_task = None
@@ -4720,7 +4733,100 @@ class BGOSAdapter(BasePlatformAdapter):
                 log.exception("backfill replay failed for message=%s", msg)
 
     # -------------------------------------------------------------------------
-    # Native in-app voice (voice_rpc — spec §6.2, the Hermes broker)
+    # Owner-triggered doctor checks (doctor_rpc)
+    # -------------------------------------------------------------------------
+
+    async def _handle_doctor_rpc(self, data: dict) -> None:
+        """Validate and dispatch an owner-triggered doctor checkup."""
+        if not isinstance(data, dict):
+            log.warning("dropping malformed doctor_rpc frame: %s", data)
+            return
+        rpc_id = data.get("rpcId")
+        if not isinstance(rpc_id, str) or not rpc_id.strip():
+            log.warning("dropping doctor_rpc frame without rpcId: %s", data)
+            return
+        if data.get("op") != "run":
+            log.debug("dropping doctor_rpc frame with unknown op: %s", data)
+            return
+        if not isinstance(data.get("payload"), dict):
+            log.warning("dropping doctor_rpc frame with invalid payload: %s", data)
+            return
+        if rpc_id in self._doctor_rpc_in_flight:
+            log.debug("dropping in-flight doctor_rpc duplicate rpc=%s", rpc_id)
+            return
+
+        self._doctor_rpc_in_flight.add(rpc_id)
+        task = asyncio.create_task(self._run_doctor_rpc(rpc_id))
+        self._doctor_tasks.add(task)
+        task.add_done_callback(self._doctor_tasks.discard)
+
+    async def _run_doctor_rpc(self, rpc_id: str) -> None:
+        try:
+            try:
+                await self._api.post_doctor_rpc_ack(rpc_id)
+            except Exception:
+                log.warning(
+                    "doctor_rpc ack failed rpc=%s", rpc_id, exc_info=True,
+                )
+
+            try:
+                results = await asyncio.wait_for(
+                    run_checks(), timeout=_DOCTOR_RPC_TIMEOUT_SECONDS,
+                )
+                checks = []
+                for result in results[:24]:
+                    check = asdict(result)
+                    check["name"] = check["name"][:64]
+                    check["detail"] = check["detail"][:400]
+                    check["fix"] = check["fix"][:400]
+                    checks.append(check)
+                body = {
+                    "ok": True,
+                    "payload": {
+                        "result": (
+                            "fail"
+                            if any(result.status == "FAIL" for result in results)
+                            else "ok"
+                        ),
+                        "checks": checks,
+                    },
+                }
+            except asyncio.TimeoutError:
+                body = {
+                    "ok": False,
+                    "error": {
+                        "code": "DOCTOR_TIMEOUT",
+                        "message": (
+                            "Doctor checks timed out after "
+                            f"{_DOCTOR_RPC_TIMEOUT_SECONDS:g} seconds"
+                        )[:300],
+                    },
+                }
+            except Exception as exc:
+                log.exception("doctor_rpc checks failed rpc=%s", rpc_id)
+                try:
+                    message = str(exc).strip()
+                except Exception:
+                    message = ""
+                body = {
+                    "ok": False,
+                    "error": {
+                        "code": "DOCTOR_ERROR",
+                        "message": (message or exc.__class__.__name__)[:300],
+                    },
+                }
+
+            try:
+                await self._api.post_doctor_rpc_result(rpc_id, body)
+            except Exception:
+                log.warning(
+                    "doctor_rpc result post failed rpc=%s", rpc_id, exc_info=True,
+                )
+        finally:
+            self._doctor_rpc_in_flight.discard(rpc_id)
+
+    # -------------------------------------------------------------------------
+    # Native in-app voice (voice_rpc, spec section 6.2, the Hermes broker)
     # -------------------------------------------------------------------------
 
     def _offer_voice_reply(self, chat_key: int, text: str) -> None:

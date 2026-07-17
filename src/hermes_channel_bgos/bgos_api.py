@@ -620,6 +620,18 @@ class BgosApi:
             "POST", f"/api/v1/integrations/voice-rpc/{rpc_id}/result", json=body,
         )
 
+    async def post_doctor_rpc_ack(self, rpc_id: str) -> Any:
+        """POST the pairing-authenticated doctor_rpc acknowledgement."""
+        return await self._request(
+            "POST", f"/api/v1/integrations/doctor-rpc/{rpc_id}/ack",
+        )
+
+    async def post_doctor_rpc_result(self, rpc_id: str, body: dict) -> Any:
+        """POST a doctor_rpc success or failure result."""
+        return await self._request(
+            "POST", f"/api/v1/integrations/doctor-rpc/{rpc_id}/result", json=body,
+        )
+
     async def post_voice_task_result(self, task_id: str, body: dict) -> Any:
         """POST /api/v1/integrations/voice-tasks/{taskId}/result.
 
