@@ -94,7 +94,7 @@ Design points:
 - [ ] **Step 1:** Failing/added tests: `/voice tts` slash event is NOT bridge-intercepted and dispatches as COMMAND with `command_name == "voice"` and args preserved (this is the adapter half of the spoken-reply setting on/off proof); `send_voice` with a caption posts `isAudioMessage: true` plus the caption as `text` (extend existing test if already close).
 - [ ] **Step 2:** Run and confirm status.
 - [ ] **Step 3:** Docs: section 6 gains "Voice notes: audio attachments are downloaded and transcribed through the host's speech to text pipeline; the transcript reaches the agent as quoted spoken words and the file link stays available. Formats: m4a, aac, mp3, ogg, opus, webm, wav, flac, up to 25 MB." Section 5 and the Hermes cheat sheet gain the speak-replies story: "/voice off | on | tts persists per chat; when on, replies to voice notes arrive as voice bubbles with the full text underneath; when tts, every reply does." Bundled hint in plugin.py updated in lockstep. README env rows added.
-- [ ] **Step 4:** Full adapter suite green; `grep -n $'\u2014\|\u2013'|–' <changed files>` returns nothing.
+- [ ] **Step 4:** Full adapter suite green; a grep for the two banned dash characters (u2014, u2013) over changed files returns nothing.
 - [ ] **Step 5:** Commit `docs(voice-notes): canon mirror, bundled hint, voice passthrough tests`.
 
 ### Task 4: Frontend EventCard real progress rendering
