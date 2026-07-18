@@ -23,8 +23,10 @@ import httpx
 from .bgos_adapter import (
     S3_THRESHOLD,
     _MEDIA_MAX_BYTES,
+    InvalidEventMeta,
     _classify_media,
     _guess_media_mime,
+    _parse_event_block,
     _parse_media_markers,
 )
 from .bgos_api import BgosApi, BgosApiError
@@ -275,6 +277,18 @@ async def standalone_send(
     try:
         chat_key = int(chat_id)
         cleaned_message, marker_paths = _parse_media_markers(message)
+        # Event-card marker parity with the live adapter's send(): a
+        # [[BGOS_EVENT]]{...}[[/BGOS_EVENT]] block posts messageType="event"
+        # with the object passed verbatim as eventMeta. Invalid blocks are
+        # rejected with the parser's clear error instead of leaking marker
+        # text into the chat.
+        try:
+            cleaned_message, event_meta = _parse_event_block(cleaned_message)
+        except InvalidEventMeta as exc:
+            return {"error": f"bgos standalone send: invalid_event_meta: {exc}"}
+        message_type = "event" if event_meta is not None else "standard"
+        if event_meta is not None and not cleaned_message.strip():
+            cleaned_message = str(event_meta.get("title", "")).strip()
         combined_paths = list(media_files or []) + marker_paths
         attachments = (
             await _standalone_build_media_attachments(
@@ -301,7 +315,8 @@ async def standalone_send(
                 assistant_id=assistant_id,
                 text=cleaned_message,
                 sender="assistant",
-                message_type="standard",
+                message_type=message_type,
+                event_meta=event_meta,
                 has_attachment=True if attachments else None,
                 files=attachments or None,
             )
@@ -314,7 +329,8 @@ async def standalone_send(
                 chat_id=chat_key,
                 text=cleaned_message,
                 sender="assistant",
-                message_type="standard",
+                message_type=message_type,
+                event_meta=event_meta,
                 files=attachments or None,
             )
             msg_id = resp.get("id") if isinstance(resp, dict) else None
@@ -376,6 +392,26 @@ Rules:
 - Don't try to render buttons through any other channel (raw JSON, markdown lists, etc.) — the marker syntax is the ONLY wired path.
 
 Use inline chips for async / proactive prompts ("Want me to summarize this?"), lightweight confirmations, and anywhere the user might not be actively watching the chat. The chips stay tappable indefinitely, so the user can answer later.
+
+## Event cards (renderable cards)
+You can summon BGOS's rich renderable cards (health tracker, status summaries, and other structured kinds) by embedding a `[[BGOS_EVENT]]` block in your reply. The adapter posts the message with `messageType: "event"` and passes your JSON object verbatim as the backend's `eventMeta`, so BGOS renders a card instead of a plain bubble.
+
+Syntax (the block holds ONE JSON object):
+```
+Optional body text before or after the block.
+
+[[BGOS_EVENT]]
+{"source": "agent", "title": "Sleep logged", "peek": "7h 40m", "payload": {"kind": "health_tracker_card"}}
+[[/BGOS_EVENT]]
+```
+
+Rules:
+- `source` and `title` are required non-empty strings. Use `source: "agent"` for cards you originate.
+- `peek` (optional string) is the collapsed one-line preview.
+- `payload` (optional object) carries the card data and is passed through untouched. For a renderable card, set `payload.kind` to the card kind (e.g. `"health_tracker_card"`) plus that kind's data fields.
+- `GET /api/v1/renderables` on the BGOS backend lists the currently supported renderable kinds and their payload shapes.
+- A malformed block (bad JSON, missing/empty source or title) is rejected with a clear error and nothing is posted — fix the block and resend.
+- Any text outside the block becomes the message's visible text; if you send only the block, the title is used as the fallback text for older clients.
 
 ## ask_user_input modal (NOT YET WIRED)
 BGOS also supports a full-screen multi-question modal (`ask_user_input` in the n8n BGOSAction node). Hermes-side support is scheduled but NOT YET shipped — for multi-question flows today, use sequential inline-button messages instead.
