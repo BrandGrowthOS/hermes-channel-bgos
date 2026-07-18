@@ -247,6 +247,31 @@ class BgosApi:
         """Introspect the pairing scope: pairing_id + assistants[] + metadata."""
         return await self._request("GET", "/api/v1/integrations/me")
 
+    async def post_heartbeat(
+        self,
+        *,
+        daemon_version: str,
+        daemon_env: str | None = None,
+        last_error: str | None = None,
+    ) -> Any:
+        """POST /api/v1/integrations/heartbeat (pairing-authed).
+
+        Reports the running plugin version so the pairing row's
+        `daemon_version` is populated — the BGOS app's update prompt keys off
+        it (a NULL means "unknown, can never prompt"). Body is camelCase to
+        match the backend DTO: `{daemonVersion, daemonEnv?, lastError?}`.
+        Callers on the daemon cycle must treat this as best-effort and
+        swallow failures — a heartbeat must never block or crash the daemon.
+        """
+        body: dict[str, Any] = {"daemonVersion": daemon_version}
+        if daemon_env is not None:
+            body["daemonEnv"] = daemon_env
+        if last_error is not None:
+            body["lastError"] = last_error
+        return await self._request(
+            "POST", "/api/v1/integrations/heartbeat", json=body,
+        )
+
     async def get_capabilities(self, channel: str = "hermes") -> dict:
         """GET /api/v1/integrations/capabilities, the backend-served agent
         capability canon for this channel (capability bootstrap).

@@ -28,6 +28,7 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
+from . import __version__
 from .bgos_api import BgosApi, BgosApiError, NOT_MODIFIED
 from .bgos_ws import BgosWs
 from .commands_sync import (
@@ -118,10 +119,84 @@ _REPLY_TO_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Agent-emitted event-card marker. The agent writes a single JSON object
+# between these tags and the adapter posts the message with
+# messageType="event" + the object passed VERBATIM as the backend's
+# `eventMeta` field, which is how BGOS renders the renderable cards
+# (GET /api/v1/renderables lists the kinds). Shape:
+#   { "source": str, "title": str, "peek"?: str, "payload"?: object }
+# The marker is stripped from the visible text before posting. Validation
+# is intentionally light (source + title non-empty strings; peek/payload
+# type-checked when present); the payload is never mutated.
+_EVENT_BLOCK_RE = re.compile(
+    r"\[\[BGOS_EVENT\]\]\s*(\{.*?\})\s*\[\[/BGOS_EVENT\]\]",
+    re.IGNORECASE | re.DOTALL,
+)
+# Bare open tag, used to reject a malformed block with a clear error rather
+# than posting the marker as literal text (which silently loses the card).
+_EVENT_OPEN_TAG_RE = re.compile(r"\[\[BGOS_EVENT\]\]", re.IGNORECASE)
+
+
+class InvalidEventMeta(ValueError):
+    """Raised when an agent-emitted [[BGOS_EVENT]] block is malformed or its
+    eventMeta object fails the light validation (source/title non-empty
+    strings, peek a string when present, payload an object when present)."""
+
+
+def _parse_event_block(content: str) -> tuple[str, dict | None]:
+    """Extract a `[[BGOS_EVENT]]{...}[[/BGOS_EVENT]]` block from agent text.
+
+    Returns `(cleaned_text, event_meta)` where `event_meta` is the parsed JSON
+    object passed through verbatim (extra keys preserved, payload untouched),
+    or `(content, None)` when no block is present. Raises `InvalidEventMeta`
+    with a clear, agent-actionable message when a block is present but
+    malformed or fails validation — the caller rejects the send instead of
+    leaking marker text into the chat.
+    """
+    if not content or "BGOS_EVENT" not in content.upper():
+        return content, None
+    match = _EVENT_BLOCK_RE.search(content)
+    if match is None:
+        if _EVENT_OPEN_TAG_RE.search(content):
+            raise InvalidEventMeta(
+                "malformed [[BGOS_EVENT]] block: expected "
+                "[[BGOS_EVENT]]{...json object...}[[/BGOS_EVENT]]"
+            )
+        return content, None
+    raw = match.group(1)
+    try:
+        meta = json.loads(raw)
+    except ValueError as exc:
+        raise InvalidEventMeta(
+            f"eventMeta is not valid JSON: {exc}"
+        ) from None
+    if not isinstance(meta, dict):
+        raise InvalidEventMeta("eventMeta must be a JSON object")
+    source = meta.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise InvalidEventMeta("eventMeta.source must be a non-empty string")
+    title = meta.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise InvalidEventMeta("eventMeta.title must be a non-empty string")
+    if "peek" in meta and not isinstance(meta["peek"], str):
+        raise InvalidEventMeta("eventMeta.peek must be a string when present")
+    if "payload" in meta and not isinstance(meta["payload"], dict):
+        raise InvalidEventMeta(
+            "eventMeta.payload must be a JSON object when present"
+        )
+    cleaned = content[: match.start()] + content[match.end():]
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, meta
+
 # Backend rejects inline messages with >6 options (see PR #62 + memory
 # `inline_buttons_shipped.md`). Agents that emit more get truncated; we log
 # a warning so this isn't silent.
 _INLINE_OPTION_LIMIT = 6
+
+# Version-heartbeat cadence: once at boot, then every 6 hours. Keeps the
+# pairing row's daemon_version fresh without meaningful traffic (4 tiny
+# POSTs a day).
+_HEARTBEAT_INTERVAL_SECONDS = 6 * 60 * 60
 
 # Threshold below which we inline base64 into POST /messages; at or above,
 # we upload via a presigned S3 PUT and reference by s3_key. Mirrors
@@ -866,6 +941,11 @@ class BGOSAdapter(BasePlatformAdapter):
         # _poll_loop for details). Started in connect(), cancelled in
         # disconnect().
         self._poll_task: asyncio.Task | None = None
+        # Version heartbeat — reports the plugin version to the backend at
+        # boot and every 6h so the pairing's daemon_version is never NULL
+        # (the app's update prompt depends on it). Started in connect(),
+        # cancelled in disconnect(). Best-effort: all errors swallowed.
+        self._heartbeat_task: asyncio.Task | None = None
         # edit_message throttle — mirrors Telegram's
         # _PROGRESS_EDIT_INTERVAL=1.5 (gateway/run.py:14382). Keeps the
         # BGOS backend from drowning under tool-progress / streaming
@@ -1158,7 +1238,33 @@ class BGOSAdapter(BasePlatformAdapter):
         # every BGOS_POLL_INTERVAL seconds (default 5s).
         poll_interval = float(os.environ.get("BGOS_POLL_INTERVAL", "5"))
         self._poll_task = asyncio.create_task(self._poll_loop(poll_interval))
+
+        # Version heartbeat: fire once now (boot) and then every 6h so the
+        # backend's pairing row always knows what plugin version this daemon
+        # runs — the app's update prompt cannot cover Hermes otherwise.
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         return True
+
+    async def _heartbeat_loop(self) -> None:
+        """Report the plugin version via POST /integrations/heartbeat at boot
+        and every `_HEARTBEAT_INTERVAL_SECONDS` (6h) thereafter.
+
+        Strictly best-effort: every failure is swallowed (logged at DEBUG)
+        so a flaky backend can never block or crash the daemon. Exactly one
+        INFO line per successful beat.
+        """
+        while True:
+            try:
+                await self._api.post_heartbeat(daemon_version=__version__)
+                log.info(
+                    "BGOS heartbeat sent (daemonVersion=%s)", __version__,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.debug("BGOS heartbeat failed (ignored)", exc_info=True)
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
 
     async def _refresh_pairing_scope(self) -> bool:
         """Re-fetch the pairing scope from `GET /api/v1/integrations/me` and
@@ -1617,6 +1723,9 @@ class BGOSAdapter(BasePlatformAdapter):
         if self._poll_task is not None:
             self._poll_task.cancel()
             self._poll_task = None
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
         if self._ws is not None:
             try:
                 await self._ws.stop()
@@ -1838,6 +1947,22 @@ class BGOSAdapter(BasePlatformAdapter):
         # (read + uploaded) just before the post loop so a tool_progress
         # short-circuit doesn't pay for disk/network it won't use.
         cleaned_text, media_paths = _parse_media_markers(cleaned_text)
+        # Agent-emitted `[[BGOS_EVENT]]{...}[[/BGOS_EVENT]]` block → post as
+        # messageType="event" with the object passed VERBATIM as eventMeta so
+        # the agent can summon BGOS's renderable cards. Invalid blocks are
+        # rejected with a clear error instead of leaking marker text.
+        try:
+            cleaned_text, agent_event_meta = _parse_event_block(cleaned_text)
+        except InvalidEventMeta as exc:
+            log.warning("send rejected: %s (chat=%s)", exc, chat_key)
+            return SendResult(  # type: ignore[call-arg]
+                success=False, error=f"invalid_event_meta: {exc}",
+            )
+        # An event card whose whole body lived in the marker still needs a
+        # non-empty legacy `text` (older clients render text, not the card).
+        # The title is the natural fallback; eventMeta itself is untouched.
+        if agent_event_meta is not None and not cleaned_text.strip():
+            cleaned_text = str(agent_event_meta.get("title", "")).strip()
         effective_reply_to: int | None = (
             int(reply_to) if reply_to is not None else marker_reply_to
         )
@@ -1862,7 +1987,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # tool_progress card.
         parsed_tools = (
             _parse_tool_progress_text(cleaned_text)
-            if not options and not media_paths
+            if not options and not media_paths and agent_event_meta is None
             else None
         )
         quiet_robot = (
@@ -1871,6 +1996,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 chat_style != EVERYTHING
                 and not options
                 and not media_paths
+                and agent_event_meta is None
             )
             else None
         )
@@ -1949,6 +2075,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 not cleaned_text.strip()
                 and not media_paths
                 and not options
+                and agent_event_meta is None
             ):
                 return _send_result(message_id=None)
 
@@ -1996,6 +2123,13 @@ class BGOSAdapter(BasePlatformAdapter):
             suffix = f"\n({i}/{total})" if total > 1 else ""
             is_first = (i == 1)
             files_for_chunk = (media_files or None) if is_first else None
+            # Event cards ride the FIRST chunk only (like options/files);
+            # continuation chunks stay plain standard text.
+            chunk_message_type = (
+                "event" if agent_event_meta is not None and is_first
+                else "standard"
+            )
+            chunk_event_meta = agent_event_meta if is_first else None
             assistant_id = await self._assistant_id_for_chat(chat_key)
             if assistant_id is not None:
                 resp = await self._api.post_send_message(
@@ -2003,8 +2137,9 @@ class BGOSAdapter(BasePlatformAdapter):
                     assistant_id=assistant_id,
                     text=chunk + suffix,
                     sender="assistant",
-                    message_type="standard",
+                    message_type=chunk_message_type,
                     options=(options or None) if is_first else None,
+                    event_meta=chunk_event_meta,
                     render_mode=render_mode if is_first else None,
                     reply_to_id=(
                         effective_reply_to if effective_reply_to is not None and is_first else None
@@ -2024,8 +2159,9 @@ class BGOSAdapter(BasePlatformAdapter):
                     chat_id=chat_key,
                     text=chunk + suffix,
                     sender="assistant",
-                    message_type="standard",
+                    message_type=chunk_message_type,
                     options=(options or None) if is_first else None,
+                    event_meta=chunk_event_meta,
                     render_mode=render_mode if is_first else None,
                     reply_to_id=(
                         effective_reply_to if effective_reply_to is not None and is_first else None
