@@ -46,6 +46,7 @@ class BgosWs:
         on_reconnect: _ReconnectHandler | None = None,
         on_inbound_click: _Handler | None = None,
         on_voice_rpc: _Handler | None = None,
+        on_doctor_rpc: _Handler | None = None,
         reconnection_delay: float = 1.0,
         reconnection_delay_max: float = 30.0,
     ) -> None:
@@ -55,6 +56,7 @@ class BgosWs:
         self._on_reconnect = on_reconnect
         self._on_inbound_click = on_inbound_click
         self._on_voice_rpc = on_voice_rpc
+        self._on_doctor_rpc = on_doctor_rpc
         self._skills_bridge: SkillsBridge | None = None
 
         self._assistants: set[int] = set()
@@ -219,6 +221,16 @@ class BgosWs:
                 await _maybe_await(self._on_voice_rpc(data))
             except Exception:
                 log.exception("bgos_ws.on_voice_rpc callback failed")
+
+        @self._sio.on("doctor_rpc")  # type: ignore[misc]
+        async def _doctor_rpc(data: dict) -> None:
+            if self._on_doctor_rpc is None:
+                log.debug("doctor_rpc received but no handler registered")
+                return
+            try:
+                await _maybe_await(self._on_doctor_rpc(data))
+            except Exception:
+                log.exception("bgos_ws.on_doctor_rpc callback failed")
 
         @self._sio.on("skills_rpc")  # type: ignore[misc]
         async def _skills_rpc(data: dict) -> None:

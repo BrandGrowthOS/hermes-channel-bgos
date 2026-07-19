@@ -251,21 +251,24 @@ class BgosApi:
         self,
         *,
         daemon_version: str,
-        daemon_env: str | None = None,
-        last_error: str | None = None,
+        env: dict | None = None,
+        last_error: dict | None = None,
     ) -> Any:
         """POST /api/v1/integrations/heartbeat (pairing-authed).
 
         Reports the running plugin version so the pairing row's
         `daemon_version` is populated — the BGOS app's update prompt keys off
         it (a NULL means "unknown, can never prompt"). Body is camelCase to
-        match the backend DTO: `{daemonVersion, daemonEnv?, lastError?}`.
+        match the backend HeartbeatDto: `{daemonVersion, env?, lastError?}`
+        where `env` is an object of short strings (`{platform?, python?,
+        hermes?}`, each <=64 chars) and `lastError` is an object
+        `{code, message, at}` (the backend rejects bare strings here).
         Callers on the daemon cycle must treat this as best-effort and
         swallow failures — a heartbeat must never block or crash the daemon.
         """
         body: dict[str, Any] = {"daemonVersion": daemon_version}
-        if daemon_env is not None:
-            body["daemonEnv"] = daemon_env
+        if env is not None:
+            body["env"] = env
         if last_error is not None:
             body["lastError"] = last_error
         return await self._request(
@@ -615,6 +618,18 @@ class BgosApi:
         """
         return await self._request(
             "POST", f"/api/v1/integrations/voice-rpc/{rpc_id}/result", json=body,
+        )
+
+    async def post_doctor_rpc_ack(self, rpc_id: str) -> Any:
+        """POST the pairing-authenticated doctor_rpc acknowledgement."""
+        return await self._request(
+            "POST", f"/api/v1/integrations/doctor-rpc/{rpc_id}/ack",
+        )
+
+    async def post_doctor_rpc_result(self, rpc_id: str, body: dict) -> Any:
+        """POST a doctor_rpc success or failure result."""
+        return await self._request(
+            "POST", f"/api/v1/integrations/doctor-rpc/{rpc_id}/result", json=body,
         )
 
     async def post_voice_task_result(self, task_id: str, body: dict) -> Any:

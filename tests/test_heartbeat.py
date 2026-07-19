@@ -63,12 +63,24 @@ async def test_post_heartbeat_optional_fields(mock_bgos_server):
     mock_bgos_server.on("POST", HEARTBEAT_PATH).respond(204)
 
     await api.post_heartbeat(
-        daemon_version="1.2.3", daemon_env="prod", last_error="boom",
+        daemon_version="1.2.3",
+        env={"platform": "linux", "python": "3.12.1", "hermes": "0.9.0"},
+        last_error={
+            "code": "WS_DROP",
+            "message": "boom",
+            "at": "2026-07-17T00:00:00Z",
+        },
     )
 
     req = mock_bgos_server.last_request("POST", HEARTBEAT_PATH)
     assert req.json_body == {
-        "daemonVersion": "1.2.3", "daemonEnv": "prod", "lastError": "boom",
+        "daemonVersion": "1.2.3",
+        "env": {"platform": "linux", "python": "3.12.1", "hermes": "0.9.0"},
+        "lastError": {
+            "code": "WS_DROP",
+            "message": "boom",
+            "at": "2026-07-17T00:00:00Z",
+        },
     }
     await api.close()
 
@@ -96,7 +108,12 @@ async def test_connect_sends_boot_heartbeat_with_package_version(mock_bgos_serve
         await _wait_for_request(mock_bgos_server, "POST", HEARTBEAT_PATH)
         req = mock_bgos_server.last_request("POST", HEARTBEAT_PATH)
         assert req.headers["X-BGOS-Pairing"] == "pair_xyz"
-        assert req.json_body == {"daemonVersion": __version__}
+        assert req.json_body["daemonVersion"] == __version__
+        # Env facts ride the same beat (backend HeartbeatDto `env` object).
+        env = req.json_body["env"]
+        assert env["platform"]
+        assert env["python"]
+        assert all(len(value) <= 64 for value in env.values())
     finally:
         await adapter.disconnect()
 
