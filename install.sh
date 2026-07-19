@@ -11,6 +11,9 @@
 #   DEVICE_LABEL="my-server"
 #   HERMES_SERVICE="hermes-gateway.service"
 #   REPO_DIR="$HOME/hermes-channel-bgos"
+#   BGOS_BACKEND_URL="https://api.brandgrowthos.ai"   # staging/local only; a
+#     trailing /api/v1 (the app-facing form) is stripped automatically.
+#   BGOS_ENV_FILE=/path/to/.env   # override where BGOS env vars are written
 set -euo pipefail
 
 REPO_URL="https://github.com/BrandGrowthOS/hermes-channel-bgos.git"
@@ -106,10 +109,18 @@ PY
 register_plugin_or_patch() {
   local install="$1"
   local py="$2"
+  local hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+  local plugin_src="$REPO_DIR/plugins/platforms/bgos"
   if hermes_supports_plugins "$py"; then
-    log "Modern Hermes plugin registry detected. Registering BGOS via ~/.hermes/plugins/bgos symlink."
-    mkdir -p "$HOME/.hermes/plugins"
-    ln -sfn "$REPO_DIR/plugins/platforms/bgos" "$HOME/.hermes/plugins/bgos"
+    # Fresh-clone layout sanity: the symlink is only useful if it points at a
+    # real plugin dir (plugin.yaml manifest + __init__.py register shim).
+    # A silent dangling/incomplete symlink is exactly the state the doctor
+    # later reports as "Platform.BGOS not registered".
+    [[ -f "$plugin_src/plugin.yaml" && -f "$plugin_src/__init__.py" ]] \
+      || fail "Plugin source incomplete at $plugin_src (expected plugin.yaml + __init__.py). Re-clone $REPO_DIR."
+    log "Modern Hermes plugin registry detected. Registering BGOS via $hermes_home/plugins/bgos symlink."
+    mkdir -p "$hermes_home/plugins"
+    ln -sfn "$plugin_src" "$hermes_home/plugins/bgos"
     return
   fi
 
@@ -133,28 +144,68 @@ PY
   )
 }
 
-write_env() {
+# Strip a trailing slash and any trailing /api/v1 from a base URL. The BGOS
+# client appends /api/v1/... paths itself, so a base that already ends in
+# /api/v1 doubles the prefix and 404s every call (bit a fresh macOS install:
+# whoami HTTP 404 with base_url=https://api.brandgrowthos.ai/api/v1).
+normalize_backend_url() {
+  local url="$1"
+  while :; do
+    while [[ "$url" == */ ]]; do url="${url%/}"; done
+    if [[ "$url" == */api/v1 ]]; then url="${url%/api/v1}"; else break; fi
+  done
+  printf '%s\n' "$url"
+}
+
+resolve_env_file() {
   local install="$1"
-  local envfile
+  if [[ -n "${BGOS_ENV_FILE:-}" ]]; then
+    printf '%s\n' "$BGOS_ENV_FILE"
+    return
+  fi
+  local envfile=""
   if command -v hermes >/dev/null 2>&1; then
     envfile="$(hermes config env-path 2>/dev/null || true)"
   fi
-  envfile="${envfile:-$install/.env}"
+  # Default to $HERMES_HOME/.env, NOT $install/.env: the gateway itself loads
+  # $HERMES_HOME/.env into its environment at startup on EVERY platform
+  # (gateway/run.py -> load_hermes_dotenv, override=true). That is what makes
+  # the vars reach a launchd-managed gateway on macOS, where there is no
+  # systemd EnvironmentFile mechanism and the LaunchAgent plist carries no
+  # BGOS vars. The old fallback ($install/.env) is only a fill-in file the
+  # gateway consults when $HERMES_HOME/.env is missing.
+  printf '%s\n' "${envfile:-${HERMES_HOME:-$HOME/.hermes}/.env}"
+}
+
+write_env() {
+  local install="$1"
+  local envfile
+  envfile="$(resolve_env_file "$install")"
   mkdir -p "$(dirname "$envfile")"
   touch "$envfile"
   chmod 600 "$envfile" || true
 
+  local backend_url=""
+  if [[ -n "${BGOS_BACKEND_URL:-}" ]]; then
+    backend_url="$(normalize_backend_url "$BGOS_BACKEND_URL")"
+  fi
+
   local tmp
   tmp="$(mktemp)"
-  grep -vE '^(BGOS_AGENTS|BGOS_ALLOW_ALL_USERS)=' "$envfile" > "$tmp" 2>/dev/null || true
+  grep -vE '^(BGOS_AGENTS|BGOS_ALLOW_ALL_USERS|BGOS_BACKEND_URL)=' "$envfile" > "$tmp" 2>/dev/null || true
   {
     cat "$tmp"
     printf 'BGOS_AGENTS=%s\n' "$BGOS_AGENTS"
     printf 'BGOS_ALLOW_ALL_USERS=true\n'
+    if [[ -n "$backend_url" ]]; then
+      printf 'BGOS_BACKEND_URL=%s\n' "$backend_url"
+    fi
   } > "$envfile"
   rm -f "$tmp"
   log "Wrote BGOS env to $envfile"
 
+  # Linux/systemd: also wire the env file into the unit (belt and suspenders;
+  # the gateway's own dotenv load covers the default $HERMES_HOME/.env path).
   if command -v systemctl >/dev/null 2>&1; then
     mkdir -p "$HOME/.config/systemd/user/$HERMES_SERVICE.d"
     cat > "$HOME/.config/systemd/user/$HERMES_SERVICE.d/bgos-env.conf" <<EOF
@@ -163,6 +214,10 @@ EnvironmentFile=$envfile
 EOF
     systemctl --user daemon-reload || warn "systemctl daemon-reload failed; restart Hermes manually."
   fi
+  # macOS/launchd: nothing extra to do. The gateway reads $HERMES_HOME/.env
+  # itself at startup, and restart_hermes (launchctl kickstart -k) below makes
+  # the freshly written vars take effect. Do NOT edit the LaunchAgent plist's
+  # EnvironmentVariables - it is unnecessary and risks clobbering user keys.
 }
 
 pair_if_requested() {

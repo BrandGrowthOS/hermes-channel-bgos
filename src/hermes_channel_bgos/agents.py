@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping
 
 log = logging.getLogger(__name__)
 
@@ -42,15 +43,21 @@ def parse_agents_spec(raw: str) -> list[dict]:
     return out
 
 
-def enumerate_agents_from_env() -> list[dict]:
+def enumerate_agents_from_env(env: Mapping[str, str] | None = None) -> list[dict]:
     """Discover configured agents from env. First non-empty source wins:
 
     1. `BGOS_AGENTS_JSON` — JSON list of `{"agent_route", "name", ...}` dicts.
     2. `BGOS_AGENTS` — comma-separated `route:Display Name` (see parse_agents_spec).
 
     Returns `[]` when neither is set.
+
+    `env` defaults to `os.environ`; the doctor passes the gateway-effective
+    environment (process env overlaid with `$HERMES_HOME/.env`) so its report
+    matches what the running gateway actually sees.
     """
-    raw_json = os.environ.get("BGOS_AGENTS_JSON", "").strip()
+    if env is None:
+        env = os.environ
+    raw_json = env.get("BGOS_AGENTS_JSON", "").strip()
     if raw_json:
         try:
             data = json.loads(raw_json)
@@ -61,4 +68,4 @@ def enumerate_agents_from_env() -> list[dict]:
                 out = [e for e in data if isinstance(e, dict) and e.get("agent_route")]
                 if out:
                     return out
-    return parse_agents_spec(os.environ.get("BGOS_AGENTS", ""))
+    return parse_agents_spec(env.get("BGOS_AGENTS", ""))
