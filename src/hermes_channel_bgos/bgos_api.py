@@ -578,6 +578,142 @@ class BgosApi:
         await self._request("DELETE", f"/api/v1/messages/{message_id}")
 
     # -------------------------------------------------------------------------
+    # Derived missions
+    # -------------------------------------------------------------------------
+
+    async def create_mission(
+        self,
+        *,
+        assistant_id: int,
+        title: str,
+        origin: str = "derived",
+        mini_goals: list[dict] | None = None,
+        progress: dict | None = None,
+        effort: dict | None = None,
+        first_feed_text: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {"title": title, "origin": origin}
+        if mini_goals is not None:
+            body["miniGoals"] = mini_goals
+        if progress is not None:
+            body["progress"] = progress
+        if effort is not None:
+            body["effort"] = effort
+        if first_feed_text is not None:
+            body["firstFeedText"] = first_feed_text
+        return await self._request(
+            "POST",
+            f"/api/v1/integrations/assistants/{assistant_id}/missions",
+            json=body,
+        )
+
+    async def get_active_mission(self, *, assistant_id: int) -> dict:
+        return await self._request(
+            "GET",
+            f"/api/v1/integrations/assistants/{assistant_id}/missions/active",
+        )
+
+    async def patch_mission_progress(
+        self,
+        *,
+        assistant_id: int,
+        mission_id: int | str,
+        progress: dict | None = None,
+        effort: dict | None = None,
+        feed_entry: dict | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if progress is not None:
+            body["progress"] = progress
+        if effort is not None:
+            body["effort"] = effort
+        if feed_entry is not None:
+            body["feedEntry"] = feed_entry
+        return await self._request(
+            "PATCH",
+            f"/api/v1/integrations/assistants/{assistant_id}/missions/"
+            f"{mission_id}/progress",
+            json=body,
+        )
+
+    async def pause_mission(
+        self,
+        *,
+        assistant_id: int,
+        mission_id: int | str,
+        reason: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if reason is not None:
+            body["reason"] = reason
+        return await self._request(
+            "PATCH",
+            f"/api/v1/integrations/assistants/{assistant_id}/missions/"
+            f"{mission_id}/pause",
+            json=body,
+        )
+
+    async def resume_mission(
+        self,
+        *,
+        assistant_id: int,
+        mission_id: int | str,
+    ) -> dict:
+        return await self._request(
+            "PATCH",
+            f"/api/v1/integrations/assistants/{assistant_id}/missions/"
+            f"{mission_id}/resume",
+            json={},
+        )
+
+    async def complete_mission(
+        self,
+        *,
+        assistant_id: int,
+        mission_id: int | str,
+        summary: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if summary is not None:
+            body["summary"] = summary
+        return await self._request(
+            "PATCH",
+            f"/api/v1/integrations/assistants/{assistant_id}/missions/"
+            f"{mission_id}/complete",
+            json=body,
+        )
+
+    async def fail_mission(
+        self,
+        *,
+        assistant_id: int,
+        mission_id: int | str,
+        summary: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
+        if summary is not None:
+            body["summary"] = summary
+        return await self._request(
+            "PATCH",
+            f"/api/v1/integrations/assistants/{assistant_id}/missions/"
+            f"{mission_id}/fail",
+            json=body,
+        )
+
+    async def abandon_mission(
+        self,
+        *,
+        assistant_id: int,
+        mission_id: int | str,
+    ) -> dict:
+        return await self._request(
+            "PATCH",
+            f"/api/v1/integrations/assistants/{assistant_id}/missions/"
+            f"{mission_id}/abandon",
+            json={},
+        )
+
+    # -------------------------------------------------------------------------
     # Inbound backfill (reconnect)
     # -------------------------------------------------------------------------
 

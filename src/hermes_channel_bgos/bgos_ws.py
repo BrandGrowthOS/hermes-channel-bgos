@@ -30,6 +30,16 @@ log = logging.getLogger(__name__)
 
 _Handler = Callable[[dict], None] | Callable[[dict], Awaitable[None]]
 _ReconnectHandler = Callable[[int], None] | Callable[[int], Awaitable[None]]
+_MISSION_EVENT_TYPES = (
+    "mission_created",
+    "mission_ticked",
+    "mission_completed",
+    "mission_abandoned",
+    "mission_paused",
+    "mission_resumed",
+    "mission_failed",
+    "mission_updated",
+)
 
 
 async def _maybe_await(result: Any) -> None:
@@ -48,6 +58,7 @@ class BgosWs:
         on_inbound_click: _Handler | None = None,
         on_voice_rpc: _Handler | None = None,
         on_doctor_rpc: _Handler | None = None,
+        on_mission_event: _Handler | None = None,
         reconnection_delay: float = 1.0,
         reconnection_delay_max: float = 30.0,
     ) -> None:
@@ -60,6 +71,7 @@ class BgosWs:
         self._on_doctor_rpc = on_doctor_rpc
         self._memory_bridge: MemoryBridge | None = None
         self._memory_tasks: set[asyncio.Task[None]] = set()
+        self._on_mission_event = on_mission_event
         self._skills_bridge: SkillsBridge | None = None
 
         self._assistants: set[int] = set()
@@ -247,6 +259,26 @@ class BgosWs:
             task = asyncio.create_task(self._memory_bridge_dispatch(data))
             self._memory_tasks.add(task)
             task.add_done_callback(self._memory_task_done)
+
+        def _mission_handler(event_type: str) -> _Handler:
+            async def _mission(data: dict) -> None:
+                if self._on_mission_event is None:
+                    log.debug("%s received but no handler registered", event_type)
+                    return
+                payload = data
+                if not isinstance(payload, dict):
+                    payload = {}
+                if "event_type" not in payload and "eventType" not in payload:
+                    payload = {**payload, "event_type": event_type}
+                try:
+                    await _maybe_await(self._on_mission_event(payload))
+                except Exception:
+                    log.exception("bgos_ws.%s callback failed", event_type)
+
+            return _mission
+
+        for event_type in _MISSION_EVENT_TYPES:
+            self._sio.on(event_type, handler=_mission_handler(event_type))
 
     async def _skills_bridge_dispatch(self, data: dict) -> None:
         if self._skills_bridge is None:

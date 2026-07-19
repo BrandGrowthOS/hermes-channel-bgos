@@ -1,6 +1,8 @@
 """Tests for hermes_channel_bgos.bgos_api — the async BGOS REST client."""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from hermes_channel_bgos.bgos_api import BgosApi, BgosApiError, NOT_MODIFIED
@@ -273,6 +275,162 @@ async def test_put_commands_sends_manifest(mock_bgos_server):
     assert req.json_body == {
         "commands": [{"command": "help", "description": "Show help", "scope": "all"}],
     }
+    await api.close()
+
+
+async def test_create_and_get_active_mission(mock_bgos_server):
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    base = "/api/v1/integrations/assistants/7/missions"
+    mission = {"id": "mission-1", "status": "active", "origin": "derived"}
+    mock_bgos_server.on("POST", base).respond(
+        201,
+        {"ok": True, "mission": mission},
+    )
+    mock_bgos_server.on("GET", f"{base}/active").respond(
+        200,
+        {"mission": mission},
+    )
+
+    created = await api.create_mission(
+        assistant_id=7,
+        title="Draft the replies",
+        origin="derived",
+        effort={"used": 0, "budget": 20, "unit": "turns"},
+        first_feed_text="Goal set",
+    )
+    active = await api.get_active_mission(assistant_id=7)
+
+    assert created == {"ok": True, "mission": mission}
+    assert active == {"mission": mission}
+    request = mock_bgos_server.last_request("POST", base)
+    assert request.headers["X-BGOS-Pairing"] == "pair_xyz"
+    assert request.json_body == {
+        "title": "Draft the replies",
+        "origin": "derived",
+        "effort": {"used": 0, "budget": 20, "unit": "turns"},
+        "firstFeedText": "Goal set",
+    }
+    await api.close()
+
+
+async def test_create_mission_supports_optional_mini_goals() -> None:
+    api = BgosApi(BgosConfig(
+        base_url="https://bgos.test",
+        pairing_token="pair_xyz",
+    ))
+    api._request = AsyncMock(
+        return_value={"ok": True, "mission": {"id": "mission-1"}},
+    )
+    mini_goals = [
+        {"title": "Draft"},
+        {"title": "Review"},
+    ]
+
+    await api.create_mission(
+        assistant_id=7,
+        title="Prepare replies",
+        mini_goals=mini_goals,
+    )
+
+    api._request.assert_awaited_once_with(
+        "POST",
+        "/api/v1/integrations/assistants/7/missions",
+        json={
+            "title": "Prepare replies",
+            "origin": "derived",
+            "miniGoals": mini_goals,
+        },
+    )
+    await api.close()
+
+
+async def test_abandon_mission_uses_empty_json_body() -> None:
+    api = BgosApi(BgosConfig(
+        base_url="https://bgos.test",
+        pairing_token="pair_xyz",
+    ))
+    response = {
+        "ok": True,
+        "mission": {"id": "mission-1", "status": "abandoned"},
+    }
+    api._request = AsyncMock(return_value=response)
+
+    result = await api.abandon_mission(
+        assistant_id=7,
+        mission_id="mission-1",
+    )
+
+    assert result == response
+    api._request.assert_awaited_once_with(
+        "PATCH",
+        "/api/v1/integrations/assistants/7/missions/mission-1/abandon",
+        json={},
+    )
+    await api.close()
+
+
+async def test_patch_mission_progress_uses_camel_case_feed_entry(
+    mock_bgos_server,
+):
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    path = "/api/v1/integrations/assistants/7/missions/mission-1/progress"
+    mock_bgos_server.on("PATCH", path).respond(
+        200,
+        {"ok": True, "mission": {"id": "mission-1"}},
+    )
+
+    await api.patch_mission_progress(
+        assistant_id=7,
+        mission_id="mission-1",
+        effort={"used": 3, "budget": 20, "unit": "turns"},
+        feed_entry={"kind": "checked", "text": "Checking my work: draft"},
+    )
+
+    request = mock_bgos_server.last_request("PATCH", path)
+    assert request.json_body == {
+        "effort": {"used": 3, "budget": 20, "unit": "turns"},
+        "feedEntry": {
+            "kind": "checked",
+            "text": "Checking my work: draft",
+        },
+    }
+    await api.close()
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "kwargs", "body"),
+    [
+        ("pause_mission", "pause", {"reason": "waiting"}, {"reason": "waiting"}),
+        ("resume_mission", "resume", {}, {}),
+        ("complete_mission", "complete", {"summary": "done"}, {"summary": "done"}),
+        ("fail_mission", "fail", {"summary": "failed"}, {"summary": "failed"}),
+    ],
+)
+async def test_mission_transition_methods(
+    mock_bgos_server,
+    method: str,
+    suffix: str,
+    kwargs: dict,
+    body: dict,
+):
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    path = (
+        "/api/v1/integrations/assistants/7/missions/mission-1/"
+        f"{suffix}"
+    )
+    mock_bgos_server.on("PATCH", path).respond(
+        200,
+        {"ok": True, "mission": {"id": "mission-1"}},
+    )
+
+    result = await getattr(api, method)(
+        assistant_id=7,
+        mission_id="mission-1",
+        **kwargs,
+    )
+
+    assert result["ok"] is True
+    assert mock_bgos_server.last_request("PATCH", path).json_body == body
     await api.close()
 
 
