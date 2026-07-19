@@ -730,7 +730,7 @@ async def test_load_voice_env_precedence(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("BGOS_VOICE_VOICE", raising=False)
     key, model, voice = load_voice_env()
     assert key == ""
-    assert model == "gpt-realtime-2"
+    assert model == "gpt-realtime-2.1"
     assert voice == "marin"
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-general")
