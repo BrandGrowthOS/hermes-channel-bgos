@@ -20,7 +20,7 @@ import click
 
 from .agents import parse_agents_spec
 from .bgos_api import BgosApi, BgosApiError
-from .config import BgosConfig
+from .config import BgosConfig, normalize_base_url
 
 
 def secrets_path() -> Path:
@@ -115,6 +115,11 @@ async def _run(
     wait_for_exposure_flag: bool = False, wait_timeout: float = 180.0,
     wait_interval: float = 4.0,
 ) -> None:
+    # Normalize up front so both the live calls AND the persisted secrets file
+    # carry the origin form. Pasting the app-facing base (which ends in
+    # `/api/v1`) used to persist a base_url that doubled the API prefix on
+    # every later request and 404d the whole pairing.
+    base_url = normalize_base_url(base_url)
     catalog = parse_agents_spec(agents)
     api = BgosApi(BgosConfig(base_url=base_url, pairing_token=None))
     try:

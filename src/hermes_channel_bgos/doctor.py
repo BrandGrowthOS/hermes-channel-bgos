@@ -13,18 +13,24 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import click
 
 from . import __version__
 from .agents import enumerate_agents_from_env
 from .bgos_api import BgosApi, BgosApiError
-from .config import BgosConfig
+from .config import BgosConfig, normalize_base_url
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
+
+_ENV_LINE = re.compile(
+    r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$",
+)
 
 
 @dataclass
@@ -35,45 +41,171 @@ class CheckResult:
     fix: str = ""
 
 
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Minimal .env parser (KEY=VALUE, optional `export `, optional quotes).
+
+    Intentionally forgiving - a malformed line is skipped, never fatal. The
+    doctor only needs the handful of BGOS_* keys, not full dotenv semantics.
+    """
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = _ENV_LINE.match(line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def _hermes_install_candidates() -> list[Path]:
+    """Mirror install.sh's Hermes-install search order (for the legacy
+    project-.env fallback below). An explicit $HERMES_INSTALL wins outright,
+    exactly as it does for install.sh."""
+    override = os.environ.get("HERMES_INSTALL", "").strip()
+    if override:
+        return [Path(override)]
+    return [
+        Path.home() / ".hermes" / "hermes-agent",
+        Path.home() / "hermes-agent",
+        Path("/opt/hermes-agent"),
+        Path("/opt/hermes/hermes-agent"),
+    ]
+
+
+def gateway_env() -> tuple[dict[str, str], Path | None]:
+    """The environment as the RUNNING GATEWAY sees it, not just this process.
+
+    The Hermes gateway loads `$HERMES_HOME/.env` into os.environ itself at
+    startup with override=True (gateway/run.py → hermes_cli/env_loader.py
+    `load_hermes_dotenv`), and the hermes-agent project `.env` as a fill-in
+    fallback. A doctor that reads only its own os.environ therefore
+    false-alarms "unset" for vars the gateway definitely has (the launchd
+    plist / login shell rarely export BGOS_*). Mirror the gateway's order:
+
+    1. this process's environ (a deliberate shell export still shows up)
+    2. `$HERMES_HOME/.env` overrides it (same override=True the gateway uses)
+    3. a `<hermes-install>/.env` fills remaining gaps (legacy installs where
+       install.sh wrote the project env / systemd EnvironmentFile)
+
+    Returns (effective_env, env_file_used_or_None).
+    """
+    env: dict[str, str] = dict(os.environ)
+    used: Path | None = None
+    user_env = _hermes_home() / ".env"
+    if user_env.is_file():
+        env.update(_parse_env_file(user_env))
+        used = user_env
+    else:
+        for install in _hermes_install_candidates():
+            project_env = install / ".env"
+            if project_env.is_file():
+                for key, value in _parse_env_file(project_env).items():
+                    env.setdefault(key, value)
+                used = project_env
+                break
+    return env, used
+
+
 def check_package() -> CheckResult:
     return CheckResult("package", OK, f"hermes_channel_bgos {__version__}")
 
 
+def _plugin_link_status() -> tuple[bool, str]:
+    """Inspect the installed plugin dir/symlink at `$HERMES_HOME/plugins/bgos`.
+
+    Returns (valid, human detail). Valid means: the path exists, resolves,
+    and the target carries the three files a Hermes directory plugin needs
+    (plugin.yaml manifest, __init__.py with register(), adapter.py shim).
+    """
+    link = _hermes_home() / "plugins" / "bgos"
+    if not link.is_symlink() and not link.exists():
+        return False, f"no plugin at {link}"
+    if not link.is_dir():
+        try:
+            target = os.readlink(link)
+        except OSError:
+            target = "?"
+        return False, f"{link} is a broken symlink (target {target} missing)"
+    resolved = link.resolve()
+    required = ("plugin.yaml", "__init__.py", "adapter.py")
+    missing = [name for name in required if not (link / name).is_file()]
+    if missing:
+        return False, f"{link} -> {resolved} is missing {', '.join(missing)}"
+    return True, f"{link} -> {resolved} (plugin.yaml + register shim present)"
+
+
 def check_registration() -> CheckResult:
     """Is BGOS registered with Hermes — via the plugin system OR the fork patch?
-    Reports which path is active, or FAIL with how to enable one."""
+
+    HONESTY NOTE: the doctor runs in its own process; the authoritative
+    platform registry lives inside the RUNNING gateway process and cannot be
+    inspected from here. So a failed in-process discovery probe is not proof
+    of a broken install. When the probe fails but the installed plugin
+    symlink is valid and this package imports, the install is considered OK -
+    the gateway registers the plugin itself at startup. Real FAILs are
+    reserved for: gateway modules not importable from this Python, or no
+    valid plugin/patch present at all.
+    """
+    link_ok, link_detail = _plugin_link_status()
     try:
         from gateway.config import Platform  # type: ignore
     except Exception as exc:
         return CheckResult(
             "registration", FAIL,
-            f"Hermes gateway not importable ({exc.__class__.__name__})",
+            f"Hermes gateway not importable ({exc.__class__.__name__}); "
+            f"plugin files: {link_detail}",
             fix="Run this from Hermes's Python env. Then either install the BGOS "
                 "plugin (symlink plugins/platforms/bgos into ~/.hermes/plugins/) "
                 "or apply the fork patch.",
         )
     platform = getattr(Platform, "BGOS", None)
     via = "patch"
+    probe_error: str | None = None
     if platform is None:
         try:
             from hermes_cli.plugins import discover_plugins  # type: ignore
             discover_plugins(force=True)
             platform = Platform("bgos")
             via = "plugin"
+        except Exception as exc:
+            probe_error = exc.__class__.__name__
+            platform = None
+    if platform is not None:
+        # Distinguish plugin vs patch: the registry records plugin entries.
+        try:
+            from gateway.platform_registry import platform_registry  # type: ignore
+            via = "plugin" if platform_registry.is_registered("bgos") else via
         except Exception:
-            return CheckResult(
-                "registration", FAIL, "Platform.BGOS not registered",
-                fix="Enable BGOS: plugin path — symlink plugins/platforms/bgos into "
-                    "~/.hermes/plugins/bgos and restart; or legacy — apply "
-                    "hermes-fork-patch/0001-bgos-integration.patch.",
-            )
-    # Distinguish plugin vs patch: the platform registry records plugin entries.
-    try:
-        from gateway.platform_registry import platform_registry  # type: ignore
-        via = "plugin" if platform_registry.is_registered("bgos") else via
-    except Exception:
-        pass
-    return CheckResult("registration", OK, f"Platform.BGOS registered (via {via})")
+            pass
+        return CheckResult(
+            "registration", OK, f"Platform.BGOS registered (via {via})",
+        )
+    if link_ok:
+        return CheckResult(
+            "registration", OK,
+            f"plugin installed: {link_detail}; in-process probe unavailable "
+            f"({probe_error}) - the gateway registers it itself at startup",
+            fix="",
+        )
+    return CheckResult(
+        "registration", FAIL,
+        f"Platform.BGOS not registered and {link_detail}",
+        fix="Enable BGOS: plugin path - symlink plugins/platforms/bgos into "
+            "~/.hermes/plugins/bgos and restart; or legacy - apply "
+            "hermes-fork-patch/0001-bgos-integration.patch.",
+    )
 
 
 def check_config() -> tuple[BgosConfig | None, CheckResult]:
@@ -96,12 +228,15 @@ def check_config() -> tuple[BgosConfig | None, CheckResult]:
             secrets = _json.loads(sp.read_text())
         except (OSError, ValueError):
             secrets = {}
-    token = os.environ.get("BGOS_API_KEY") or secrets.get("pairing_token")
-    base_url = (
-        os.environ.get("BGOS_BACKEND_URL")
+    env, _ = gateway_env()
+    token = env.get("BGOS_API_KEY") or secrets.get("pairing_token")
+    raw_base_url = (
+        env.get("BGOS_BACKEND_URL")
         or secrets.get("base_url")
         or "https://api.brandgrowthos.ai"
     )
+    base_url = normalize_base_url(raw_base_url)
+    base_note = "" if base_url == raw_base_url else f" (normalized from {raw_base_url})"
     if not token:
         return None, CheckResult(
             "config", FAIL,
@@ -112,30 +247,35 @@ def check_config() -> tuple[BgosConfig | None, CheckResult]:
         )
     return BgosConfig(base_url=base_url, pairing_token=token), CheckResult(
         "config", OK,
-        f"token resolved; base_url={base_url}; secrets={sp} (exists={sp.exists()})",
+        f"token resolved; base_url={base_url}{base_note}; "
+        f"secrets={sp} (exists={sp.exists()})",
     )
 
 
 def check_env() -> CheckResult:
-    if os.environ.get("BGOS_ALLOW_ALL_USERS", "").lower() == "true":
-        return CheckResult("auth", OK, "BGOS_ALLOW_ALL_USERS=true")
-    allowed = os.environ.get("BGOS_ALLOWED_USERS", "").strip()
+    env, env_file = gateway_env()
+    src = f" (sources: process env + {env_file})" if env_file else ""
+    if env.get("BGOS_ALLOW_ALL_USERS", "").lower() == "true":
+        return CheckResult("auth", OK, f"BGOS_ALLOW_ALL_USERS=true{src}")
+    allowed = env.get("BGOS_ALLOWED_USERS", "").strip()
     if allowed:
         n = len([u for u in allowed.split(",") if u.strip()])
-        return CheckResult("auth", OK, f"BGOS_ALLOWED_USERS set ({n} user(s))")
+        return CheckResult("auth", OK, f"BGOS_ALLOWED_USERS set ({n} user(s)){src}")
     return CheckResult(
         "auth", WARN,
-        "neither BGOS_ALLOW_ALL_USERS nor BGOS_ALLOWED_USERS set",
+        f"neither BGOS_ALLOW_ALL_USERS nor BGOS_ALLOWED_USERS set{src}",
         fix="Set BGOS_ALLOW_ALL_USERS=true (or BGOS_ALLOWED_USERS=<clerk id>) "
             "or inbound messages are dropped by the auth gate.",
     )
 
 
 def check_catalog() -> CheckResult:
-    agents = enumerate_agents_from_env()
+    env, env_file = gateway_env()
+    src = f" (sources: process env + {env_file})" if env_file else ""
+    agents = enumerate_agents_from_env(env)
     if not agents:
         return CheckResult(
-            "catalog", WARN, "no agents configured (BGOS_AGENTS unset)",
+            "catalog", WARN, f"no agents configured (BGOS_AGENTS unset){src}",
             fix="Set BGOS_AGENTS=route:Name (e.g. default:David) so the "
                 "Integrations UI can offer agents to expose.",
         )

@@ -49,6 +49,25 @@ async def test_pair_cli_writes_secret_file(mock_bgos_server, tmp_secrets_dir):
     assert data["base_url"] == mock_bgos_server.url
 
 
+async def test_pair_cli_normalizes_suffixed_base_url(mock_bgos_server, tmp_secrets_dir):
+    """A base URL pasted in app-facing form (trailing /api/v1) must still pair
+    AND must be persisted in origin form - the suffixed form used to double
+    the API prefix on every later request (fresh-install whoami 404)."""
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_norm", "pairing_id": 7},
+    )
+
+    result = await _invoke_cli([
+        "BGOS-ABCD-EF",
+        "--device-label", "kc-macbook",
+        "--base-url", f"{mock_bgos_server.url}/api/v1",
+    ])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(secrets_path().read_text())
+    assert data["base_url"] == mock_bgos_server.url
+
+
 async def test_pair_cli_sends_correct_payload(mock_bgos_server, tmp_secrets_dir):
     mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
         200, {"pairing_token": "pair_xyz", "pairing_id": 1},

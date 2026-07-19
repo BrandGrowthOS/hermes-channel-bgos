@@ -21,7 +21,7 @@ def _make_fakepy(tmp_path: Path) -> tuple[Path, Path]:
 
 def _isolated_env(tmp_path: Path, capture_file: Path | None = None) -> dict[str, str]:
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(exist_ok=True)
     env = os.environ.copy()
     for name in (
         "BGOS_CODE",
@@ -156,3 +156,147 @@ def test_install_sh_parses_cleanly():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+# -----------------------------------------------------------------------------
+# write_env: must land where the gateway actually reads env from.
+# The gateway loads $HERMES_HOME/.env itself at startup on every platform
+# (gateway/run.py -> load_hermes_dotenv), which is what makes the vars reach a
+# launchd-managed gateway on macOS. The old fallback wrote $install/.env,
+# which nothing consumed on macOS -> doctor reported auth/catalog "unset".
+# -----------------------------------------------------------------------------
+
+
+def _run_env_fn(tmp_path: Path, script: str, extra_env: dict[str, str] | None = None):
+    env = _isolated_env(tmp_path)
+    env.pop("BGOS_ENV_FILE", None)
+    env.pop("BGOS_BACKEND_URL", None)
+    env.pop("HERMES_HOME", None)
+    # Strip hermes from PATH so `hermes config env-path` cannot hijack the
+    # test onto the developer's real ~/.hermes/.env.
+    env["PATH"] = "/usr/bin:/bin"
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["bash", "-c", f"source install.sh; {script}"],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_write_env_defaults_to_hermes_home_env(tmp_path: Path):
+    hermes_home = tmp_path / "hermes_home"
+    result = _run_env_fn(
+        tmp_path,
+        "BGOS_AGENTS=a:B write_env /tmp/does-not-matter",
+        {"HERMES_HOME": str(hermes_home)},
+    )
+    assert result.returncode == 0, result.stderr
+    envfile = hermes_home / ".env"
+    assert envfile.is_file()
+    content = envfile.read_text()
+    assert "BGOS_AGENTS=a:B\n" in content
+    assert "BGOS_ALLOW_ALL_USERS=true\n" in content
+
+
+def test_write_env_is_idempotent_and_preserves_other_keys(tmp_path: Path):
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    envfile = hermes_home / ".env"
+    envfile.write_text("OPENAI_API_KEY=sk-keepme\nBGOS_AGENTS=old:Old\n")
+    for _ in range(2):
+        result = _run_env_fn(
+            tmp_path,
+            "BGOS_AGENTS=new:New write_env /tmp/x",
+            {"HERMES_HOME": str(hermes_home)},
+        )
+        assert result.returncode == 0, result.stderr
+    content = envfile.read_text()
+    assert content.count("BGOS_AGENTS=") == 1
+    assert "BGOS_AGENTS=new:New\n" in content
+    assert content.count("BGOS_ALLOW_ALL_USERS=") == 1
+    assert "OPENAI_API_KEY=sk-keepme\n" in content
+
+
+def test_write_env_normalizes_suffixed_backend_url(tmp_path: Path):
+    hermes_home = tmp_path / "hermes_home"
+    result = _run_env_fn(
+        tmp_path,
+        "BGOS_AGENTS=a:B write_env /tmp/x",
+        {
+            "HERMES_HOME": str(hermes_home),
+            "BGOS_BACKEND_URL": "https://api.brandgrowthos.ai/api/v1",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    content = (hermes_home / ".env").read_text()
+    assert "BGOS_BACKEND_URL=https://api.brandgrowthos.ai\n" in content
+    assert "/api/v1" not in content
+
+
+def test_write_env_honors_bgos_env_file_override(tmp_path: Path):
+    target = tmp_path / "custom" / "my.env"
+    result = _run_env_fn(
+        tmp_path,
+        "BGOS_AGENTS=a:B write_env /tmp/x",
+        {"BGOS_ENV_FILE": str(target)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert target.is_file()
+    assert "BGOS_AGENTS=a:B\n" in target.read_text()
+
+
+def test_normalize_backend_url_variants(tmp_path: Path):
+    cases = {
+        "https://api.brandgrowthos.ai/api/v1": "https://api.brandgrowthos.ai",
+        "https://api.brandgrowthos.ai/api/v1/": "https://api.brandgrowthos.ai",
+        "https://api.brandgrowthos.ai/": "https://api.brandgrowthos.ai",
+        "https://api.brandgrowthos.ai": "https://api.brandgrowthos.ai",
+        "http://localhost:4000/api/v1": "http://localhost:4000",
+    }
+    for raw, expected in cases.items():
+        result = _run_env_fn(
+            tmp_path, f"normalize_backend_url {shlex.quote(raw)}",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected, raw
+
+
+def test_register_plugin_symlinks_valid_target(tmp_path: Path):
+    fakepy, capture = _make_fakepy(tmp_path)  # exits 0 -> "modern Hermes" path
+    hermes_home = tmp_path / "hermes_home"
+    result = _run_env_fn(
+        tmp_path,
+        f"register_plugin_or_patch /tmp/install {shlex.quote(str(fakepy))}",
+        {
+            "HERMES_HOME": str(hermes_home),
+            "REPO_DIR": str(REPO_ROOT),
+            "CAPTURE_FILE": str(capture),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    link = hermes_home / "plugins" / "bgos"
+    assert link.is_symlink()
+    assert (link / "plugin.yaml").is_file()
+    assert (link / "__init__.py").is_file()
+    assert (link / "adapter.py").is_file()
+
+
+def test_register_plugin_fails_loudly_on_missing_source(tmp_path: Path):
+    fakepy, capture = _make_fakepy(tmp_path)
+    empty_repo = tmp_path / "empty-repo"
+    empty_repo.mkdir()
+    result = _run_env_fn(
+        tmp_path,
+        f"register_plugin_or_patch /tmp/install {shlex.quote(str(fakepy))}",
+        {
+            "HERMES_HOME": str(tmp_path / "hh"),
+            "REPO_DIR": str(empty_repo),
+            "CAPTURE_FILE": str(capture),
+        },
+    )
+    assert result.returncode != 0
+    assert "Plugin source incomplete" in result.stderr

@@ -30,6 +30,11 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> N
     """
     hermes_home = tmp_path_factory.mktemp("hermes_home")
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    # The doctor's gateway_env() falls back to `<hermes-install>/.env` when
+    # `$HERMES_HOME/.env` is absent, and a real dev machine may have a live
+    # hermes-agent checkout at one of the well-known paths. Pin the install
+    # search to the same tmp dir so tests never read the developer's env.
+    monkeypatch.setenv("HERMES_INSTALL", str(hermes_home))
 
 
 @pytest.fixture
