@@ -294,3 +294,88 @@ async def test_skills_rpc_dispatches_to_lazy_bridge(monkeypatch):
 
     assert configs == [config]
     assert frames == [frame]
+
+
+async def test_memory_rpc_dispatches_fire_and_forget_to_lazy_bridge(monkeypatch):
+    configs: list[BgosConfig] = []
+    bridges: list[object] = []
+    calls: list[tuple[object, dict]] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class FakeMemoryBridge:
+        def __init__(self, config: BgosConfig) -> None:
+            configs.append(config)
+            bridges.append(self)
+
+        async def handle_frame(self, frame: dict) -> None:
+            calls.append((self, frame))
+            if frame["rpcId"] == "rpc-memory-1":
+                started.set()
+                await release.wait()
+
+    monkeypatch.setattr(
+        bgos_ws_module,
+        "MemoryBridge",
+        FakeMemoryBridge,
+        raising=False,
+    )
+    config = BgosConfig(
+        base_url="https://bgos.test",
+        pairing_token="pair_xyz",
+    )
+    ws = BgosWs(
+        config,
+        on_inbound_message=_noop_cb,
+        on_callback_result=_noop_cb,
+    )
+    assert configs == []
+    first_frame = {
+        "rpcId": "rpc-memory-1",
+        "op": "list",
+        "assistantId": "7",
+        "payload": {},
+    }
+
+    handler = ws._sio.handlers["/"]["memory_rpc"]
+    handler_task = asyncio.create_task(handler(first_frame))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert handler_task.done()
+        await handler_task
+        assert configs == [config]
+        assert configs[0] is config
+        assert bridges == [ws._memory_bridge]
+        assert calls == [(bridges[0], first_frame)]
+        assert len(ws._memory_tasks) == 1
+        assert not next(iter(ws._memory_tasks)).done()
+    finally:
+        release.set()
+        await asyncio.gather(
+            handler_task,
+            *tuple(getattr(ws, "_memory_tasks", set())),
+            return_exceptions=True,
+        )
+        await asyncio.sleep(0)
+
+    assert ws._memory_tasks == set()
+    second_frame = {
+        "rpcId": "rpc-memory-2",
+        "op": "list",
+        "assistantId": "7",
+        "payload": {},
+    }
+
+    await handler(second_frame)
+    second_tasks = tuple(ws._memory_tasks)
+    assert len(second_tasks) == 1
+    await asyncio.gather(*second_tasks)
+    await asyncio.sleep(0)
+
+    assert configs == [config]
+    assert bridges == [ws._memory_bridge]
+    assert calls == [
+        (bridges[0], first_frame),
+        (bridges[0], second_frame),
+    ]
+    assert ws._memory_tasks == set()

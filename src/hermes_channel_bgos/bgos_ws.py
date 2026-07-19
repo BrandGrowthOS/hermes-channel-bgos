@@ -22,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 import socketio
 
 from .config import BgosConfig
+from .memory_bridge import MemoryBridge
 from .skills_bridge import SkillsBridge
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,8 @@ class BgosWs:
         self._on_inbound_click = on_inbound_click
         self._on_voice_rpc = on_voice_rpc
         self._on_doctor_rpc = on_doctor_rpc
+        self._memory_bridge: MemoryBridge | None = None
+        self._memory_tasks: set[asyncio.Task[None]] = set()
         self._skills_bridge: SkillsBridge | None = None
 
         self._assistants: set[int] = set()
@@ -239,10 +242,30 @@ class BgosWs:
             except Exception:
                 log.exception("bgos_ws.skills_rpc handler failed")
 
+        @self._sio.on("memory_rpc")  # type: ignore[misc]
+        async def _memory_rpc(data: dict) -> None:
+            task = asyncio.create_task(self._memory_bridge_dispatch(data))
+            self._memory_tasks.add(task)
+            task.add_done_callback(self._memory_task_done)
+
     async def _skills_bridge_dispatch(self, data: dict) -> None:
         if self._skills_bridge is None:
             self._skills_bridge = SkillsBridge(self._config)
         await self._skills_bridge.handle_frame(data)
+
+    async def _memory_bridge_dispatch(self, data: dict) -> None:
+        if self._memory_bridge is None:
+            self._memory_bridge = MemoryBridge(self._config)
+        await self._memory_bridge.handle_frame(data)
+
+    def _memory_task_done(self, task: asyncio.Task[None]) -> None:
+        self._memory_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            log.exception("bgos_ws.memory_rpc handler failed")
 
     async def _join_current_rooms(self) -> None:
         if self._pairing_id is not None:
