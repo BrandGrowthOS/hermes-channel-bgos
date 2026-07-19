@@ -41,6 +41,7 @@ from .commands_sync import (
 from .agents import enumerate_agents_from_env
 from .config import BgosConfig
 from .doctor import run_checks
+from .missions_bridge import MissionLane, classify_goal_line
 from .quiet_mode import (
     EVERYTHING,
     TIDY,
@@ -996,6 +997,11 @@ class BGOSAdapter(BasePlatformAdapter):
             self._edit_stt_setup_event,
         )
         self._stt_setup_tasks: set[asyncio.Task] = set()
+        self._mission_lane = MissionLane(
+            self._api,
+            assistant_id_resolver=self._style_assistant_id_for_chat,
+            session_id_resolver=self._mission_session_id_for_chat,
+        )
         self._chat_style_store = ChatStyleStore()
         self._consumed_peer_wait_replies_mtime_ns: int | None = None
         self._load_consumed_peer_wait_replies()
@@ -1151,6 +1157,37 @@ class BGOSAdapter(BasePlatformAdapter):
             return addressed
         return self._state.assistant_id_by_chat.get(chat_key)
 
+    async def _mission_session_id_for_chat(
+        self,
+        chat_key: int,
+        assistant_id: int,
+    ) -> str | None:
+        """Resolve a known BGOS chat to its persisted Hermes session id."""
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None:
+            return None
+        try:
+            source = self.build_source(  # type: ignore[attr-defined]
+                chat_id=str(chat_key),
+                user_id=(
+                    self._state.last_user_id_by_chat.get(chat_key)
+                    or self.pairing_user_id
+                ),
+            )
+            session_key = runner._session_key_for_source(source)
+            session_id = await runner.async_session_store.peek_session_id(
+                session_key
+            )
+        except Exception:
+            log.debug(
+                "mission session resolution failed chat=%s assistant=%s",
+                chat_key,
+                assistant_id,
+                exc_info=True,
+            )
+            return None
+        return session_id if isinstance(session_id, str) and session_id else None
+
     @staticmethod
     def _resolve_config(hermes_config: Any) -> BgosConfig:
         """Resolve a BgosConfig from multiple sources, in priority order:
@@ -1276,6 +1313,7 @@ class BGOSAdapter(BasePlatformAdapter):
             on_inbound_click=self._handle_inbound_click,
             on_voice_rpc=self._handle_voice_rpc,
             on_doctor_rpc=self._handle_doctor_rpc,
+            on_mission_event=self._mission_lane.handle_mission_event,
         )
         if self.pairing_id is not None:
             self._ws.bind_pairing(self.pairing_id)
@@ -1836,6 +1874,10 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._ws.stop()
             finally:
                 self._ws = None
+        try:
+            await self._mission_lane.close()
+        except Exception:
+            log.warning("mission lane close failed", exc_info=True)
         await self._api.close()
 
     async def _assistant_id_for_chat(self, chat_id: int) -> int | None:
@@ -2187,15 +2229,22 @@ class BGOSAdapter(BasePlatformAdapter):
         # CamelCase), and short-circuiting here would silently drop the
         # attachment AND the already-stripped marker. A media reply is never a
         # tool_progress card.
+        goal_line = classify_goal_line(cleaned_text)
         parsed_tools = (
             _parse_tool_progress_text(cleaned_text)
-            if not options and not media_paths and agent_event_meta is None
+            if (
+                goal_line is None
+                and not options
+                and not media_paths
+                and agent_event_meta is None
+            )
             else None
         )
         quiet_robot = (
             classify_robot_talk(cleaned_text)
             if (
-                chat_style != EVERYTHING
+                goal_line is None
+                and chat_style != EVERYTHING
                 and not options
                 and not media_paths
                 and agent_event_meta is None
@@ -2218,6 +2267,20 @@ class BGOSAdapter(BasePlatformAdapter):
             return await self._handle_tool_progress_edit(
                 chat_key, 0, parsed_tools, None,
             )
+
+        if goal_line is not None:
+            try:
+                await self._mission_lane.handle_goal_line(
+                    cleaned_text,
+                    chat_id=chat_key,
+                    assistant_id=self._style_assistant_id_for_chat(chat_key),
+                )
+            except Exception:
+                log.warning(
+                    "mission goal interception failed chat=%s",
+                    chat_key,
+                    exc_info=True,
+                )
 
         if chat_style != EVERYTHING:
             robot = quiet_robot
