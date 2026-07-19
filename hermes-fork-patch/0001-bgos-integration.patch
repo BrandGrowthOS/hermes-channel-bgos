@@ -24,7 +24,7 @@ diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
 index 3a6ec244..dcd5d165 100644
 --- a/agent/prompt_builder.py
 +++ b/agent/prompt_builder.py
-@@ -422,6 +422,76 @@ PLATFORM_HINTS = {
+@@ -422,6 +422,93 @@ PLATFORM_HINTS = {
          "your response. Images are sent as native photos, and other files arrive as downloadable "
          "documents."
      ),
@@ -95,6 +95,23 @@ index 3a6ec244..dcd5d165 100644
 +- You're just acknowledging ("Got it" / "On it") — nothing to anchor to.
 +
 +Same-chat constraint: the source message must be in the SAME BGOS chat as the reply. The backend rejects cross-chat references with a 400. To get a stable `message_id` to target, use the `id` field on the inbound MessageEvent — that's the BGOS message id.
++
++## Setting your status
++You can update the short status line shown under your name in the BGOS mobile app to reflect what you're doing or focused on right now.
++
++Syntax: include a `STATUS: <text>` line anywhere in your reply (one line, stripped before the user sees the message):
++
++```
++STATUS: Watching prod overnight 🌙
++Here's the summary you asked for…
++```
++
++Rules:
++- Max 120 characters. Emoji inline in the text is fine.
++- Clear a stale status with `STATUS:` (empty) or `STATUS: -`.
++- The line is stripped from your visible reply before posting — it's purely a side-channel signal.
++- Use it to reflect your real current focus: "Deep in your codebase 🔍", "Running overnight cron ⏰", "Idle — ping me anytime".
++- Don't update it on every reply — only when your context meaningfully changes.
 +
 +## Conversation context
 +Each BGOS chat maps to a single Hermes conversation. DMs only — no group threads, no forum topics. The user can wipe context via `/new`. Typing indicators, stickers, reactions, and message editing by the user are not supported.""",

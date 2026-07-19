@@ -188,6 +188,27 @@ def _parse_event_block(content: str) -> tuple[str, dict | None]:
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, meta
 
+
+# Agent-emitted self-status directive. A line of the form:
+#   STATUS: <text>
+# anywhere in the agent's outbound message causes the adapter to call
+# PATCH /api/v1/integrations/assistants/{id}/status with the given text.
+# The line is stripped from the message before posting to the user.
+# "STATUS:" with no trailing text (or "STATUS: -") clears the status
+# (status_text=""). The entire value after the colon (including any inline
+# emoji) is sent as statusText; statusEmoji is NOT separately extracted by
+# this marker — the backend's existing emoji is left untouched (patch_status
+# omits statusEmoji from the body when no explicit emoji is provided).
+# Case-insensitive prefix match; leading/trailing whitespace on the value
+# is stripped.
+_STATUS_LINE_RE = re.compile(
+    # Horizontal whitespace ONLY after the colon: \s would swallow the
+    # newline and capture the NEXT line as the status when the marker is
+    # bare (caught by the merge-gate test for the clear-status case).
+    r"^STATUS:[ \t]*(.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 # Backend rejects inline messages with >6 options (see PR #62 + memory
 # `inline_buttons_shipped.md`). Agents that emit more get truncated; we log
 # a warning so this isn't silent.
@@ -662,6 +683,37 @@ def _parse_reply_to_block(content: str) -> tuple[str, int | None]:
     if reply_to_id is not None and reply_to_id <= 0:
         reply_to_id = None
     return cleaned, reply_to_id
+
+
+def _parse_status_line(content: str) -> tuple[str, str | None]:
+    """Extract a `STATUS: <text>` directive from agent output.
+
+    Returns `(cleaned_text, status_text_or_None)`.
+
+    - `STATUS: <text>` → status_text = "<text>" (stripped). The line is
+      removed from the message so the user never sees the directive.
+    - `STATUS:` (empty) or `STATUS: -` → status_text = "" (clears the status).
+    - No match → returns (content, None) — unchanged, caller skips the API call.
+
+    Only the FIRST `STATUS:` line is honored — multiple lines are all stripped
+    from the text but only the first drives the API call (fail-safe: the last
+    one would win in a naive loop, which could silently overwrite a more
+    intentional earlier status). Caller is responsible for the async API call.
+    """
+    if not content:
+        return content, None
+    match = _STATUS_LINE_RE.search(content)
+    if match is None:
+        return content, None
+    raw_value = match.group(1).strip()
+    # Treat "-" sentinel or empty as "clear" (empty string → backend clears).
+    status_text: str | None = "" if raw_value in ("", "-") else raw_value
+    # Strip ALL STATUS: lines from the visible text (even if there are
+    # multiple — we don't want raw directive lines leaking to the user).
+    cleaned = _STATUS_LINE_RE.sub("", content)
+    # Collapse any blank lines left behind and re-strip.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, status_text
 
 
 def _parse_buttons_block(content: str) -> tuple[str, list[dict], str | None]:
@@ -1941,6 +1993,7 @@ class BGOSAdapter(BasePlatformAdapter):
 
         formatted = self.format_message(content)
         formatted, marker_reply_to = _parse_reply_to_block(formatted)
+        formatted, status_text = _parse_status_line(formatted)
         cleaned_text, options, render_mode = _parse_buttons_block(formatted)
         # Agent-emitted `MEDIA:/abs/path` lines → real BGOS attachments. The
         # markers are stripped from the visible text here; the files are built
@@ -1969,6 +2022,30 @@ class BGOSAdapter(BasePlatformAdapter):
 
         chat_style = self._chat_style_for(chat_key)
         suppressed_task = self._quiet_failsafe_tasks.get(chat_key)
+
+        # Agent self-status — fire-and-forget, fail-open. The agent emits
+        # `STATUS: <text>` (stripped above) to set its status line under
+        # its name in the BGOS mobile UI. Calling PATCH before the main
+        # send so the status is visible as the reply lands. We pick the
+        # first assistant_id in the route map (DM-only — one per pairing);
+        # if the map is empty (shouldn't happen in normal use) we skip
+        # gracefully. Mirror of sync_commands_for's fail-open pattern.
+        if status_text is not None:
+            _first_aid: int | None = None
+            for _aid in self._state.assistant_route:
+                _first_aid = _aid
+                break
+            if _first_aid is not None:
+                try:
+                    await self._api.patch_status(
+                        assistant_id=_first_aid,
+                        status_text=status_text or None,
+                    )
+                except Exception:
+                    log.warning(
+                        "patch_status failed (non-fatal) assistant_id=%d",
+                        _first_aid, exc_info=True,
+                    )
 
         # tool_progress intercept on the SEND path too — the gateway's
         # progress loop calls `adapter.send()` for the FIRST tool of a
