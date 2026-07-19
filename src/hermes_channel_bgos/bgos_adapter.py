@@ -202,7 +202,10 @@ def _parse_event_block(content: str) -> tuple[str, dict | None]:
 # Case-insensitive prefix match; leading/trailing whitespace on the value
 # is stripped.
 _STATUS_LINE_RE = re.compile(
-    r"^STATUS:\s*(.*)$",
+    # Horizontal whitespace ONLY after the colon: \s would swallow the
+    # newline and capture the NEXT line as the status when the marker is
+    # bare (caught by the merge-gate test for the clear-status case).
+    r"^STATUS:[ \t]*(.*)$",
     re.IGNORECASE | re.MULTILINE,
 )
 
