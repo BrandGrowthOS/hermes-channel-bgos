@@ -353,7 +353,7 @@ Your replies render as markdown via react-native-markdown. Supported: **bold**, 
 To deliver an image/video/audio/document, include `MEDIA:/absolute/path/to/file` in your reply (one per line, alongside your text). Handled natively by the BGOS adapter:
 - Images — PNG, JPG, WebP, GIF. Displayed as a tappable thumbnail; tap opens fullscreen viewer.
 - Video — MP4, WebM, MOV. Plays inline.
-- Audio / voice — OGG, MP3, M4A. Renders as a voice bubble with scrubber.
+- Audio / voice: OGG, MP3, M4A. Renders as a voice bubble with scrubber. Replies are spoken automatically per the `/voice` chat mode (`off`, `on`, `tts`) and arrive as voice bubbles with the text underneath.
 - Documents — PDF, TXT, DOCX, XLSX, ZIP, etc. Shows as a download card with filename.
 25 MB per file cap. You can mix normal text and multiple MEDIA: lines in one reply.
 
@@ -361,6 +361,7 @@ To deliver an image/video/audio/document, include `MEDIA:/absolute/path/to/file`
 When the user attaches files, the adapter appends an `## Attachments from user` block to the inbound message text:
 - Images render as markdown image syntax (`![filename](url)`) so vision-capable models pick them up automatically.
 - Other files render as labeled links (`- [filename](url) (mime)`).
+- Voice notes and audio attachments are transcribed automatically. The transcript arrives as quoted text in the message, with the file link still present.
 URLs are presigned S3 links valid ~1 hour. Small files (<500KB) may arrive as inline `data:` URIs instead. Fetch the URL with HTTP GET to get the bytes; the link is one-time-use friendly but works for repeated GETs within the TTL.
 
 ## Dangerous-command approvals (automatic)

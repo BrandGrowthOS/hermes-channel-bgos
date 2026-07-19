@@ -8,13 +8,20 @@ through the same translation path.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import hermes_channel_bgos.bgos_adapter as bgos_adapter_module
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter, MessageEvent
 from hermes_channel_bgos.config import BgosConfig
+from tests.mocks.mock_hermes import (
+    MessageEvent as GatewayMessageEvent,
+    MessageType as GatewayMessageType,
+)
 
 
 pytestmark = pytest.mark.asyncio
@@ -24,6 +31,35 @@ def _make_adapter() -> BGOSAdapter:
     """Lightweight adapter for unit-testing inbound paths without spinning
     up the mock backend. Tests monkeypatch handle_message / api / ws."""
     return BGOSAdapter(BgosConfig(base_url="http://x", pairing_token="pair_xyz"))
+
+
+def _make_gateway_adapter(
+    monkeypatch,
+    message_type: Any = GatewayMessageType,
+) -> BGOSAdapter:
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    monkeypatch.setattr(
+        bgos_adapter_module, "_GatewayMessageEvent", GatewayMessageEvent,
+    )
+    monkeypatch.setattr(bgos_adapter_module, "_GatewayMessageType", message_type)
+    monkeypatch.setattr(
+        adapter,
+        "build_source",
+        lambda *, chat_id, user_id: {"chat_id": chat_id, "user_id": user_id},
+        raising=False,
+    )
+    return adapter
+
+
+def _capture_gateway_messages(adapter: BGOSAdapter) -> list[GatewayMessageEvent]:
+    received: list[GatewayMessageEvent] = []
+
+    async def capture(event: GatewayMessageEvent) -> None:
+        received.append(event)
+
+    adapter.handle_message = capture
+    return received
 
 
 async def test_inbound_message_translates_and_handles(mock_bgos_server, monkeypatch):
@@ -875,6 +911,238 @@ async def test_camelcase_files_inbound():
     })
     # File-bearing messages bypass batching → flush immediate, no sleep
     assert len(received) == 1
+
+
+async def test_voice_note_url_routes_to_gateway_voice(
+    mock_bgos_server,
+    monkeypatch,
+):
+    payload = b"OggS\x00url-voice"
+    mock_bgos_server.on("GET", "/voice.ogg").respond(200, data=payload)
+    url = f"{mock_bgos_server.url}/voice.ogg"
+    adapter = _make_gateway_adapter(monkeypatch)
+    received = _capture_gateway_messages(adapter)
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "user_id": "u",
+        "chat_id": 42,
+        "message_id": 101,
+        "text": "listen",
+        "files": [{"filename": "voice.ogg", "mime": "audio/ogg", "url": url}],
+        "message_type": "standard",
+    })
+
+    assert len(received) == 1
+    event = received[0]
+    assert event.message_type == GatewayMessageType.VOICE
+    assert len(event.media_urls) == 1
+    assert Path(event.media_urls[0]).read_bytes() == payload
+    assert event.media_types == ["audio/ogg"]
+    assert f"- [voice.ogg]({url}) (audio/ogg)" in event.text
+
+
+async def test_voice_note_data_uri_routes_to_gateway_voice(monkeypatch):
+    payload = b"OggS\x00data-uri-voice"
+    data_uri = "data:audio/ogg;base64," + base64.b64encode(payload).decode("ascii")
+    adapter = _make_gateway_adapter(monkeypatch)
+    received = _capture_gateway_messages(adapter)
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "user_id": "u",
+        "chat_id": 42,
+        "message_id": 102,
+        "text": "listen",
+        "files": [{
+            "filename": "voice.ogg",
+            "mime": "audio/ogg",
+            "dataUri": data_uri,
+        }],
+        "message_type": "standard",
+    })
+
+    assert len(received) == 1
+    event = received[0]
+    assert event.message_type == GatewayMessageType.VOICE
+    assert len(event.media_urls) == 1
+    assert Path(event.media_urls[0]).read_bytes() == payload
+    assert event.media_types == ["audio/ogg"]
+    assert f"- [voice.ogg]({data_uri}) (audio/ogg)" in event.text
+
+
+async def test_voice_note_non_audio_file_stays_text(monkeypatch):
+    url = "https://files.example/report.pdf"
+    adapter = _make_gateway_adapter(monkeypatch)
+    received = _capture_gateway_messages(adapter)
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "user_id": "u",
+        "chat_id": 42,
+        "message_id": 103,
+        "text": "read this",
+        "files": [{"filename": "report.pdf", "mime": "application/pdf", "url": url}],
+        "message_type": "standard",
+    })
+
+    assert len(received) == 1
+    event = received[0]
+    assert event.message_type == GatewayMessageType.TEXT
+    assert event.media_urls == []
+    assert f"- [report.pdf]({url}) (application/pdf)" in event.text
+
+
+async def test_voice_note_oversized_url_stays_text(
+    mock_bgos_server,
+    monkeypatch,
+):
+    mock_bgos_server.on("GET", "/huge.ogg").respond(
+        200,
+        data=b"",
+        headers={"Content-Length": str(25 * 1024 * 1024 + 1)},
+    )
+    url = f"{mock_bgos_server.url}/huge.ogg"
+    adapter = _make_gateway_adapter(monkeypatch)
+    received = _capture_gateway_messages(adapter)
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "user_id": "u",
+        "chat_id": 42,
+        "message_id": 104,
+        "text": "listen",
+        "files": [{"filename": "huge.ogg", "mime": "audio/ogg", "url": url}],
+        "message_type": "standard",
+    })
+
+    assert len(received) == 1
+    event = received[0]
+    assert event.message_type == GatewayMessageType.TEXT
+    assert event.media_urls == []
+    assert f"- [huge.ogg]({url}) (audio/ogg)" in event.text
+
+
+async def test_voice_note_disabled_stays_text(monkeypatch):
+    monkeypatch.setenv("BGOS_VOICE_NOTES", "off")
+    data_uri = "data:audio/ogg;base64,T2dnUw=="
+    adapter = _make_gateway_adapter(monkeypatch)
+    received = _capture_gateway_messages(adapter)
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "user_id": "u",
+        "chat_id": 42,
+        "message_id": 105,
+        "text": "listen",
+        "files": [{
+            "filename": "voice.ogg",
+            "mime": "audio/ogg",
+            "dataUri": data_uri,
+        }],
+        "message_type": "standard",
+    })
+
+    assert len(received) == 1
+    event = received[0]
+    assert event.message_type == GatewayMessageType.TEXT
+    assert event.media_urls == []
+    assert f"- [voice.ogg]({data_uri}) (audio/ogg)" in event.text
+
+
+async def test_voice_note_slash_command_stays_command(monkeypatch):
+    data_uri = "data:audio/ogg;base64,T2dnUw=="
+    adapter = _make_gateway_adapter(monkeypatch)
+    received = _capture_gateway_messages(adapter)
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "user_id": "u",
+        "chat_id": 42,
+        "message_id": 106,
+        "text": "/voicecheck",
+        "files": [{
+            "filename": "voice.ogg",
+            "mime": "audio/ogg",
+            "dataUri": data_uri,
+        }],
+        "message_type": "slash_command",
+        "command_name": "voicecheck",
+        "command_args": "",
+    })
+
+    assert len(received) == 1
+    event = received[0]
+    assert event.message_type == GatewayMessageType.COMMAND
+    assert event.media_urls == []
+    assert f"- [voice.ogg]({data_uri}) (audio/ogg)" in event.text
+
+
+async def test_voice_note_gateway_without_voice_type_stays_text(monkeypatch):
+    class OldMessageType:
+        TEXT = GatewayMessageType.TEXT
+        COMMAND = GatewayMessageType.COMMAND
+        VOICE = GatewayMessageType.VOICE
+
+    monkeypatch.delattr(OldMessageType, "VOICE")
+    data_uri = "data:audio/ogg;base64,T2dnUw=="
+    adapter = _make_gateway_adapter(monkeypatch, OldMessageType)
+    received = _capture_gateway_messages(adapter)
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "user_id": "u",
+        "chat_id": 42,
+        "message_id": 107,
+        "text": "listen",
+        "files": [{
+            "filename": "voice.ogg",
+            "mime": "audio/ogg",
+            "dataUri": data_uri,
+        }],
+        "message_type": "standard",
+    })
+
+    assert len(received) == 1
+    event = received[0]
+    assert event.message_type == GatewayMessageType.TEXT
+    assert event.media_urls == []
+    assert f"- [voice.ogg]({data_uri}) (audio/ogg)" in event.text
+
+
+async def test_voice_note_voice_constructor_failure_stays_text(monkeypatch):
+    class RejectVoiceEvent(GatewayMessageEvent):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("message_type") == GatewayMessageType.VOICE:
+                raise RuntimeError("VOICE is not supported")
+            super().__init__(*args, **kwargs)
+
+    data_uri = "data:audio/ogg;base64,T2dnUw=="
+    adapter = _make_gateway_adapter(monkeypatch)
+    monkeypatch.setattr(
+        bgos_adapter_module, "_GatewayMessageEvent", RejectVoiceEvent,
+    )
+    received = _capture_gateway_messages(adapter)
+
+    await adapter._handle_inbound({
+        "assistant_id": 7,
+        "user_id": "u",
+        "chat_id": 42,
+        "message_id": 108,
+        "text": "listen",
+        "files": [{
+            "filename": "voice.ogg",
+            "mime": "audio/ogg",
+            "dataUri": data_uri,
+        }],
+        "message_type": "standard",
+    })
+
+    assert len(received) == 1
+    event = received[0]
+    assert event.message_type == GatewayMessageType.TEXT
+    assert event.media_urls == []
+    assert f"- [voice.ogg]({data_uri}) (audio/ogg)" in event.text
 
 
 async def test_normalize_inbound_payload_is_zero_copy_for_snake_only():
