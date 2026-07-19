@@ -18,10 +18,12 @@ import json
 import logging
 import mimetypes
 import os
+import platform
 import re
 import struct
 import time
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -912,6 +914,26 @@ def _send_result(*, message_id: int | None) -> SendResult:
 log = logging.getLogger(__name__)
 
 
+def _daemon_env() -> dict[str, str]:
+    """Environment facts for the heartbeat's `env` object (backend
+    HeartbeatDto: `{platform?, python?, hermes?}`, each value <=64 chars).
+    Best-effort: the hermes key is omitted when package metadata is
+    unavailable."""
+    env = {
+        "platform": platform.system().lower()[:64],
+        "python": platform.python_version()[:64],
+    }
+    for distribution in ("hermes-agent", "hermes_agent"):
+        try:
+            env["hermes"] = metadata.version(distribution)[:64]
+        except metadata.PackageNotFoundError:
+            continue
+        except Exception:
+            return env
+        break
+    return env
+
+
 class BGOSAdapter(BasePlatformAdapter):
     """Hermes channel adapter for BGOS.
 
@@ -1309,7 +1331,9 @@ class BGOSAdapter(BasePlatformAdapter):
         """
         while True:
             try:
-                await self._api.post_heartbeat(daemon_version=__version__)
+                await self._api.post_heartbeat(
+                    daemon_version=__version__, env=_daemon_env(),
+                )
                 log.info(
                     "BGOS heartbeat sent (daemonVersion=%s)", __version__,
                 )
