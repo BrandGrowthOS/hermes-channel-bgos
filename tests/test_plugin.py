@@ -313,3 +313,26 @@ def test_register_wires_all_hooks():
     assert callable(captured["env_enablement_fn"])
     assert callable(captured["standalone_sender_fn"])
     assert captured["platform_hint"]
+
+
+def test_resolve_pairing_prefers_secrets_over_non_pairing_env(tmp_path, monkeypatch):
+    # Shadowed-token incident: a stale USER api key in env must not shadow a
+    # freshly paired pair_ token in the secrets file.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("BGOS_API_KEY", "bgos_user_api_key_STALE")
+    monkeypatch.delenv("BGOS_BACKEND_URL", raising=False)
+    secrets = tmp_path / "secrets" / "bgos.json"
+    secrets.parent.mkdir(parents=True)
+    secrets.write_text(json.dumps({"pairing_token": "pair_fresh123"}))
+    token, _ = resolve_pairing()
+    assert token == "pair_fresh123"
+
+
+def test_resolve_pairing_pair_shaped_env_still_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("BGOS_API_KEY", "pair_explicit_override")
+    secrets = tmp_path / "secrets" / "bgos.json"
+    secrets.parent.mkdir(parents=True)
+    secrets.write_text(json.dumps({"pairing_token": "pair_fresh123"}))
+    token, _ = resolve_pairing()
+    assert token == "pair_explicit_override"

@@ -39,7 +39,7 @@ from .commands_sync import (
     fetch_hermes_native_commands,
 )
 from .agents import enumerate_agents_from_env
-from .config import BgosConfig
+from .config import BgosConfig, choose_pairing_token, redact_token
 from .doctor import run_checks
 from .missions_bridge import MissionLane, classify_goal_line
 from .quiet_mode import (
@@ -1201,6 +1201,13 @@ class BGOSAdapter(BasePlatformAdapter):
            `~/.hermes/secrets/bgos.json`) written by `hermes-pair-bgos`.
         5. Default base_url to production.
 
+        Token-source honesty exception: a config/env token that does NOT
+        carry the pair_ prefix (i.e. is not a backend-issued pairing token)
+        yields to a secrets-file pairing_token when one exists, with a
+        one-line warning. A pair_ shaped config/env token stays an explicit
+        override, and with no secrets token the config/env value is used
+        as before.
+
         Raises RuntimeError with a clear message if no pairing token is
         found anywhere — the user needs to run `hermes-pair-bgos <CODE>`.
         """
@@ -1230,12 +1237,26 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
                 secrets = {}
 
-        pairing_token = (
+        # Config attrs and the env var are both externally supplied overrides;
+        # the secrets file holds what `hermes-pair-bgos` actually issued. A
+        # pair_ shaped override wins (explicit), but a non-pairing value (e.g.
+        # a stale BGOS user api key exported long ago) must NOT shadow a real
+        # secrets-file pairing_token: that combination is whoami 401 forever.
+        override_token = (
             _attr(hermes_config, "api_key")
             or _attr(hermes_config, "pairing_token")
             or os.environ.get("BGOS_API_KEY")
-            or secrets.get("pairing_token")
         )
+        choice = choose_pairing_token(override_token, secrets.get("pairing_token"))
+        if choice.ignored_env_token is not None:
+            log.warning(
+                "BGOS: ignoring non-pairing token %s from config/env "
+                "BGOS_API_KEY (no pair_ prefix); using the pairing_token "
+                "from %s instead. Unset BGOS_API_KEY to silence this.",
+                redact_token(choice.ignored_env_token),
+                secrets_path,
+            )
+        pairing_token = choice.token
         if not pairing_token:
             raise RuntimeError(
                 "BGOS pairing token not found. Run "

@@ -258,3 +258,119 @@ def test_check_registration_ok_via_patch(monkeypatch):
     r = check_registration()
     assert r.status == OK
     assert "via patch" in r.detail
+
+
+# -----------------------------------------------------------------------------
+# Token-source honesty (shadowed-token incident): a stale BGOS_API_KEY env
+# export holding a BGOS USER api key (not a pair_ pairing token) silently
+# shadowed the freshly paired secrets-file token, whoami 401 forever, and the
+# doctor could not explain it. The doctor must now report WHERE its token came
+# from, prefer the secrets token over a non-pairing env key, and emit a
+# specific shadowing finding with the exact fix.
+# -----------------------------------------------------------------------------
+
+SECRETS_TOKEN = "pair_9dBfreshlyPairedSecretToken123"
+STALE_USER_KEY = "bgos_user_api_key_STALE_abcdef0123456789"
+
+
+def _write_secrets_file(token: str = SECRETS_TOKEN) -> Path:
+    secrets_dir = _hermes_home() / "secrets"
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    sp = secrets_dir / "bgos.json"
+    sp.write_text(json.dumps({"pairing_token": token, "pairing_id": 7,
+                              "base_url": "https://api.brandgrowthos.ai"}))
+    return sp
+
+
+def test_check_config_reports_secrets_source_and_token_prefix(monkeypatch):
+    monkeypatch.delenv("BGOS_API_KEY", raising=False)
+    monkeypatch.delenv("BGOS_BACKEND_URL", raising=False)
+    sp = _write_secrets_file()
+    cfg, r = check_config()
+    assert cfg is not None and cfg.pairing_token == SECRETS_TOKEN
+    assert r.status == OK
+    assert "secrets" in r.detail
+    assert str(sp) in r.detail
+    assert SECRETS_TOKEN[:6] in r.detail       # honest prefix shown
+    assert SECRETS_TOKEN not in r.detail       # never the full token
+
+
+def test_check_config_reports_env_source(monkeypatch):
+    monkeypatch.setenv("BGOS_API_KEY", "pair_envTokenExplicitOverride999")
+    monkeypatch.delenv("BGOS_BACKEND_URL", raising=False)
+    cfg, r = check_config()
+    assert cfg is not None and cfg.pairing_token == "pair_envTokenExplicitOverride999"
+    assert "BGOS_API_KEY" in r.detail
+    assert "pair_envTokenExplicitOverride999" not in r.detail
+
+
+def test_check_config_prefers_secrets_over_non_pairing_env_key(monkeypatch):
+    # The incident case: stale USER api key in env, fresh pairing in secrets.
+    monkeypatch.setenv("BGOS_API_KEY", STALE_USER_KEY)
+    monkeypatch.delenv("BGOS_BACKEND_URL", raising=False)
+    _write_secrets_file()
+    cfg, r = check_config()
+    assert cfg is not None
+    assert cfg.pairing_token == SECRETS_TOKEN
+
+
+def test_check_token_hygiene_flags_env_shadowing(monkeypatch):
+    from hermes_channel_bgos.doctor import check_token_hygiene
+    monkeypatch.setenv("BGOS_API_KEY", STALE_USER_KEY)
+    sp = _write_secrets_file()
+    r = check_token_hygiene()
+    assert r is not None
+    assert r.status == WARN
+    assert "BGOS_API_KEY" in r.detail
+    assert "pair_" in r.detail                 # names the expected prefix
+    assert str(sp) in r.detail
+    assert STALE_USER_KEY not in r.detail      # redacted
+    assert STALE_USER_KEY[:8] in r.detail      # but identifiable
+    fix = r.fix.lower()
+    assert "unset" in fix or "remove" in fix
+    assert "restart" in fix
+
+
+def test_check_token_hygiene_flags_non_pairing_token_without_secrets(monkeypatch):
+    from hermes_channel_bgos.doctor import check_token_hygiene
+    monkeypatch.setenv("BGOS_API_KEY", STALE_USER_KEY)
+    r = check_token_hygiene()
+    assert r is not None
+    assert r.status == WARN
+    assert "pair_" in r.detail
+    assert STALE_USER_KEY not in r.detail
+    assert "re-pair" in r.fix.lower() or "hermes-pair-bgos" in r.fix
+
+
+def test_check_token_hygiene_silent_when_clean(monkeypatch):
+    monkeypatch.delenv("BGOS_API_KEY", raising=False)
+    from hermes_channel_bgos.doctor import check_token_hygiene
+    _write_secrets_file()
+    assert check_token_hygiene() is None
+
+
+async def test_check_whoami_401_names_token_source(mock_bgos_server):
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        401, {"error": "PAIRING_REVOKED"},
+    )
+    r = await check_whoami(
+        BgosConfig(base_url=mock_bgos_server.url, pairing_token="bad"),
+        token_source="env $BGOS_API_KEY",
+    )
+    assert r.status == FAIL
+    assert "env $BGOS_API_KEY" in r.detail
+
+
+def test_check_token_hygiene_secrets_token_without_pair_prefix(monkeypatch):
+    # A malformed secrets-file token (no pair_ prefix) with NO env override:
+    # the finding must point at the secrets file, not at BGOS_API_KEY.
+    from hermes_channel_bgos.doctor import check_token_hygiene
+    monkeypatch.delenv("BGOS_API_KEY", raising=False)
+    sp = _write_secrets_file(token="not_a_pairing_token_123456")
+    r = check_token_hygiene()
+    assert r is not None
+    assert r.status == WARN
+    assert str(sp) in r.detail
+    assert "not_a_pairing_token_123456" not in r.detail
+    assert "unset BGOS_API_KEY" not in r.fix
+    assert "hermes-pair-bgos" in r.fix
