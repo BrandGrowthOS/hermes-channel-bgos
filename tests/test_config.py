@@ -124,3 +124,10 @@ def test_redact_token_truncates_to_8_chars():
 def test_redact_token_handles_missing():
     assert redact_token(None) == ""
     assert redact_token("") == ""
+
+
+def test_redact_token_never_returns_full_short_token():
+    # A token shorter than the display budget must still be truncated.
+    out = redact_token("bad")
+    assert "bad" not in out
+    assert out.endswith("...")

@@ -48,9 +48,15 @@ def looks_like_pairing_token(token: str | None) -> bool:
 
 
 def redact_token(token: str | None, keep: int = TOKEN_DISPLAY_CHARS) -> str:
-    """Display-safe token prefix; never returns the full secret."""
+    """Display-safe token prefix; never returns the full secret.
+
+    Tokens at or under the display budget are cut harder so even a short
+    value is never echoed back whole.
+    """
     if not token:
         return ""
+    if len(token) <= keep:
+        return token[: max(0, len(token) - 2)] + "..."
     return token[:keep] + "..."
 
 

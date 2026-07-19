@@ -264,18 +264,25 @@ def check_token_hygiene() -> CheckResult | None:
                 "hermes-pair-bgos <CODE> --device-label <host>",
         )
     if choice.token and not looks_like_pairing_token(choice.token):
-        env_note = (
-            f" and no secrets-file pairing_token exists at {sp}"
-            if choice.source == "env" else ""
-        )
+        if choice.source == "env":
+            env_note = f" and no secrets-file pairing_token exists at {sp}"
+            fix = (
+                "If whoami fails with 401, unset BGOS_API_KEY, restart the "
+                "gateway, and re-pair: hermes-pair-bgos <CODE> "
+                "--device-label <host>"
+            )
+        else:
+            env_note = ""
+            fix = (
+                "The stored token looks malformed. Re-pair to refresh it: "
+                "hermes-pair-bgos <CODE> --device-label <host>"
+            )
         return CheckResult(
             "token_source", WARN,
             f"token {redact_token(choice.token)} from "
             f"{token_source_label(choice, sp)} does not look like a pairing "
             f"token (no {PAIRING_TOKEN_PREFIX} prefix){env_note}.",
-            fix="If whoami fails with 401, unset BGOS_API_KEY, restart the "
-                "gateway, and re-pair: hermes-pair-bgos <CODE> "
-                "--device-label <host>",
+            fix=fix,
         )
     return None
 

@@ -359,3 +359,18 @@ async def test_check_whoami_401_names_token_source(mock_bgos_server):
     )
     assert r.status == FAIL
     assert "env $BGOS_API_KEY" in r.detail
+
+
+def test_check_token_hygiene_secrets_token_without_pair_prefix(monkeypatch):
+    # A malformed secrets-file token (no pair_ prefix) with NO env override:
+    # the finding must point at the secrets file, not at BGOS_API_KEY.
+    from hermes_channel_bgos.doctor import check_token_hygiene
+    monkeypatch.delenv("BGOS_API_KEY", raising=False)
+    sp = _write_secrets_file(token="not_a_pairing_token_123456")
+    r = check_token_hygiene()
+    assert r is not None
+    assert r.status == WARN
+    assert str(sp) in r.detail
+    assert "not_a_pairing_token_123456" not in r.detail
+    assert "unset BGOS_API_KEY" not in r.fix
+    assert "hermes-pair-bgos" in r.fix
