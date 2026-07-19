@@ -7,6 +7,7 @@ exercise the tracking-unavailable fallback the way CI always runs).
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -126,6 +127,35 @@ async def test_handle_voice_rpc_drops_malformed_frames(mock_bgos_server):
         await adapter._handle_voice_rpc({"rpcId": "r", "op": "reboot"})
         await asyncio.sleep(0.05)
         assert called == []
+    finally:
+        await adapter.disconnect()
+
+
+async def test_dropping_a_malformed_frame_never_logs_the_callers_openai_key(
+    mock_bgos_server, caplog
+):
+    """The drop path logs the frame for debuggability. A mint frame carries the
+    caller's raw OpenAI key in payload.openaiApiKey, and normalize_voice_rpc()
+    bails on a bad rpcId/op BEFORE it ever inspects payload, so the drop log
+    must never serialize payload VALUES.
+    """
+    secret = "sk-caller-super-secret-value"
+    adapter = await make_adapter(mock_bgos_server)
+    caplog.set_level(logging.DEBUG)
+    try:
+        # Bad rpcId, and an op outside the whitelist: both drop paths, both
+        # carrying a real payload with the caller's key.
+        await adapter._handle_voice_rpc(
+            {"op": "mint", "payload": {"openaiApiKey": secret}}
+        )
+        await adapter._handle_voice_rpc(
+            {"rpcId": "r", "op": "reboot", "payload": {"openaiApiKey": secret}}
+        )
+        await asyncio.sleep(0.05)
+        assert secret not in caplog.text
+        # ...but the drop is still diagnosable: op + the payload's key NAMES.
+        assert "openaiApiKey" in caplog.text
+        assert "reboot" in caplog.text
     finally:
         await adapter.disconnect()
 

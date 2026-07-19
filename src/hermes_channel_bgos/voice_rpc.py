@@ -126,6 +126,35 @@ def normalize_voice_rpc(raw: Any) -> VoiceRpcFrame | None:
     )
 
 
+# Envelope fields that are safe to echo into a log line. `payload` is NOT
+# among them: a mint payload carries the caller's raw OpenAI key
+# (payload.openaiApiKey), and normalize_voice_rpc() rejects a frame on a bad
+# rpcId/op BEFORE it ever inspects payload, so the drop path would otherwise
+# serialize a live credential straight into the gateway log.
+_LOGGABLE_FRAME_FIELDS = ("rpcId", "op", "assistantId", "agentRoute", "chatId")
+
+
+def redact_voice_rpc_for_log(raw: Any) -> str:
+    """A log-safe rendering of a raw voice_rpc frame.
+
+    Allowlist, not denylist: payload VALUES are never emitted, only the sorted
+    payload key NAMES, which is what a dropped-frame diagnosis actually needs.
+    A denylist of secret-looking names would silently leak the next field
+    somebody adds to the payload.
+    """
+    if not isinstance(raw, dict):
+        return f"<non-dict {type(raw).__name__}>"
+    safe: dict[str, Any] = {
+        field: raw[field] for field in _LOGGABLE_FRAME_FIELDS if field in raw
+    }
+    payload = raw.get("payload")
+    if isinstance(payload, dict):
+        safe["payloadKeys"] = sorted(str(key) for key in payload)
+    elif payload is not None:
+        safe["payloadKeys"] = f"<non-dict {type(payload).__name__}>"
+    return repr(safe)
+
+
 class VoiceRpcError(Exception):
     """An op failure with a machine-readable code + speakable message."""
 
@@ -180,7 +209,7 @@ def load_voice_env() -> tuple[str, str, str]:
         or os.environ.get("OPENAI_API_KEY")
         or ""
     ).strip()
-    model = (os.environ.get("BGOS_VOICE_MODEL") or "gpt-realtime-2").strip()
+    model = (os.environ.get("BGOS_VOICE_MODEL") or "gpt-realtime-2.1").strip()
     voice = (os.environ.get("BGOS_VOICE_VOICE") or "marin").strip()
     return key, model, voice
 
@@ -640,13 +669,26 @@ class VoiceRpcHandler:
 
     async def _mint(self, frame: VoiceRpcFrame) -> dict[str, Any]:
         cfg = self._deps.voice_config(frame.assistant_id)
-        if not cfg.openai_api_key:
+        # Per-user key (BGOS billing/security): the BGOS backend rides the
+        # CALLER's own OpenAI key on the mint frame (payload.openaiApiKey) so
+        # the call spends THEIR credits, never this host's owner key. Prefer
+        # it; the host env key (cfg.openai_api_key) is a fallback ONLY for a
+        # standalone host not driven by the BGOS backend. The BGOS backend
+        # refuses a mint for a user with no key of their own, so a BGOS-driven
+        # mint always arrives with a user key here. The raw key stays
+        # server-side (it arrived over the authed pairing WS room) and never
+        # reaches the app.
+        user_openai_api_key = frame.payload.get("openaiApiKey")
+        if not isinstance(user_openai_api_key, str):
+            user_openai_api_key = ""
+        user_openai_api_key = user_openai_api_key.strip()
+        openai_api_key = user_openai_api_key or cfg.openai_api_key
+        if not openai_api_key:
             raise VoiceRpcError(
                 "VOICE_NOT_CONFIGURED",
-                "voice is not configured on this agent host: set "
-                "BGOS_OPENAI_API_KEY (an OpenAI API key with Realtime "
-                "access) in the Hermes gateway environment and restart "
-                "the gateway",
+                "voice is not configured: the caller has not set an OpenAI "
+                "API key in their Home of Agents settings, and this Hermes "
+                "gateway has no BGOS_OPENAI_API_KEY fallback",
             )
         recent_context = frame.payload.get("recentContext")
         if not isinstance(recent_context, str):
@@ -704,7 +746,7 @@ class VoiceRpcHandler:
                 post(
                     CLIENT_SECRETS_URL,
                     {
-                        "Authorization": f"Bearer {cfg.openai_api_key}",
+                        "Authorization": f"Bearer {openai_api_key}",
                         "Content-Type": "application/json",
                     },
                     body,
