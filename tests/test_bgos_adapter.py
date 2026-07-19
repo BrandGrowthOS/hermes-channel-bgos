@@ -802,3 +802,45 @@ async def test_send_long_message_prefers_newline_splits(monkeypatch):
         # when a newline was available.
         if "y" in body:
             assert "yyy" in body  # didn't slice in the middle of a line
+
+
+# -----------------------------------------------------------------------------
+# Token-source precedence in _resolve_config (shadowed-token incident): a
+# non-pairing BGOS_API_KEY env value must not shadow a real secrets-file
+# pairing_token; a pair_ shaped env value stays an explicit override.
+# -----------------------------------------------------------------------------
+
+def _write_adapter_secrets(token: str) -> None:
+    import json as _json
+    import os as _os
+    from pathlib import Path as _Path
+    secrets_dir = _Path(_os.environ["HERMES_HOME"]) / "secrets"
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    (secrets_dir / "bgos.json").write_text(_json.dumps({"pairing_token": token}))
+
+
+async def test_resolve_config_prefers_secrets_over_non_pairing_env(monkeypatch, caplog):
+    import logging as _logging
+    stale = "bgos_user_api_key_STALE_0123456789"
+    _write_adapter_secrets("pair_fresh456")
+    monkeypatch.setenv("BGOS_API_KEY", stale)
+    with caplog.at_level(_logging.WARNING):
+        cfg = BGOSAdapter._resolve_config(None)
+    assert cfg.pairing_token == "pair_fresh456"
+    warnings = [rec.getMessage() for rec in caplog.records
+                if rec.levelno >= _logging.WARNING]
+    assert any("pair_" in m for m in warnings)   # one-line warning emitted
+    assert all(stale not in m for m in warnings)  # never the full ignored key
+
+
+async def test_resolve_config_pair_shaped_env_still_overrides(monkeypatch):
+    _write_adapter_secrets("pair_fresh456")
+    monkeypatch.setenv("BGOS_API_KEY", "pair_explicit_override")
+    cfg = BGOSAdapter._resolve_config(None)
+    assert cfg.pairing_token == "pair_explicit_override"
+
+
+async def test_resolve_config_non_pairing_env_used_when_no_secrets(monkeypatch):
+    monkeypatch.setenv("BGOS_API_KEY", "bgos_user_api_key_only_option")
+    cfg = BGOSAdapter._resolve_config(None)
+    assert cfg.pairing_token == "bgos_user_api_key_only_option"

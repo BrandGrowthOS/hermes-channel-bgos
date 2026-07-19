@@ -24,7 +24,10 @@ import click
 from . import __version__
 from .agents import enumerate_agents_from_env
 from .bgos_api import BgosApi, BgosApiError
-from .config import BgosConfig, normalize_base_url
+from .config import (
+    PAIRING_TOKEN_PREFIX, BgosConfig, TokenChoice, choose_pairing_token,
+    looks_like_pairing_token, normalize_base_url, redact_token,
+)
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 
@@ -208,28 +211,90 @@ def check_registration() -> CheckResult:
     )
 
 
+def _read_secrets(sp: Path) -> dict:
+    if not sp.is_file():
+        return {}
+    try:
+        return _json.loads(sp.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _resolve_token_state() -> tuple[TokenChoice, Path, dict[str, str]]:
+    """Resolve the effective token the same way the adapter does, keeping the
+    provenance. Returns (choice, secrets_path, gateway_effective_env)."""
+    from .pair_cli import secrets_path
+    sp = secrets_path()
+    secrets = _read_secrets(sp)
+    env, _ = gateway_env()
+    choice = choose_pairing_token(
+        env.get("BGOS_API_KEY"), secrets.get("pairing_token"),
+    )
+    return choice, sp, env
+
+
+def token_source_label(choice: TokenChoice, sp: Path) -> str:
+    """Human-readable provenance of the token in use."""
+    if choice.source == "env":
+        return "env $BGOS_API_KEY"
+    if choice.source == "secrets":
+        return f"secrets file {sp}"
+    return "nowhere"
+
+
+def check_token_hygiene() -> CheckResult | None:
+    """Token-source honesty check. Emits a finding when the token situation
+    can silently break auth; returns None when everything is normal.
+
+    The incident this guards: a stale BGOS_API_KEY env export holding a BGOS
+    USER api key (not a pair_ pairing token) shadowed a freshly paired
+    secrets-file token, whoami 401 forever, and the doctor said nothing.
+    """
+    choice, sp, _ = _resolve_token_state()
+    if choice.ignored_env_token is not None:
+        return CheckResult(
+            "token_source", WARN,
+            f"$BGOS_API_KEY is set to {redact_token(choice.ignored_env_token)} "
+            f"which does not look like a pairing token (no {PAIRING_TOKEN_PREFIX} "
+            f"prefix); it would shadow the real pairing_token in {sp}. "
+            f"The gateway and this doctor now IGNORE it and use the secrets token.",
+            fix="Remove the stale export: unset BGOS_API_KEY (check your shell "
+                "profile and $HERMES_HOME/.env), then restart the gateway. "
+                "If whoami still fails afterwards, re-pair: "
+                "hermes-pair-bgos <CODE> --device-label <host>",
+        )
+    if choice.token and not looks_like_pairing_token(choice.token):
+        env_note = (
+            f" and no secrets-file pairing_token exists at {sp}"
+            if choice.source == "env" else ""
+        )
+        return CheckResult(
+            "token_source", WARN,
+            f"token {redact_token(choice.token)} from "
+            f"{token_source_label(choice, sp)} does not look like a pairing "
+            f"token (no {PAIRING_TOKEN_PREFIX} prefix){env_note}.",
+            fix="If whoami fails with 401, unset BGOS_API_KEY, restart the "
+                "gateway, and re-pair: hermes-pair-bgos <CODE> "
+                "--device-label <host>",
+        )
+    return None
+
+
 def check_config() -> tuple[BgosConfig | None, CheckResult]:
     """Resolve the pairing config from env + the secrets file. Returns the
     config (or None) plus a CheckResult. A missing token is the canonical
     'not paired' state and yields the get-a-code instruction.
 
-    Mirrors the adapter's env+secrets precedence (`BGOS_API_KEY` →
-    secrets-file token; `BGOS_BACKEND_URL` → secrets-file base_url → prod
+    Mirrors the adapter's env+secrets precedence (pair_ shaped `BGOS_API_KEY`
+    wins; a non-pairing env value yields to the secrets-file token;
+    `BGOS_BACKEND_URL` → secrets-file base_url → prod
     default) — the subset that applies when running standalone, where there's
     no Hermes config object to read. Deliberately does NOT import the adapter
     module: it pulls in Hermes/mock shims that aren't importable outside the
     gateway runtime or the test harness.
     """
-    from .pair_cli import secrets_path
-    sp = secrets_path()
-    secrets: dict = {}
-    if sp.is_file():
-        try:
-            secrets = _json.loads(sp.read_text())
-        except (OSError, ValueError):
-            secrets = {}
-    env, _ = gateway_env()
-    token = env.get("BGOS_API_KEY") or secrets.get("pairing_token")
+    choice, sp, env = _resolve_token_state()
+    secrets = _read_secrets(sp)
     raw_base_url = (
         env.get("BGOS_BACKEND_URL")
         or secrets.get("base_url")
@@ -237,7 +302,7 @@ def check_config() -> tuple[BgosConfig | None, CheckResult]:
     )
     base_url = normalize_base_url(raw_base_url)
     base_note = "" if base_url == raw_base_url else f" (normalized from {raw_base_url})"
-    if not token:
+    if not choice.token:
         return None, CheckResult(
             "config", FAIL,
             f"no pairing token found (checked $BGOS_API_KEY and {sp})",
@@ -245,9 +310,10 @@ def check_config() -> tuple[BgosConfig | None, CheckResult]:
                 "new Hermes server', copy the BGOS-XXXX-XX code, then run: "
                 "hermes-pair-bgos <CODE> --device-label <host>",
         )
-    return BgosConfig(base_url=base_url, pairing_token=token), CheckResult(
+    return BgosConfig(base_url=base_url, pairing_token=choice.token), CheckResult(
         "config", OK,
-        f"token resolved; base_url={base_url}{base_note}; "
+        f"token {redact_token(choice.token, 6)} from {token_source_label(choice, sp)}; "
+        f"base_url={base_url}{base_note}; "
         f"secrets={sp} (exists={sp.exists()})",
     )
 
@@ -285,15 +351,24 @@ def check_catalog() -> CheckResult:
     return CheckResult("catalog", OK, f"{len(agents)} configured: {listing}")
 
 
-async def check_whoami(cfg: BgosConfig) -> CheckResult:
+async def check_whoami(cfg: BgosConfig, token_source: str = "") -> CheckResult:
     api = BgosApi(cfg)
+    src = f" using token from {token_source}" if token_source else ""
     try:
         me = await api.whoami()
     except BgosApiError as exc:
         if exc.status == 401:
+            fix = "Pairing revoked/expired. Delete the secrets file and re-pair."
+            if token_source.startswith("env"):
+                fix = (
+                    "The rejected token came from the BGOS_API_KEY env var. "
+                    "Unset it, restart the gateway, and re-pair if needed: "
+                    "hermes-pair-bgos <CODE> --device-label <host>"
+                )
             return CheckResult(
-                "pairing_live", FAIL, f"whoami 401 ({exc.code or 'unauthorized'})",
-                fix="Pairing revoked/expired. Delete the secrets file and re-pair.",
+                "pairing_live", FAIL,
+                f"whoami 401 ({exc.code or 'unauthorized'}){src}",
+                fix=fix,
             )
         return CheckResult(
             "pairing_live", FAIL, f"whoami HTTP {exc.status}",
@@ -351,10 +426,16 @@ async def run_checks(*, offline: bool = False) -> list[CheckResult]:
     results = [check_package(), check_registration()]
     cfg, cfg_result = check_config()
     results.append(cfg_result)
+    hygiene = check_token_hygiene()
+    if hygiene is not None:
+        results.append(hygiene)
     results.append(check_env())
     results.append(check_catalog())
     if cfg is not None and not offline:
-        results.append(await check_whoami(cfg))
+        choice, sp, _ = _resolve_token_state()
+        results.append(
+            await check_whoami(cfg, token_source=token_source_label(choice, sp)),
+        )
     results.append(check_gateway_process())
     return results
 

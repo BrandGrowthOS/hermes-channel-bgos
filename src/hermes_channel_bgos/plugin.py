@@ -30,7 +30,7 @@ from .bgos_adapter import (
     _parse_media_markers,
 )
 from .bgos_api import BgosApi, BgosApiError
-from .config import BgosConfig
+from .config import BgosConfig, choose_pairing_token, redact_token
 
 log = logging.getLogger(__name__)
 
@@ -122,10 +122,12 @@ def _secrets_path() -> Path:
 
 
 def resolve_pairing() -> tuple[str | None, str]:
-    """Resolve (pairing_token, base_url) from env + the secrets file — the same
-    precedence the adapter uses (`BGOS_API_KEY` → secrets token; `BGOS_BACKEND_URL`
-    → secrets base_url → prod default). Returns token=None when not paired.
-    Standalone (no adapter import) so it works in the cron path and in tests."""
+    """Resolve (pairing_token, base_url) from env + the secrets file, the same
+    precedence the adapter uses (pair_ shaped `BGOS_API_KEY` wins; a
+    non-pairing env value yields to the secrets `pairing_token`;
+    `BGOS_BACKEND_URL` then secrets base_url then prod default). Returns
+    token=None when not paired. Standalone (no adapter import) so it works in
+    the cron path and in tests."""
     secrets: dict = {}
     sp = _secrets_path()
     if sp.is_file():
@@ -133,7 +135,17 @@ def resolve_pairing() -> tuple[str | None, str]:
             secrets = json.loads(sp.read_text())
         except (OSError, ValueError):
             secrets = {}
-    token = os.environ.get("BGOS_API_KEY") or secrets.get("pairing_token")
+    choice = choose_pairing_token(
+        os.environ.get("BGOS_API_KEY"), secrets.get("pairing_token"),
+    )
+    if choice.ignored_env_token is not None:
+        log.warning(
+            "BGOS: ignoring non-pairing env BGOS_API_KEY %s (no pair_ "
+            "prefix); using the pairing_token from %s instead.",
+            redact_token(choice.ignored_env_token),
+            sp,
+        )
+    token = choice.token
     base_url = (
         os.environ.get("BGOS_BACKEND_URL")
         or secrets.get("base_url")

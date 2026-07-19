@@ -62,3 +62,65 @@ async def test_api_with_suffixed_base_url_hits_correct_path(mock_bgos_server):
     finally:
         await api.close()
     assert me["pairing_id"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Token-source precedence (choose_pairing_token) + display redaction.
+# Regression guard for the shadowed-token incident: a stale BGOS_API_KEY env
+# export holding a BGOS USER api key (not a pairing token) silently shadowed
+# the freshly paired secrets-file token and produced whoami 401 forever.
+# ---------------------------------------------------------------------------
+
+from hermes_channel_bgos.config import choose_pairing_token, redact_token  # noqa: E402
+
+
+def test_choose_env_pair_shaped_token_overrides_secrets():
+    c = choose_pairing_token("pair_envAAAA", "pair_secretBBBB")
+    assert c.token == "pair_envAAAA"
+    assert c.source == "env"
+    assert c.ignored_env_token is None
+
+
+def test_choose_non_pairing_env_token_yields_to_secrets():
+    c = choose_pairing_token("bgos_user_api_key_123", "pair_secretBBBB")
+    assert c.token == "pair_secretBBBB"
+    assert c.source == "secrets"
+    assert c.ignored_env_token == "bgos_user_api_key_123"
+
+
+def test_choose_non_pairing_env_token_used_when_no_secrets():
+    c = choose_pairing_token("bgos_user_api_key_123", None)
+    assert c.token == "bgos_user_api_key_123"
+    assert c.source == "env"
+    assert c.ignored_env_token is None
+
+
+def test_choose_secrets_when_no_env():
+    c = choose_pairing_token(None, "pair_secretBBBB")
+    assert c.token == "pair_secretBBBB"
+    assert c.source == "secrets"
+
+
+def test_choose_none_when_nothing():
+    c = choose_pairing_token(None, None)
+    assert c.token is None
+    assert c.source == "none"
+
+
+def test_choose_treats_blank_strings_as_absent():
+    c = choose_pairing_token("   ", "pair_secretBBBB")
+    assert c.token == "pair_secretBBBB"
+    assert c.source == "secrets"
+    assert c.ignored_env_token is None
+
+
+def test_redact_token_truncates_to_8_chars():
+    full = "pair_9dB4567890abcdefgh"
+    out = redact_token(full)
+    assert out == "pair_9dB..."
+    assert full not in out
+
+
+def test_redact_token_handles_missing():
+    assert redact_token(None) == ""
+    assert redact_token("") == ""
