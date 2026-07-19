@@ -22,6 +22,7 @@ def _snapshot(
     assistant_id: int = 7,
     origin: str = "derived",
     title: str = "Draft the replies",
+    updated_at: str = "2026-07-19T00:00:00.000Z",
 ) -> dict:
     return {
         "id": mission_id,
@@ -29,6 +30,7 @@ def _snapshot(
         "status": status,
         "origin": origin,
         "title": title,
+        "updatedAt": updated_at,
     }
 
 
@@ -40,33 +42,55 @@ def _api(*, active: dict | None = None) -> SimpleNamespace:
             return_value={"ok": True, "mission": created},
         ),
         patch_mission_progress=AsyncMock(
-            return_value={"ok": True, "mission": created},
+            return_value={
+                "ok": True,
+                "mission": _snapshot(
+                    updated_at="2026-07-19T00:00:01.000Z",
+                ),
+            },
         ),
         pause_mission=AsyncMock(
             return_value={
                 "ok": True,
-                "mission": _snapshot(status="paused"),
+                "mission": _snapshot(
+                    status="paused",
+                    updated_at="2026-07-19T00:00:02.000Z",
+                ),
             },
         ),
         resume_mission=AsyncMock(
-            return_value={"ok": True, "mission": created},
+            return_value={
+                "ok": True,
+                "mission": _snapshot(
+                    updated_at="2026-07-19T00:00:03.000Z",
+                ),
+            },
         ),
         complete_mission=AsyncMock(
             return_value={
                 "ok": True,
-                "mission": _snapshot(status="completed"),
+                "mission": _snapshot(
+                    status="completed",
+                    updated_at="2026-07-19T00:00:04.000Z",
+                ),
             },
         ),
         fail_mission=AsyncMock(
             return_value={
                 "ok": True,
-                "mission": _snapshot(status="failed"),
+                "mission": _snapshot(
+                    status="failed",
+                    updated_at="2026-07-19T00:00:04.000Z",
+                ),
             },
         ),
         abandon_mission=AsyncMock(
             return_value={
                 "ok": True,
-                "mission": _snapshot(status="abandoned"),
+                "mission": _snapshot(
+                    status="abandoned",
+                    updated_at="2026-07-19T00:00:04.000Z",
+                ),
             },
         ),
     )
@@ -143,15 +167,11 @@ def test_classify_goal_line_kinds(
     assert result.max_turns == budget
 
 
-def test_classify_set_uses_only_first_line() -> None:
-    result = classify_goal_line(
+def test_classify_set_rejects_contract_without_gateway_instructions() -> None:
+    assert classify_goal_line(
         "⊙ Goal set (8-turn budget): Ship the report\n"
         "Completion contract:\n- Verification: tests pass"
-    )
-
-    assert result is not None
-    assert result.goal_text == "Ship the report"
-    assert result.max_turns == 8
+    ) is None
 
 
 def test_classify_goal_cleared_without_period() -> None:
@@ -193,6 +213,38 @@ async def test_set_creates_derived_mission_with_turn_budget() -> None:
         effort={"used": 0, "budget": 20, "unit": "turns"},
         first_feed_text="Goal set",
     )
+    await lane.close()
+
+
+@pytest.mark.asyncio
+async def test_set_keeps_full_goal_identity_beyond_card_title_limit() -> None:
+    goal = "x" * 240
+    api = _api()
+    api.create_mission.return_value = {
+        "ok": True,
+        "mission": _snapshot(title=goal[:200]),
+    }
+    manager = Mock(state=SimpleNamespace(
+        status="active",
+        goal=goal,
+        created_at=9.0,
+    ))
+    lane = MissionLane(
+        api,
+        session_id_resolver=lambda chat_id, assistant_id: "session-abc",
+        goal_manager_factory=Mock(return_value=manager),
+    )
+
+    await lane.handle_goal_line(
+        f"⊙ Goal set (20-turn budget): {goal}",
+        chat_id=42,
+        assistant_id=7,
+    )
+
+    assert api.create_mission.await_args.kwargs["title"] == goal[:200]
+    binding = lane._bindings[(42, 7)]
+    assert binding.goal_text == goal
+    assert binding.goal_created_at == 9.0
     await lane.close()
 
 
@@ -282,13 +334,26 @@ async def test_set_replaces_non_derived_active_mission() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_adopting_paused_mission_resumes_it() -> None:
+async def test_set_adopting_paused_mission_enforces_pause_locally() -> None:
     api = _api(active=_snapshot(
         "mission-paused",
         status="paused",
         title="Resume the objective",
     ))
-    lane = MissionLane(api)
+    manager = Mock(state=SimpleNamespace(
+        status="active",
+        goal="Resume the objective",
+        created_at=1.0,
+        waiting_on_pid=None,
+        waiting_on_session=None,
+        waiting_until=0.0,
+        paused_reason=None,
+    ))
+    lane = MissionLane(
+        api,
+        session_id_resolver=lambda chat_id, assistant_id: "session-abc",
+        goal_manager_factory=Mock(return_value=manager),
+    )
 
     await lane.handle_goal_line(
         "⊙ Goal set (10-turn budget): Resume the objective",
@@ -296,10 +361,8 @@ async def test_set_adopting_paused_mission_resumes_it() -> None:
         assistant_id=7,
     )
 
-    api.resume_mission.assert_awaited_once_with(
-        assistant_id=7,
-        mission_id="mission-paused",
-    )
+    api.resume_mission.assert_not_awaited()
+    manager.pause.assert_called_once_with(reason="bgos-mission-paused")
     await lane.close()
 
 
@@ -402,6 +465,26 @@ async def test_lifecycle_lines_call_mission_api(
 
 
 @pytest.mark.asyncio
+async def test_successful_completion_drops_terminal_binding() -> None:
+    api = _api()
+    lane = MissionLane(api)
+    await lane.handle_goal_line(
+        "⊙ Goal set (20-turn budget): Draft the customer replies",
+        chat_id=42,
+        assistant_id=7,
+    )
+
+    await lane.handle_goal_line(
+        "✓ Goal achieved: all replies are drafted",
+        chat_id=42,
+        assistant_id=7,
+    )
+
+    assert lane._bindings == {}
+    await lane.close()
+
+
+@pytest.mark.asyncio
 async def test_cleared_flushes_abandons_and_drops_binding() -> None:
     api = _api()
     events: list[str] = []
@@ -479,7 +562,9 @@ async def test_continue_after_pause_resumes_before_progress() -> None:
     events: list[str] = []
     api.resume_mission.side_effect = lambda **_: events.append("resume") or {
         "ok": True,
-        "mission": _snapshot(),
+        "mission": _snapshot(
+            updated_at="2026-07-19T00:00:03.000Z",
+        ),
     }
     api.patch_mission_progress.side_effect = (
         lambda **_: events.append("progress") or {
@@ -606,7 +691,7 @@ async def test_rest_failures_are_swallowed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_new_set_drops_previous_goal_binding() -> None:
+async def test_failed_new_set_keeps_previous_goal_binding() -> None:
     api = _api()
     lane = MissionLane(api)
     await lane.handle_goal_line(
@@ -627,7 +712,8 @@ async def test_failed_new_set_drops_previous_goal_binding() -> None:
         assistant_id=7,
     )
 
-    api.patch_mission_progress.assert_not_awaited()
+    api.patch_mission_progress.assert_awaited_once()
+    assert api.patch_mission_progress.await_args.kwargs["mission_id"] == "mission-1"
     await lane.close()
 
 
@@ -723,11 +809,17 @@ class _GoalState:
         self,
         status: str,
         *,
+        goal: str = "Draft the customer replies",
+        created_at: float = 1.0,
+        paused_reason: str | None = None,
         waiting_on_pid: int | None = None,
         waiting_on_session: str | None = None,
         waiting_until: float = 0.0,
     ) -> None:
         self.status = status
+        self.goal = goal
+        self.created_at = created_at
+        self.paused_reason = paused_reason
         self.waiting_on_pid = waiting_on_pid
         self.waiting_on_session = waiting_on_session
         self.waiting_until = waiting_until
@@ -736,7 +828,7 @@ class _GoalState:
 @pytest.mark.asyncio
 async def test_control_events_enforce_real_goal_state(monkeypatch) -> None:
     api = _api()
-    states = iter(["active", "paused", "active"])
+    states = iter(["active", "active", "paused", "active"])
     managers: list[Mock] = []
 
     def goal_manager_factory(session_id: str) -> Mock:
@@ -770,12 +862,15 @@ async def test_control_events_enforce_real_goal_state(monkeypatch) -> None:
     })
     await lane.handle_mission_event({
         "event_type": "mission_completed",
-        "mission": _snapshot(status="completed"),
+        "mission": _snapshot(
+            status="completed",
+            updated_at="2026-07-19T00:00:02.000Z",
+        ),
     })
 
-    managers[0].pause.assert_called_once_with()
-    managers[1].resume.assert_called_once_with()
-    managers[2].mark_done.assert_called_once_with("Marked done from the app")
+    managers[1].pause.assert_called_once_with(reason="bgos-mission-paused")
+    managers[2].resume.assert_called_once_with(reset_budget=False)
+    managers[3].mark_done.assert_called_once_with("Marked done from the app")
     await lane.close()
 
 
@@ -798,7 +893,7 @@ async def test_resume_control_clears_parked_barrier_while_goal_is_active() -> No
         "mission": _snapshot(status="active"),
     })
 
-    manager.resume.assert_called_once_with()
+    manager.resume.assert_called_once_with(reset_budget=False)
     await lane.close()
 
 
@@ -884,11 +979,13 @@ async def test_recent_outbound_transition_echo_skips_goal_manager(
         chat_id=42,
         assistant_id=7,
     )
+    factory.reset_mock()
     await lane.handle_goal_line(
         "⏳ Goal parked: waiting for tests",
         chat_id=42,
         assistant_id=7,
     )
+    factory.reset_mock()
 
     await lane.handle_mission_event({
         "event_type": "mission_paused",
@@ -901,9 +998,18 @@ async def test_recent_outbound_transition_echo_skips_goal_manager(
 
 @pytest.mark.asyncio
 async def test_missing_echo_does_not_swallow_later_user_pause() -> None:
+    identity_manager = Mock(state=_GoalState("active"))
+    local_pause_manager = Mock(state=_GoalState("paused"))
     resumed_manager = Mock(state=_GoalState("paused"))
     paused_manager = Mock(state=_GoalState("active"))
-    factory = Mock(side_effect=[resumed_manager, paused_manager])
+    factory = Mock(
+        side_effect=[
+            identity_manager,
+            local_pause_manager,
+            resumed_manager,
+            paused_manager,
+        ]
+    )
     lane = MissionLane(
         _api(),
         session_id_resolver=lambda chat_id, assistant_id: "session-abc",
@@ -922,15 +1028,21 @@ async def test_missing_echo_does_not_swallow_later_user_pause() -> None:
 
     await lane.handle_mission_event({
         "event_type": "mission_resumed",
-        "mission": _snapshot(status="active"),
+        "mission": _snapshot(
+            status="active",
+            updated_at="2026-07-19T00:00:03.000Z",
+        ),
     })
     await lane.handle_mission_event({
         "event_type": "mission_paused",
-        "mission": _snapshot(status="paused"),
+        "mission": _snapshot(
+            status="paused",
+            updated_at="2026-07-19T00:00:04.000Z",
+        ),
     })
 
-    resumed_manager.resume.assert_called_once_with()
-    paused_manager.pause.assert_called_once_with()
+    resumed_manager.resume.assert_called_once_with(reset_budget=False)
+    paused_manager.pause.assert_called_once_with(reason="bgos-mission-paused")
     await lane.close()
 
 
@@ -1050,7 +1162,10 @@ async def test_terminal_ws_event_cancels_deferred_progress() -> None:
 
     await lane.handle_mission_event({
         "event_type": "mission_completed",
-        "mission": _snapshot(status="completed"),
+        "mission": _snapshot(
+            status="completed",
+            updated_at="2026-07-19T00:00:02.000Z",
+        ),
     })
     await asyncio.sleep(0.06)
 
@@ -1157,7 +1272,13 @@ async def test_late_resume_response_does_not_override_newer_app_pause() -> None:
     async def delayed_resume(**kwargs) -> dict:
         resume_started.set()
         await release_resume.wait()
-        return {"ok": True, "mission": _snapshot(status="active")}
+        return {
+            "ok": True,
+            "mission": _snapshot(
+                status="active",
+                updated_at="2026-07-19T00:00:03.000Z",
+            ),
+        }
 
     api.resume_mission.side_effect = delayed_resume
     manager = Mock(state=_GoalState("active"))
@@ -1180,6 +1301,7 @@ async def test_late_resume_response_does_not_override_newer_app_pause() -> None:
         "event_type": "mission_paused",
         "mission": _snapshot(status="paused"),
     })
+    manager.pause.reset_mock()
     api.patch_mission_progress.reset_mock()
 
     continue_task = asyncio.create_task(lane.handle_goal_line(
@@ -1188,14 +1310,18 @@ async def test_late_resume_response_does_not_override_newer_app_pause() -> None:
         assistant_id=7,
     ))
     await resume_started.wait()
-    await lane.handle_mission_event({
+    pause_event = asyncio.create_task(lane.handle_mission_event({
         "event_type": "mission_paused",
-        "mission": _snapshot(status="paused"),
-    })
+        "mission": _snapshot(
+            status="paused",
+            updated_at="2026-07-19T00:00:04.000Z",
+        ),
+    }))
+    await asyncio.sleep(0)
     release_resume.set()
-    await continue_task
+    await asyncio.gather(continue_task, pause_event)
 
-    manager.pause.assert_called_once_with()
+    manager.pause.assert_called_once_with(reason="bgos-mission-paused")
     api.patch_mission_progress.assert_not_awaited()
     await lane.close()
 
@@ -1209,7 +1335,13 @@ async def test_old_pause_echo_does_not_invalidate_inflight_resume() -> None:
     async def delayed_resume(**kwargs) -> dict:
         resume_started.set()
         await release_resume.wait()
-        return {"ok": True, "mission": _snapshot(status="active")}
+        return {
+            "ok": True,
+            "mission": _snapshot(
+                status="active",
+                updated_at="2026-07-19T00:00:03.000Z",
+            ),
+        }
 
     api.resume_mission.side_effect = delayed_resume
     lane = MissionLane(api)
@@ -1230,12 +1362,16 @@ async def test_old_pause_echo_does_not_invalidate_inflight_resume() -> None:
         assistant_id=7,
     ))
     await resume_started.wait()
-    await lane.handle_mission_event({
+    old_echo = asyncio.create_task(lane.handle_mission_event({
         "event_type": "mission_paused",
-        "mission": _snapshot(status="paused"),
-    })
+        "mission": _snapshot(
+            status="paused",
+            updated_at="2026-07-19T00:00:02.000Z",
+        ),
+    }))
+    await asyncio.sleep(0)
     release_resume.set()
-    await continue_task
+    await asyncio.gather(continue_task, old_echo)
 
     api.patch_mission_progress.assert_awaited_once()
     assert api.patch_mission_progress.await_args.kwargs["effort"]["used"] == 2
@@ -1252,7 +1388,7 @@ async def test_control_events_enforce_goal_state_in_websocket_order() -> None:
     async def resolve_session(chat_id: int, assistant_id: int) -> str:
         nonlocal resolution_count
         resolution_count += 1
-        if resolution_count == 1:
+        if resolution_count == 2:
             first_resolution_started.set()
             await release_first_resolution.wait()
         return "session-abc"
@@ -1261,11 +1397,11 @@ async def test_control_events_enforce_goal_state_in_websocket_order() -> None:
     state = _GoalState("active")
     manager = Mock(state=state)
 
-    def pause() -> None:
+    def pause(**kwargs) -> None:
         actions.append("pause")
         state.status = "paused"
 
-    def resume() -> None:
+    def resume(**kwargs) -> None:
         actions.append("resume")
         state.status = "active"
 
@@ -1308,7 +1444,13 @@ async def test_routine_tick_does_not_override_inflight_pause_response() -> None:
     async def delayed_pause(**kwargs) -> dict:
         pause_started.set()
         await release_pause.wait()
-        return {"ok": True, "mission": _snapshot(status="paused")}
+        return {
+            "ok": True,
+            "mission": _snapshot(
+                status="paused",
+                updated_at="2026-07-19T00:00:02.000Z",
+            ),
+        }
 
     api.pause_mission.side_effect = delayed_pause
     lane = MissionLane(api)
@@ -1324,12 +1466,13 @@ async def test_routine_tick_does_not_override_inflight_pause_response() -> None:
         assistant_id=7,
     ))
     await pause_started.wait()
-    await lane.handle_mission_event({
+    tick_event = asyncio.create_task(lane.handle_mission_event({
         "event_type": "mission_ticked",
         "mission": _snapshot(status="active"),
-    })
+    }))
+    await asyncio.sleep(0)
     release_pause.set()
-    await pause_task
+    await asyncio.gather(pause_task, tick_event)
 
     await lane.handle_goal_line(
         "↻ Continuing toward goal (2/20): input arrived",
@@ -1345,7 +1488,7 @@ async def test_routine_tick_does_not_override_inflight_pause_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_control_supports_plain_mock_goal_manager() -> None:
+async def test_control_with_incomplete_goal_identity_stays_pending() -> None:
     manager = Mock()
     factory = Mock(return_value=manager)
     lane = MissionLane(
@@ -1364,8 +1507,12 @@ async def test_control_supports_plain_mock_goal_manager() -> None:
         "mission": _snapshot(status="paused"),
     })
 
-    factory.assert_called_once_with("session-abc")
-    manager.pause.assert_called_once_with()
+    assert factory.call_args_list == [
+        call("session-abc"),
+        call("session-abc"),
+    ]
+    manager.pause.assert_not_called()
+    assert lane._bindings[(42, 7)].pending_enforcement is True
     await lane.close()
 
 

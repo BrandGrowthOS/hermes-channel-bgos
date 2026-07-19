@@ -1319,6 +1319,7 @@ class BGOSAdapter(BasePlatformAdapter):
             self._ws.bind_pairing(self.pairing_id)
         self._ws.bind_assistants(list(self._state.assistant_route.keys()))
         await self._ws.start()
+        await self._mission_lane.reconcile()
 
         # Publish the agent catalog so the BGOS user can tick which Hermes
         # agents to expose. Fail-open: an empty catalog is valid — the user
@@ -2130,8 +2131,8 @@ class BGOSAdapter(BasePlatformAdapter):
         message_id targets the LAST chunk so streaming edits land there.
 
         Media variants (`send_image`, `send_voice`, …) are optional
-        class-level overrides the gateway duck-types. `metadata` is accepted
-        for Hermes interface compatibility but not currently plumbed through.
+        class-level overrides the gateway duck-types. `metadata` supplies
+        Hermes delivery provenance but is not forwarded to the BGOS API.
         `reply_to` IS plumbed: it maps to backend `replyToId`, which is what
         agent-to-agent (a2a) side-thread chats use to correlate the target
         assistant's reply with the inbound peer message — without it, the
@@ -2159,6 +2160,9 @@ class BGOSAdapter(BasePlatformAdapter):
             )
 
         formatted = self.format_message(content)
+        goal_notice_text = formatted
+        goal_line = classify_goal_line(goal_notice_text)
+        goal_notice_candidate = goal_line is not None
         formatted, marker_reply_to = _parse_reply_to_block(formatted)
         formatted, status_text = _parse_status_line(formatted)
         cleaned_text, options, render_mode = _parse_buttons_block(formatted)
@@ -2183,6 +2187,22 @@ class BGOSAdapter(BasePlatformAdapter):
         # The title is the natural fallback; eventMeta itself is untouched.
         if agent_event_meta is not None and not cleaned_text.strip():
             cleaned_text = str(agent_event_meta.get("title", "")).strip()
+        if goal_line is not None:
+            transformed = goal_notice_text.strip() != cleaned_text.strip()
+            notify = bool((metadata or {}).get("notify"))
+            if (
+                transformed
+                or marker_reply_to is not None
+                or options
+                or media_paths
+                or agent_event_meta is not None
+                or status_text is not None
+                or bool((metadata or {}).get("expect_edits"))
+                or goal_line.provenance is None
+                or (goal_line.provenance == "direct" and not notify)
+                or (goal_line.provenance == "post_turn" and notify)
+            ):
+                goal_line = None
         effective_reply_to: int | None = (
             int(reply_to) if reply_to is not None else marker_reply_to
         )
@@ -2229,11 +2249,11 @@ class BGOSAdapter(BasePlatformAdapter):
         # CamelCase), and short-circuiting here would silently drop the
         # attachment AND the already-stripped marker. A media reply is never a
         # tool_progress card.
-        goal_line = classify_goal_line(cleaned_text)
         parsed_tools = (
             _parse_tool_progress_text(cleaned_text)
             if (
                 goal_line is None
+                and not goal_notice_candidate
                 and not options
                 and not media_paths
                 and agent_event_meta is None
@@ -2244,6 +2264,7 @@ class BGOSAdapter(BasePlatformAdapter):
             classify_robot_talk(cleaned_text)
             if (
                 goal_line is None
+                and not goal_notice_candidate
                 and chat_style != EVERYTHING
                 and not options
                 and not media_paths
@@ -2271,7 +2292,7 @@ class BGOSAdapter(BasePlatformAdapter):
         if goal_line is not None:
             try:
                 await self._mission_lane.handle_goal_line(
-                    cleaned_text,
+                    goal_notice_text,
                     chat_id=chat_key,
                     assistant_id=self._style_assistant_id_for_chat(chat_key),
                 )
@@ -4863,6 +4884,7 @@ class BGOSAdapter(BasePlatformAdapter):
         replayed through the same translation pipeline. Fire-and-forget — we
         don't want to block the WS connect handler."""
         asyncio.create_task(self._run_backfill(last_message_id))
+        self._mission_lane.schedule_reconcile()
 
     async def _run_backfill(self, last_message_id: int) -> None:
         """Fetch `GET /integrations/inbound?since_message_id=<last>` and
