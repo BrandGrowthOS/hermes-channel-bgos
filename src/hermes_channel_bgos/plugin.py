@@ -445,6 +445,13 @@ Do NOT quote when:
 
 Same-chat constraint: the source message must be in the SAME BGOS chat as the reply. The backend rejects cross-chat references with a 400. To get a stable `message_id` to target, use the `id` field on the inbound MessageEvent — that's the BGOS message id.
 
+## Ringing the owner (live voice call)
+You can ring the owner in the app, immediately, by embedding a `[[BGOS_CALL]]short reason[[/BGOS_CALL]]` block in your reply. The adapter places the call as the agent that owns the chat, strips the marker from what the user reads, and still sends any remaining text as a normal message. One marker per turn rings once, and the reason is capped at 200 characters.
+
+Do NOT shell out to `curl` or any terminal command to ring. A terminal call is gated by your HOST's shell approval layer, which is a different gate from BGOS approvals, so the owner sees a confusing generic command prompt instead of a call and nothing rings.
+
+Use this when you genuinely cannot proceed without the owner and a chat message would sit unread. If the owner is already on a call nothing rings; follow up in chat rather than retrying in a loop.
+
 ## Conversation context
 Each BGOS chat maps to a single Hermes conversation. DMs only — no group threads, no forum topics. The user can wipe context via `/new`. Typing indicators, stickers, reactions, and message editing by the user are not supported."""
 
