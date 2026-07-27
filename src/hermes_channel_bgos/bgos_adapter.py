@@ -126,6 +126,18 @@ _REPLY_TO_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Agent-emitted call marker. Hermes agents have no tool surface, so ringing
+# the owner is expressed as a marker in the reply text and turned into a real
+# POST /api/v1/voice/outbound-call by the adapter.
+#
+# The text between the tags becomes the ring reason (trimmed, capped at the
+# backend's 200 char limit). The marker is stripped from the visible text, so
+# the owner never sees it. Only the FIRST match is honored: one turn rings once.
+_CALL_BLOCK_RE = re.compile(
+    r"\[\[BGOS_CALL\]\](.*?)\[\[/BGOS_CALL\]\]",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # Agent-emitted event-card marker. The agent writes a single JSON object
 # between these tags and the adapter posts the message with
 # messageType="event" + the object passed VERBATIM as the backend's
@@ -667,6 +679,28 @@ def _format_inbound_files(text: str, files: list[dict]) -> str:
     return f"[User attached {len(files)} file(s)]" + suffix
 
 
+def _parse_call_block(content: str) -> tuple[str, str | None]:
+    """Strip a `[[BGOS_CALL]]` block and return `(cleaned_text, ring_reason)`.
+
+    Returns `(content, None)` when absent, so the normal send path is
+    untouched. An empty or whitespace-only block still requests a call, with
+    no reason, rather than being silently dropped: the agent clearly meant to
+    ring, and dropping it would look to the agent like a call that happened.
+    """
+    if not content:
+        return content, None
+    match = _CALL_BLOCK_RE.search(content)
+    if match is None:
+        return content, None
+    reason = (match.group(1) or "").strip()
+    # The backend caps the ring reason at 200 chars; trim here so a long agent
+    # sentence rings with a truncated reason instead of failing validation.
+    if len(reason) > 200:
+        reason = reason[:200].rstrip()
+    cleaned = _CALL_BLOCK_RE.sub("", content).strip()
+    return cleaned, (reason or "")
+
+
 def _parse_reply_to_block(content: str) -> tuple[str, int | None]:
     """Extract a `[[BGOS_REPLY_TO]]<id>[[/BGOS_REPLY_TO]]` marker from agent text.
 
@@ -1149,6 +1183,38 @@ class BGOSAdapter(BasePlatformAdapter):
         return self._chat_style_store.style_for(
             self._style_assistant_id_for_chat(chat_key)
         )
+
+    async def _ring_owner(self, chat_key: int, reason: str) -> None:
+        """Ring the owner as the agent that owns this chat. Never raises.
+
+        The assistant id is resolved PER CHAT, the same way the send path
+        resolves it, rather than from config: the daemon can serve more than
+        one agent, so a config-level id would ring as the wrong one (or, since
+        no such field exists, never ring at all).
+
+        Failure modes are logged and swallowed on purpose. A 409 "busy" means
+        the owner is already on a call and nothing rang, which is normal and
+        not worth breaking a reply over; the canon tells the agent to follow
+        up in chat rather than retry.
+        """
+        assistant_id = self._style_assistant_id_for_chat(chat_key)
+        if assistant_id is None:
+            log.warning("call marker ignored: no assistant for chat %s", chat_key)
+            return
+        try:
+            await self._api.call_owner(
+                assistant_id=int(assistant_id),
+                reason=reason or None,
+                chat_id=chat_key,
+            )
+            log.info("ringing owner (assistant %s, chat %s)", assistant_id, chat_key)
+        except BgosApiError as exc:
+            if getattr(exc, "code", None) == "busy":
+                log.info("call not placed: owner already on a call")
+            else:
+                log.warning("call failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - never break the reply
+            log.warning("call failed unexpectedly: %s", exc)
 
     def _style_assistant_id_for_chat(self, chat_key: int) -> int | None:
         """Return the addressed assistant, with the owner as fallback."""
@@ -2185,6 +2251,13 @@ class BGOSAdapter(BasePlatformAdapter):
         goal_line = classify_goal_line(goal_notice_text)
         goal_notice_candidate = goal_line is not None
         formatted, marker_reply_to = _parse_reply_to_block(formatted)
+        # Agent-emitted `[[BGOS_CALL]]reason[[/BGOS_CALL]]` → a real ring.
+        # Parsed before the other markers so the marker never survives into
+        # visible text on any downstream path, including the early returns
+        # below. The ring itself is fire-and-forget and never breaks the reply.
+        formatted, call_reason = _parse_call_block(formatted)
+        if call_reason is not None:
+            await self._ring_owner(chat_key, call_reason)
         formatted, status_text = _parse_status_line(formatted)
         cleaned_text, options, render_mode = _parse_buttons_block(formatted)
         # Agent-emitted `MEDIA:/abs/path` lines → real BGOS attachments. The

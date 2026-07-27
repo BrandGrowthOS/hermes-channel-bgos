@@ -824,6 +824,41 @@ class BgosApi:
             json=body,
         )
 
+    async def call_owner(
+        self,
+        *,
+        assistant_id: int,
+        reason: str | None = None,
+        chat_id: int | None = None,
+    ) -> dict:
+        """POST /api/v1/voice/outbound-call, ring the owner in the app now.
+
+        The other three channel plugins have had a first-class call as a tool
+        since 2026-07-08 (Claude Code `call_owner`, Gobot `replyHandle.callOwner`,
+        OpenClaw `POST /v1/call-owner`); Hermes did not, so an agent told it
+        could ring its owner had to invent a way and shelled out to curl,
+        tripping its HOST's terminal approval layer instead of ringing anyone.
+
+        Two shapes that are easy to get wrong, so they are fixed here rather
+        than left to the caller:
+
+        - `assistantId` goes in the BODY. This endpoint reads no
+          X-Caller-Assistant-Id header, unlike the scheduled-task endpoints,
+          so sending one changes nothing.
+        - Pairing auth alone proves ownership.
+
+        A 201 means it is ringing. A 409 with code "busy" means the owner is
+        already on a call and NOTHING rang: do not retry in a loop, say so in
+        chat instead. If voice is not set up the backend returns structured
+        setup guidance, which the caller should relay verbatim.
+        """
+        body: dict = {"assistantId": assistant_id}
+        if reason is not None:
+            body["reason"] = reason
+        if chat_id is not None:
+            body["chatId"] = chat_id
+        return await self._request("POST", "/api/v1/voice/outbound-call", json=body)
+
     async def push_agent_catalog(self, *, pairing_id: int, entries: list[dict]) -> None:
         """Push (or update) the agent catalog for this pairing. Backend DTO
         uses the key `agents` (see AgentCatalogPushDto) — we translate from
