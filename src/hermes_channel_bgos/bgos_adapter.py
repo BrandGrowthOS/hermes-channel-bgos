@@ -39,6 +39,15 @@ from .commands_sync import (
     fetch_hermes_native_commands,
 )
 from .agents import enumerate_agents_from_env
+from .boards_marker import (
+    BOARDS_LOOP_GUARD_LIMIT,
+    BoardsCallResult,
+    BoardsParseError,
+    BoardsRequest,
+    build_result_turn,
+    parse_boards_blocks,
+    plan_request,
+)
 from .config import BgosConfig, choose_pairing_token, redact_token
 from .doctor import run_checks
 from .missions_bridge import MissionLane, classify_goal_line
@@ -1165,6 +1174,14 @@ class BGOSAdapter(BasePlatformAdapter):
         self._voice_tasks: set[asyncio.Task] = set()
         self._doctor_rpc_in_flight: set[str] = set()
         self._doctor_tasks: set[asyncio.Task] = set()
+        # Agent Boards round trip ([[BGOS_BOARDS]] marker). Executor tasks
+        # are fire-and-forget like _voice_tasks (tracked so exceptions are
+        # retrieved and disconnect can drain them). The per-chat counter is
+        # the loop guard: it counts CONSECUTIVE synthetic board result turns
+        # and is reset by any real inbound message, so chained queries work
+        # but an agent ping-ponging with the adapter cannot run forever.
+        self._boards_tasks: set[asyncio.Task] = set()
+        self._boards_consecutive_results: dict[int, int] = {}
         # Poll cadence for turn-completion detection, and the quiet window
         # after the last captured reply that resolves a turn when session
         # tracking is unavailable. The settle window MUST exceed the
@@ -1936,6 +1953,16 @@ class BGOSAdapter(BasePlatformAdapter):
             await asyncio.gather(*voice_tasks, return_exceptions=True)
         self._voice_tasks.clear()
         self._voice_waiters.clear()
+        # Cancel in-flight boards executor tasks. Same snapshot-then-cancel
+        # pattern: an executor left running would hit the closed api client
+        # (its broad except would swallow that into a silently lost result)
+        # or dispatch a synthetic turn into handle_message mid-teardown.
+        boards_tasks = [t for t in self._boards_tasks if not t.done()]
+        for task in boards_tasks:
+            task.cancel()
+        if boards_tasks:
+            await asyncio.gather(*boards_tasks, return_exceptions=True)
+        self._boards_tasks.clear()
         doctor_tasks = [t for t in self._doctor_tasks if not t.done()]
         for task in doctor_tasks:
             task.cancel()
@@ -2196,6 +2223,260 @@ class BGOSAdapter(BasePlatformAdapter):
             )
         return chat_key, self._state.session_handle_for_chat(chat_key)
 
+    # -------------------------------------------------------------------------
+    # Agent Boards round trip ([[BGOS_BOARDS]] marker)
+    # -------------------------------------------------------------------------
+
+    async def _run_boards_requests(
+        self,
+        chat_key: int,
+        requests: list[BoardsRequest],
+        errors: list[BoardsParseError],
+    ) -> None:
+        """Execute one reply's board calls and dispatch the result turn.
+
+        Every outcome, success, backend denial, malformed block, transport
+        failure, becomes a section of ONE synthetic system turn; backend
+        bodies pass through VERBATIM (the boards denial wording is a
+        leak-proof contract). Nothing here ever raises into the send path.
+        """
+        try:
+            count = self._boards_consecutive_results.get(chat_key, 0)
+            if count >= BOARDS_LOOP_GUARD_LIMIT:
+                if count > BOARDS_LOOP_GUARD_LIMIT:
+                    # Already refused once; go quiet until real inbound
+                    # resets the counter, otherwise the refusal itself
+                    # sustains the loop it exists to stop.
+                    log.warning(
+                        "boards loop guard: dropping %d request(s) on chat %s",
+                        len(requests) + len(errors), chat_key,
+                    )
+                    return
+                refusal = {
+                    "error": "loop_guard",
+                    "message": (
+                        f"more than {BOARDS_LOOP_GUARD_LIMIT} consecutive "
+                        "board result turns without a user message. No call "
+                        "was executed. Reply to the user; board calls resume "
+                        "on the next real inbound message."
+                    ),
+                }
+                results = [
+                    BoardsCallResult(
+                        req_id=r.req_id, op=r.op, ok=False, status=0,
+                        body=refusal,
+                    )
+                    for r in requests
+                ]
+                self._boards_consecutive_results[chat_key] = count + 1
+                await self._dispatch_boards_result_turn(
+                    chat_key, build_result_turn(results or [
+                        BoardsCallResult(
+                            req_id="loop", op="parse", ok=False, status=0,
+                            body=refusal,
+                        )
+                    ]),
+                )
+                return
+
+            results: list[BoardsCallResult] = []
+            for err in errors:
+                results.append(
+                    BoardsCallResult(
+                        req_id=err.req_id,
+                        op="parse",
+                        ok=False,
+                        status=0,
+                        body={
+                            "error": "malformed_request",
+                            "message": err.message,
+                        },
+                    )
+                )
+            if requests:
+                assistant_id = await self._assistant_id_for_chat(chat_key)
+                for req in requests:
+                    if assistant_id is None:
+                        results.append(
+                            BoardsCallResult(
+                                req_id=req.req_id, op=req.op, ok=False,
+                                status=0,
+                                body={
+                                    "error": "no_assistant",
+                                    "message": (
+                                        "could not resolve the assistant "
+                                        "for this chat; the call was not "
+                                        "executed"
+                                    ),
+                                },
+                            )
+                        )
+                        continue
+                    results.append(
+                        await self._execute_boards_request(
+                            int(assistant_id), req,
+                        )
+                    )
+            if not results:
+                return
+            self._boards_consecutive_results[chat_key] = count + 1
+            await self._dispatch_boards_result_turn(
+                chat_key, build_result_turn(results),
+            )
+        except Exception:  # noqa: BLE001 - background task, never propagate
+            log.warning(
+                "boards request execution failed on chat %s", chat_key,
+                exc_info=True,
+            )
+
+    async def _execute_boards_request(
+        self, assistant_id: int, req: BoardsRequest,
+    ) -> BoardsCallResult:
+        """One call, one result. BgosApiError keeps status + body verbatim;
+        anything else becomes a transport_error section."""
+        try:
+            plan = plan_request(req)
+            if plan.kind == "attach":
+                body = await self._boards_attach(assistant_id, req)
+            else:
+                body = await self._api.boards_call(
+                    assistant_id=assistant_id,
+                    method=plan.method,
+                    path=plan.path,
+                    json=plan.json,
+                    params=plan.params,
+                )
+            return BoardsCallResult(
+                req_id=req.req_id, op=req.op, ok=True, status=200, body=body,
+            )
+        except BgosApiError as exc:
+            return BoardsCallResult(
+                req_id=req.req_id, op=req.op, ok=False, status=exc.status,
+                body=exc.body,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface, never raise
+            log.warning(
+                "boards %s failed on assistant %s", req.op, assistant_id,
+                exc_info=True,
+            )
+            return BoardsCallResult(
+                req_id=req.req_id, op=req.op, ok=False, status=0,
+                body={
+                    "error": "transport_error",
+                    "message": exc.__class__.__name__,
+                },
+            )
+
+    async def _boards_attach(self, assistant_id: int, req: BoardsRequest) -> Any:
+        """Execute an attach op: read the local file, then either the inline
+        content_base64 one-shot (at or under S3_THRESHOLD) or the presigned
+        flow (create meta, PUT bytes, complete). 25 MB document cap, same
+        ceiling discipline as outbound media."""
+        args = req.args
+        path = Path(str(args["path"]))
+        board = str(args["board"])
+        row = str(args["row"])
+        if not path.is_file():
+            raise BgosApiError(
+                0, "file_not_found",
+                {"error": "file_not_found",
+                 "message": f"no readable file at {path}"},
+            )
+        size = path.stat().st_size
+        if size > 25 * 1024 * 1024:
+            raise BgosApiError(
+                0, "file_too_large",
+                {"error": "file_too_large",
+                 "message": "attachments are capped at 25 MB"},
+            )
+        data = path.read_bytes()
+        name = str(args.get("name") or path.name)
+        mime = str(args.get("mime") or _guess_media_mime(name))
+        from urllib.parse import quote as _quote
+        attach_path = (
+            f"/{_quote(board, safe='')}/rows/{_quote(row, safe='')}/attachments"
+        )
+        body: dict[str, Any] = {"name": name, "size": size, "mime": mime}
+        if args.get("fieldKey"):
+            body["field_key"] = args["fieldKey"]
+        if size <= S3_THRESHOLD:
+            body["content_base64"] = base64.b64encode(data).decode("ascii")
+            return await self._api.boards_call(
+                assistant_id=assistant_id, method="POST", path=attach_path,
+                json=body,
+            )
+        meta = await self._api.boards_call(
+            assistant_id=assistant_id, method="POST", path=attach_path,
+            json=body,
+        )
+        upload_url = meta.get("uploadUrl") if isinstance(meta, dict) else None
+        attachment_id = (
+            meta.get("attachmentId") if isinstance(meta, dict) else None
+        )
+        if not upload_url or not attachment_id:
+            raise BgosApiError(
+                0, "bad_attach_response",
+                {"error": "bad_attach_response",
+                 "message": "backend returned no presigned upload target"},
+            )
+        await self._api.put_bytes(upload_url, data, mime)
+        complete = await self._api.boards_call(
+            assistant_id=assistant_id,
+            method="POST",
+            path=f"/{_quote(board, safe='')}/attachments/{attachment_id}/complete",
+            json={},
+        )
+        # Parity with the inline path, whose answer carries the attachmentId:
+        # the agent needs the id to mint a download URL later.
+        if isinstance(complete, dict) and "attachmentId" not in complete:
+            complete = {**complete, "attachmentId": attachment_id}
+        return complete
+
+    async def _dispatch_boards_result_turn(self, chat_key: int, text: str) -> None:
+        """Deliver the boards result back into the agent's session as ONE
+        synthetic internal turn, the mechanism `_dispatch_voice_turn` uses:
+        same session key (`bgos:<chat_id>`), `message_id=None` so no reply
+        anchor is invented. On the mock/fallback path provenance rides in
+        the text itself (the fixed `[BGOS boards result]` header + preamble)
+        since this repo's MessageEvent carries no sender_type field. One
+        deliberate difference from the voice lane: `internal=True` is set
+        UNCONDITIONALLY (voice sets it only when the pairing owner is
+        unknown), because a boards result is adapter-authored by definition
+        and must never be treated as platform user input."""
+        user_id = self.pairing_user_id or None
+        if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
+            try:
+                source = self.build_source(  # type: ignore[attr-defined]
+                    chat_id=str(chat_key), user_id=user_id,
+                )
+            except AttributeError:
+                source = None
+            if source is not None:
+                gateway_event = _GatewayMessageEvent(
+                    text=text,
+                    message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
+                    source=source,
+                    message_id=None,
+                    raw_message=None,
+                    internal=True,
+                )
+                await self.handle_message(gateway_event)
+                return
+        event = MessageEvent(
+            platform="bgos",
+            chat_id=chat_key,
+            message_id=0,
+            user_id=user_id or "",
+            assistant_id=self._state.assistant_id_by_chat.get(chat_key, 0),
+            agent_route="",
+            text=text,
+            files=[],
+            message_type="standard",
+            command_name=None,
+            command_args=None,
+        )
+        await self.handle_message(event)
+
     async def send(
         self,
         chat_id: int | str,
@@ -2258,6 +2539,24 @@ class BGOSAdapter(BasePlatformAdapter):
         formatted, call_reason = _parse_call_block(formatted)
         if call_reason is not None:
             await self._ring_owner(chat_key, call_reason)
+        # Agent Boards intercept ([[BGOS_BOARDS]] JSON blocks). Runs BEFORE
+        # the status/buttons/media parsing so JSON payload characters are
+        # never misread as option pipes, and so a boards-only reply still
+        # executes with no visible bubble. The blocks are stripped here;
+        # execution and the synthetic result turn happen in a background
+        # task so the gateway's send path is never blocked on REST round
+        # trips.
+        formatted, boards_requests, boards_errors = parse_boards_blocks(formatted)
+        if boards_requests or boards_errors:
+            boards_task = asyncio.create_task(
+                self._run_boards_requests(
+                    chat_key, boards_requests, boards_errors,
+                )
+            )
+            self._boards_tasks.add(boards_task)
+            boards_task.add_done_callback(self._boards_tasks.discard)
+            if not formatted:
+                return SendResult(success=True)  # type: ignore[call-arg]
         formatted, status_text = _parse_status_line(formatted)
         cleaned_text, options, render_mode = _parse_buttons_block(formatted)
         # Agent-emitted `MEDIA:/abs/path` lines → real BGOS attachments. The
@@ -4169,6 +4468,12 @@ class BGOSAdapter(BasePlatformAdapter):
         # verbatim rather than re-read by field name downstream.
         inbound_chat_id = self._int_or_none(data.get("chat_id"))
         if inbound_chat_id is not None:
+            # A real inbound message re-arms the boards loop guard: chained
+            # board calls are allowed again once the human (or a peer) has
+            # spoken. Synthetic board result turns never pass through here,
+            # they go straight to handle_message, so this reset only fires
+            # on genuine inbound.
+            self._boards_consecutive_results.pop(inbound_chat_id, None)
             session_handle = data.get("sessionHandle") or data.get("session_handle")
             self._state.record_inbound_chat(
                 inbound_chat_id,
@@ -4881,6 +5186,12 @@ class BGOSAdapter(BasePlatformAdapter):
         button_text = data.get("buttonText") or ""
         callback_data = data.get("callbackData") or ""
         custom_text = data.get("customText")
+
+        # A button tap is real user activity: it re-arms the boards loop
+        # guard exactly like a typed message (review finding, 2026-08-03).
+        click_chat_key = self._int_or_none(chat_id)
+        if click_chat_key is not None:
+            self._boards_consecutive_results.pop(click_chat_key, None)
 
         # Approval/slash-confirm taps may arrive as `inbound_click` instead of
         # `callback_result` on some BGOS deployments. Route those through the

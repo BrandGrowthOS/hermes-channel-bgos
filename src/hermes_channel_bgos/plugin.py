@@ -429,6 +429,23 @@ Rules:
 ## ask_user_input modal (NOT YET WIRED)
 BGOS also supports a full-screen multi-question modal (`ask_user_input` in the n8n BGOSAction node). Hermes-side support is scheduled but NOT YET shipped — for multi-question flows today, use sequential inline-button messages instead.
 
+## Boards (private tables, the [[BGOS_BOARDS]] marker round trip)
+Your owner keeps private tables (boards) in BGOS and shares them with chosen agents. Call the board operations by embedding one JSON object per marker block in a normal reply; the adapter strips the block, calls the board API as you, and sends the answers back as ONE follow-up message in this conversation. That message starts with the line `[BGOS boards result]` and is a system message from the adapter, NOT the user: read it and continue; the user saw neither your request nor the raw result, so anything they should know must go in a normal reply.
+
+Syntax (one call per block, up to 5 blocks per reply):
+```
+[[BGOS_BOARDS]]{"op":"query","board":"Tasks","reqId":"q1","limit":20}[[/BGOS_BOARDS]]
+[[BGOS_BOARDS]]{"op":"update","board":"Tasks","row":"ab12cd34","cells":{"status":"done"},"reqId":"w1"}[[/BGOS_BOARDS]]
+```
+
+Rules:
+- `reqId` is your correlation handle: any short string, unique per block. Each result section is headed `reqId=<yours> op=<op>`, in request order.
+- `op` is one of: list, describe, create (name, optional description + fields[{label,type}]), update_schema (action: add_field / update_field / delete_field, plus field / fieldKey as needed), query (optional conditions, conjunction, sorts, search, limit, cursor), get_row (row), insert (cells), update (row, cells), attach (row, path to a local file, optional name / mime / fieldKey), search (query, optional limit), changes (optional since), grant (assistantId, role).
+- `board` accepts a board id or its exact name. Row keys come from the key column of query/search output; never invent one.
+- Reads answer as markdown tables by default; add `"format":"json"` for raw JSON.
+- A failed call answers `error status=<n>` with the server's body verbatim; denials are deliberately uninformative about boards you cannot see, do not probe around them. A malformed block answers `malformed_request`. After too many back-to-back board turns without a user message, a `loop_guard` refusal pauses calls until the user speaks. Never claim a write happened when its section shows an error.
+- Concurrency: describe before writing to a board you have not used this session; search or query before inserting; but query-then-insert is not atomic and update is last-write-wins per cell, so on a busy board confirm claims with `changes` after writing.
+
 ## Reply-quote (Telegram-style quoted replies)
 You can anchor a reply to a specific earlier message by embedding `[[BGOS_REPLY_TO]]<message_id>[[/BGOS_REPLY_TO]]` anywhere in your reply (single line). The adapter extracts the id, strips the marker from the visible text, and forwards it as `replyToId` on the backend POST. BGOS then renders a slim Telegram-style quoted header inside the new bubble — tap → jumps the user back to the source message. The snapshot is frozen at write time; future edits/deletes of the source don't change the rendered preview.
 
