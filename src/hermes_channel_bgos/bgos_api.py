@@ -870,6 +870,54 @@ class BgosApi:
         )
 
     # -------------------------------------------------------------------------
+    # Agent Boards (the [[BGOS_BOARDS]] round trip's REST lane)
+    # -------------------------------------------------------------------------
+
+    async def boards_call(
+        self,
+        *,
+        assistant_id: int,
+        method: str,
+        path: str,
+        json: Any = None,
+        params: Any = None,
+    ) -> Any:
+        """One call on the agent-family boards routes.
+
+        `path` is RELATIVE to the boards root ("" for the collection, or
+        "/<board>/rows/query" and friends); this method owns the prefix
+        `/api/v1/integrations/assistants/{assistant_id}/boards` so the marker
+        layer's RestPlan never re-derives it. Pairing auth like every other
+        integration route; the PairingScopedAssistant guard on the backend
+        proves the assistant belongs to this pairing.
+
+        Raises BgosApiError on any 4xx/5xx with `.status` and `.body` intact:
+        the boards denial bodies ({error, message}) are a leak-proof contract
+        the adapter passes to the agent VERBATIM, so nothing here may unwrap,
+        reword, or enrich them.
+        """
+        return await self._request(
+            method,
+            f"/api/v1/integrations/assistants/{assistant_id}/boards{path}",
+            json=json,
+            params=params,
+        )
+
+    async def put_bytes(self, url: str, data: bytes, content_type: str) -> None:
+        """PUT raw bytes to an absolute (presigned S3) URL. No BGOS auth
+        headers: the signature in the URL is the credential. Used by the
+        boards attach flow for files above the inline threshold. Raises
+        BgosApiError on a non-2xx answer."""
+        async with httpx.AsyncClient(
+            timeout=self._config.request_timeout_seconds,
+        ) as client:
+            resp = await client.put(
+                url, content=data, headers={"Content-Type": content_type},
+            )
+        if resp.status_code >= 400:
+            raise BgosApiError(resp.status_code, None, resp.text)
+
+    # -------------------------------------------------------------------------
     # Files
     # -------------------------------------------------------------------------
 

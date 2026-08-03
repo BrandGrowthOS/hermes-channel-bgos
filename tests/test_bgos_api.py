@@ -575,3 +575,52 @@ async def test_send_peer_surfaces_requires_introduction_without_auto_intro(mock_
     assert resp["status"] == "requires_introduction"
     assert all("introductions" not in req.path for req in mock_bgos_server.requests)
     await api.close()
+
+
+# ---------------------------------------------------------------------------
+# Agent Boards (the [[BGOS_BOARDS]] round trip's REST lane)
+# ---------------------------------------------------------------------------
+
+
+async def test_boards_call_hits_the_agent_family_route(mock_bgos_server):
+    """boards_call prefixes the agent-family boards root and returns the
+    backend body unchanged (markdown answers included)."""
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    path = "/api/v1/integrations/assistants/944/boards/Tasks/rows/query"
+    mock_bgos_server.on("POST", path).respond(200, {"markdown": "| key | Title |"})
+
+    resp = await api.boards_call(
+        assistant_id=944,
+        method="POST",
+        path="/Tasks/rows/query",
+        json={"limit": 5},
+        params={"format": "markdown"},
+    )
+
+    assert resp == {"markdown": "| key | Title |"}
+    req = mock_bgos_server.last_request("POST", path)
+    assert req.headers["X-BGOS-Pairing"] == "pair_xyz"
+    assert req.json_body == {"limit": 5}
+    await api.close()
+
+
+async def test_boards_call_denial_body_is_preserved_verbatim(mock_bgos_server):
+    """A boards denial is a leak-proof {error, message} contract; the raised
+    BgosApiError must carry the exact status and the exact body so the
+    adapter can pass it to the agent unreworded."""
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    denial = {
+        "error": "not_found_board",
+        "message": "No board by that name is visible to you.",
+    }
+    path = "/api/v1/integrations/assistants/944/boards/Secret/describe"
+    mock_bgos_server.on("GET", path).respond(404, denial)
+
+    with pytest.raises(BgosApiError) as exc_info:
+        await api.boards_call(
+            assistant_id=944, method="GET", path="/Secret/describe",
+        )
+
+    assert exc_info.value.status == 404
+    assert exc_info.value.body == denial
+    await api.close()
