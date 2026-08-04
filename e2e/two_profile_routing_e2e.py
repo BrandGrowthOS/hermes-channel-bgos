@@ -44,14 +44,12 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DAEMON = REPO_ROOT / "e2e" / "daemon_stub.py"
-
-PROD_MARKERS = ("brandgrowthos.ai", "homeofagents.ai")
-
 
 def _req(method: str, url: str, api_key: str | None = None, body: dict | None = None):
     data = json.dumps(body).encode() if body is not None else None
@@ -216,12 +214,12 @@ def main() -> None:
     ap.add_argument("--workdir", default=None)
     args = ap.parse_args()
 
-    for marker in PROD_MARKERS:
-        if marker in args.base_url:
-            raise SystemExit(
-                f"refusing to run against {args.base_url}: this script is "
-                "local-stack only"
-            )
+    host = urllib.parse.urlsplit(args.base_url).hostname or ""
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        raise SystemExit(
+            f"refusing to run against {args.base_url!r}: this script is "
+            "local-stack only (allowed hosts: 127.0.0.1, localhost, ::1)"
+        )
 
     be = Backend(args.base_url, args.api_key, args.user_id)
     work = Path(args.workdir or (REPO_ROOT / "e2e" / ".work")).resolve()

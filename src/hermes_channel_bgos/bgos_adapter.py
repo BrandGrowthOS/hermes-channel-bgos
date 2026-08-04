@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import itertools
+from collections import OrderedDict
 import json
 import logging
 import mimetypes
@@ -57,6 +58,7 @@ from .config import BgosConfig, choose_pairing_token, redact_token
 from .doctor import run_checks
 from .missions_bridge import MissionLane, classify_goal_line
 from .quiet_mode import (
+    CHAT_STYLE_FILENAME,
     EVERYTHING,
     TIDY,
     ChatStyleStore,
@@ -275,6 +277,9 @@ _DOCTOR_RPC_TIMEOUT_SECONDS = 45.0
 # allowlist; the live gateway path (_build_media_attachments / _fetch_media
 # _source) previously did not. A denylist (not a strict allowlist) is used here
 # so legitimate agent media written anywhere non-sensitive still sends.
+# Bounded memory for the duplicate-delivery guard in _handle_inbound.
+_DISPATCHED_IDS_CAP = 1024
+
 _SENSITIVE_MEDIA_SYSTEM_PREFIXES: tuple[str, ...] = (
     "/etc",
     "/proc",
@@ -286,7 +291,7 @@ _SENSITIVE_MEDIA_SYSTEM_PREFIXES: tuple[str, ...] = (
 )
 
 
-def _sensitive_media_roots() -> list[Path]:
+def _sensitive_media_roots(extra_home: "Path | None" = None) -> list[Path]:
     home = Path.home()
     roots = [Path(p) for p in _SENSITIVE_MEDIA_SYSTEM_PREFIXES]
     roots += [
@@ -297,8 +302,10 @@ def _sensitive_media_roots() -> list[Path]:
         home / ".kube",
     ]
     # The pairing-token store is the single most sensitive file on the host.
-    # Guard BOTH the process-level home and the (possibly profile-scoped)
-    # resolved home - either may hold a secrets dir.
+    # Guard the process-level home, the (possibly profile-scoped) resolved
+    # home, AND the adapter's captured home when supplied - a callback
+    # running outside the profile scope must still deny the owning
+    # profile's secrets dir.
     hermes_home = Path(
         os.environ.get("HERMES_HOME", home / ".hermes")
     ).expanduser()
@@ -306,10 +313,16 @@ def _sensitive_media_roots() -> list[Path]:
     profile_home = resolve_hermes_home().expanduser()
     if profile_home != hermes_home:
         roots.append(profile_home / "secrets")
+    if extra_home is not None:
+        captured = extra_home.expanduser()
+        if captured not in (hermes_home, profile_home):
+            roots.append(captured / "secrets")
     return roots
 
 
-def _media_path_is_sensitive(raw_path: str) -> bool:
+def _media_path_is_sensitive(
+    raw_path: str, extra_home: "Path | None" = None,
+) -> bool:
     """True when a resolved local media path lands in a secret-bearing or system
     location an agent must never exfiltrate via a MEDIA: marker. Resolves
     symlinks first (so a symlink into ~/.ssh is caught) and fails safe: an
@@ -318,7 +331,7 @@ def _media_path_is_sensitive(raw_path: str) -> bool:
         resolved = Path(os.path.expanduser(raw_path)).resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return True
-    for root in _sensitive_media_roots():
+    for root in _sensitive_media_roots(extra_home):
         try:
             root_resolved = root.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
@@ -1051,17 +1064,32 @@ class BGOSAdapter(BasePlatformAdapter):
         # outside that scope, so path lookups must use this captured value,
         # never re-read the environment.
         self._hermes_home: Path = resolve_hermes_home()
+        # Message ids this adapter already dispatched (bounded FIFO).
+        # Guards against the WS push and the REST poll both delivering
+        # the same message when a poll request is in flight as it
+        # arrives - without this the agent answers twice.
+        self._dispatched_inbound_ids: OrderedDict[int, None] = OrderedDict()
         self._stt_setup = SttSetupNotifier(
             self._post_stt_setup_event,
             self._edit_stt_setup_event,
         )
         self._stt_setup_tasks: set[asyncio.Task] = set()
+        # Bind the mission-binding and chat-style stores to the captured
+        # profile home too: their default lazy resolution follows the
+        # context-local scope, which callbacks entered from OUTSIDE the
+        # profile scope would resolve to the process env home, silently
+        # crossing these files between profiles.
         self._mission_lane = MissionLane(
             self._api,
             assistant_id_resolver=self._style_assistant_id_for_chat,
             session_id_resolver=self._mission_session_id_for_chat,
+            binding_store_path=(
+                self._hermes_home.expanduser() / MissionLane._STORE_FILENAME
+            ),
         )
-        self._chat_style_store = ChatStyleStore()
+        self._chat_style_store = ChatStyleStore(
+            self._hermes_home.expanduser() / CHAT_STYLE_FILENAME,
+        )
         self._consumed_peer_wait_replies_mtime_ns: int | None = None
         self._load_consumed_peer_wait_replies()
         self._ws: BgosWs | None = None
@@ -1268,6 +1296,17 @@ class BGOSAdapter(BasePlatformAdapter):
         aid = self._style_assistant_id_for_chat(chat_key)
         return self._state.get_route(aid) if aid is not None else None
 
+    def _is_multi_route(self) -> bool:
+        """True when this pairing exposes more than one distinct route.
+
+        Gates the missing-profile warning: on a single-agent pairing a
+        non-default route served by the active profile is correct and must
+        not be warned about; with two or more routes a missing profile is
+        the wrong-persona misconfiguration and must be loud."""
+        return len({
+            (r or "").strip() for r in self._state.assistant_route.values()
+        }) > 1
+
     def _stamp_source_profile(self, source: Any, route: str | None) -> None:
         """Stamp the Hermes profile serving `route` onto a gateway
         SessionSource, in place.
@@ -1279,15 +1318,19 @@ class BGOSAdapter(BasePlatformAdapter):
         pairing answered as the gateway's active profile (message to Shadow,
         answered by Achilles - 2026-08-04).
 
-        Never overrides an existing stamp: an operator's `profile_routes`
-        match or a secondary adapter's per-profile ownership wins. No-op when
-        the route is `default`, has no matching Hermes profile (warned once
-        in `profile_for_route`), or the source cannot carry the attribute
-        (mock/test doubles).
+        Never overrides an existing stamp, so an operator's `profile_routes`
+        match (applied inside build_source) wins. The multiplex secondary
+        handler's ownership stamp runs LATER and itself only fills an empty
+        field, so a route stamp takes precedence over adapter ownership by
+        design: the route identifies the addressed agent more specifically
+        than the credential's owning profile. No-op when the route is
+        `default`, has no matching Hermes profile (warned once per route in
+        `profile_for_route`, and only for multi-route pairings), or the
+        source cannot carry the attribute (mock/test doubles).
         """
         if source is None:
             return
-        profile = profile_for_route(route)
+        profile = profile_for_route(route, warn_missing=self._is_multi_route())
         if not profile:
             return
         try:
@@ -3766,7 +3809,7 @@ class BGOSAdapter(BasePlatformAdapter):
         attachments: list[dict] = []
         for raw_path in paths:
             try:
-                if _media_path_is_sensitive(raw_path):
+                if _media_path_is_sensitive(raw_path, self._hermes_home):
                     log.warning(
                         "MEDIA: refusing to send from a sensitive location, "
                         "skipping: %r",
@@ -3888,7 +3931,7 @@ class BGOSAdapter(BasePlatformAdapter):
             else:
                 parsed = urlparse(src)
                 local_src = unquote(parsed.path if parsed.scheme == "file" else src)
-                if _media_path_is_sensitive(local_src):
+                if _media_path_is_sensitive(local_src, self._hermes_home):
                     log.warning(
                         "media source in a sensitive location, refusing: %r", src
                     )
@@ -4491,11 +4534,20 @@ class BGOSAdapter(BasePlatformAdapter):
     # WS event hooks — placeholders filled in by later tasks
     # -------------------------------------------------------------------------
 
-    async def _handle_inbound(self, data: dict, *, batchable: bool = True) -> None:
+    async def _handle_inbound(
+        self, data: dict, *, batchable: bool = True, dedup: bool = True,
+    ) -> None:
         """Translate a WS inbound_message payload into a Hermes MessageEvent
         and hand it to `self.handle_message`. Drops events for unknown
         assistants (e.g. a race where a pairing was just revoked but the WS
         hasn't caught up).
+
+        `dedup=True` drops a message id this adapter already dispatched: the
+        WS push and the REST poll race when a poll request is in flight as a
+        message arrives, and both then deliver the SAME message (observed
+        live: two identical agent replies 0.2s apart). The /retry bridge
+        local passes `dedup=False` because its replay legitimately re-enters
+        with the triggering slash command's message id.
 
         Accepts both snake_case (REST `/api/v1/integrations/inbound`) and
         camelCase (WS `inbound_message`) key shapes — the BGOS backend
@@ -4546,6 +4598,16 @@ class BGOSAdapter(BasePlatformAdapter):
         # re-dispatching them — producing the live-server "50 conversation
         # reset acks in a row" loop caught 2026-05-15.
         msg_id = data.get("message_id")
+        if dedup and isinstance(msg_id, int):
+            if msg_id in self._dispatched_inbound_ids:
+                log.info(
+                    "dropping duplicate delivery of message_id=%d "
+                    "(ws/poll race)", msg_id,
+                )
+                return
+            self._dispatched_inbound_ids[msg_id] = None
+            while len(self._dispatched_inbound_ids) > _DISPATCHED_IDS_CAP:
+                self._dispatched_inbound_ids.popitem(last=False)
         if isinstance(msg_id, int):
             self._save_last_id(msg_id)
 
@@ -4936,7 +4998,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 "command_name": None,
                 "command_args": None,
             }
-            await self._handle_inbound(replay, batchable=False)
+            await self._handle_inbound(
+                replay, batchable=False, dedup=False,
+            )
         elif command == "status":
             assistants_bound = len(self._state.assistant_route)
             last_message_id = self._ws.last_message_id if self._ws else 0

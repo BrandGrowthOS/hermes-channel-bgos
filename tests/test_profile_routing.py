@@ -43,6 +43,15 @@ from tests.mocks.mock_hermes import (
 
 
 
+@pytest.fixture(autouse=True)
+def _reset_warned_routes():
+    """The warn-once memory is process-global; isolate it per test so
+    assertions on warning emission are order-independent."""
+    hermes_profiles.reset_warned_routes()
+    yield
+    hermes_profiles.reset_warned_routes()
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -139,7 +148,6 @@ def test_route_without_matching_profile_maps_to_none(monkeypatch, caplog) -> Non
 
 def test_missing_profile_warns_once_per_route(monkeypatch, caplog) -> None:
     _patch_profiles(monkeypatch, set())
-    hermes_profiles.reset_warned_routes()
     with caplog.at_level("WARNING"):
         profile_for_route("ghost")
         profile_for_route("ghost")
@@ -393,17 +401,38 @@ async def test_voice_turn_stamps_addressed_assistants_profile(monkeypatch) -> No
 # multi_route_warnings - operator-facing misconfiguration report
 # ---------------------------------------------------------------------------
 
-def test_no_warnings_for_single_default_route(monkeypatch) -> None:
+def test_no_warnings_for_single_default_route() -> None:
     _, exists = _fake_helpers({"shadow"})
     assert multi_route_warnings(
         {974: "default"}, multiplex_on=True, profile_exists=exists,
     ) == []
 
 
+def test_no_warnings_for_single_agent_on_a_named_route() -> None:
+    """A one-agent pairing on a non-default route served by the active
+    profile is a correct, common topology (e.g. hades:Hades) - it must not
+    be warned about, or the real two-agent warning loses credibility."""
+    _, exists = _fake_helpers(set())
+    assert multi_route_warnings(
+        {7: "hades"}, multiplex_on=False, profile_exists=exists,
+    ) == []
+
+
+def test_profile_for_route_can_suppress_the_missing_warning(
+    monkeypatch, caplog,
+) -> None:
+    _patch_profiles(monkeypatch, set())
+    with caplog.at_level("WARNING"):
+        assert profile_for_route("hades", warn_missing=False) is None
+    assert not [r for r in caplog.records if "hades" in r.message]
+
+
 def test_warns_when_route_has_no_profile() -> None:
     _, exists = _fake_helpers(set())
     warnings = multi_route_warnings(
-        {1005: "shadow"}, multiplex_on=True, profile_exists=exists,
+        {974: "default", 1005: "shadow"},
+        multiplex_on=True,
+        profile_exists=exists,
     )
     assert len(warnings) == 1
     assert "shadow" in warnings[0]
@@ -428,3 +457,90 @@ def test_unknown_multiplex_state_skips_the_multiplex_warning() -> None:
         profile_exists=exists,
     )
     assert warnings == []
+
+
+def test_unknown_multiplex_state_still_reports_missing_profiles() -> None:
+    """The profile-existence check does not depend on gateway config, so it
+    must not be silenced when the adapter cannot see multiplex state."""
+    _, exists = _fake_helpers(set())
+    warnings = multi_route_warnings(
+        {974: "default", 1005: "shadow"},
+        multiplex_on=None,
+        profile_exists=exists,
+    )
+    assert len(warnings) == 1
+    assert "shadow" in warnings[0]
+    assert "multiplex_profiles" not in warnings[0]
+
+
+def test_stores_bind_to_the_captured_profile_home(monkeypatch, tmp_path) -> None:
+    """Chat-style and mission-binding stores must follow the adapter's own
+    profile home, not whatever scope a later callback happens to run in."""
+    profile_home = tmp_path / "profiles" / "shadow"
+    profile_home.mkdir(parents=True)
+    fake = types.ModuleType("hermes_constants")
+    fake.get_hermes_home = lambda: profile_home
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake)
+
+    adapter = _make_adapter()
+
+    monkeypatch.delitem(sys.modules, "hermes_constants")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "root"))
+
+    assert adapter._chat_style_store._path_for_call() == (
+        profile_home / "bgos_chat_style.json"
+    )
+    assert adapter._mission_lane._store_path() == (
+        profile_home / "bgos_mission_bindings.json"
+    )
+
+
+# ---------------------------------------------------------------------------
+# duplicate-delivery guard (ws/poll race)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_same_message_id_is_dispatched_exactly_once(monkeypatch) -> None:
+    """The WS push and the REST poll can deliver the SAME message when a
+    poll request is already in flight as the message arrives (seen live in
+    the two-profile e2e: two identical replies 0.2s apart from one daemon).
+    The second delivery of an already-dispatched message id must be dropped.
+    """
+    _patch_profiles(monkeypatch, {"shadow"})
+    adapter = _make_gateway_adapter(monkeypatch)
+    adapter._state.set_route(1005, "shadow")
+    received = _capture(adapter)
+
+    payload = _inbound(1005, 3038, 700, "Still you after restart?")
+    await adapter._handle_inbound(dict(payload), batchable=False)
+    await adapter._handle_inbound(dict(payload), batchable=False)
+
+    assert len(received) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_replay_is_not_swallowed_by_the_dedup_guard(
+    monkeypatch,
+) -> None:
+    """/retry recurses into _handle_inbound carrying the SAME message id as
+    the slash command that triggered it - the dedup guard must not eat it."""
+    _patch_profiles(monkeypatch, {"shadow"})
+    adapter = _make_gateway_adapter(monkeypatch)
+    adapter._state.set_route(1005, "shadow")
+    adapter._state.last_user_text_by_chat[3038] = "the original text"
+    received = _capture(adapter)
+
+    slash = {
+        "chat_id": 3038,
+        "message_id": 701,
+        "text": "/retry",
+        "user_id": "user_1",
+        "assistant_id": 1005,
+        "message_type": "slash_command",
+        "command_name": "retry",
+        "command_args": None,
+    }
+    await adapter._handle_inbound(dict(slash), batchable=False)
+
+    assert len(received) == 1
+    assert "the original text" in received[0].text

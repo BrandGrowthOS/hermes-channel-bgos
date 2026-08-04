@@ -196,6 +196,11 @@ async def test_reconnect_triggers_backfill(mock_bgos_server, monkeypatch):
         # so we're only asserting against the explicit reconnect call.
         await asyncio.sleep(0.15)
         handled.clear()
+        # The mock /inbound route re-serves the SAME canned ids for every
+        # fetch, which a real since-cursor backend never does. Reset the
+        # duplicate-delivery guard along with the handled list so this
+        # test stays about the backfill mechanism, not the dedup.
+        adapter._dispatched_inbound_ids.clear()
 
         # Simulate reconnect: fire the _on_reconnect hook directly (in
         # production the WS client invokes it after a successful re-handshake)

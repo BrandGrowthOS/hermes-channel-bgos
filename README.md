@@ -364,6 +364,38 @@ BGOS_ALLOW_ALL_USERS=true
 
 ---
 
+## Multiple agents on one machine (routes and Hermes profiles)
+
+Two or more BGOS agents on one host each need their own persona, memory,
+skills, and credentials. The adapter maps each assistant's `agent_route` to
+the **Hermes profile of the same name** and stamps it on the inbound turn,
+so Hermes serves that turn from `~/.hermes/profiles/<route>/`. For this to
+work, three things must line up:
+
+1. **A Hermes profile per non-default route.** Route `shadow` is served by
+   profile `shadow` (`hermes profile create shadow`, then give it its own
+   `SOUL.md`/config). The `default` route is served by the gateway's active
+   profile. A non-default route with NO matching profile falls back to the
+   active profile, and on a multi-route pairing the adapter logs a
+   `wrong persona` warning for it at connect and on dispatch.
+2. **Multiplexing on.** One gateway can only serve several profiles when
+   `gateway.multiplex_profiles` is `true`
+   (`hermes config set gateway.multiplex_profiles true`, then restart).
+   With it off, Hermes runs every turn in the active profile regardless of
+   the stamp, and the adapter warns at connect.
+3. **One catalog listing every route**, e.g.
+   `BGOS_AGENTS=default:Achilles,shadow:Shadow`, and both agents ticked on
+   the SAME pairing in BGOS Integrations.
+
+Alternative topology: run one gateway process per profile
+(`hermes -p shadow gateway run`), each paired separately. `-p` sets
+`HERMES_HOME` to the profile dir for the whole process, so each daemon has
+its own `secrets/bgos.json`, cursor, and persona with no multiplexing
+involved. Do NOT point two processes at the same `HERMES_HOME`: they would
+share one pairing token and every message would be answered twice.
+
+---
+
 ## First-time pairing
 
 1. In BGOS → **Integrations** → ⚡ **Hermes card** → **"Connect a new Hermes server"**. Copy the generated code. `BGOS-XXXX-XX` throughout this README is a **placeholder** — your real code looks like `BGOS-7F3A-2K`. It **expires in 10 minutes**; generate a fresh one if it lapses.

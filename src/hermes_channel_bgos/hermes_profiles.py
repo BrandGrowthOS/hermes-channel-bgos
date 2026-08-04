@@ -90,14 +90,20 @@ def _load_profile_helpers() -> tuple[Callable[[str], str], Callable[[str], bool]
     return normalize_profile_name, profile_exists
 
 
-def profile_for_route(route: str | None) -> str | None:
+def profile_for_route(route: str | None, *, warn_missing: bool = True) -> str | None:
     """Map a BGOS agent_route to the Hermes profile that should serve it.
 
     Returns the normalized profile name when a Hermes profile of the same
     name exists, else None (serve from the active profile). The `default`
-    route always returns None. A non-default route with NO matching profile
-    logs a warning once per route - that is the exact misconfiguration that
-    makes an agent answer with the wrong identity, and it must be loud.
+    route always returns None.
+
+    `warn_missing` controls the once-per-route warning for a non-default
+    route with NO matching profile. On a MULTI-route pairing that is the
+    exact misconfiguration that makes an agent answer with the wrong
+    identity and must be loud. On a single-agent pairing a non-default
+    route served by the active profile is the correct, common topology
+    (e.g. `hades:Hades` on a one-agent host), so callers pass
+    `warn_missing=False` there to avoid crying wolf.
     """
     route = (route or "").strip()
     if not route or route == DEFAULT_ROUTE:
@@ -109,7 +115,7 @@ def profile_for_route(route: str | None) -> str | None:
     try:
         name = normalize(route)
     except Exception:
-        if route not in _warned_routes:
+        if warn_missing and route not in _warned_routes:
             _warned_routes.add(route)
             log.warning(
                 "BGOS agent_route %r is not a valid Hermes profile name - "
@@ -119,7 +125,7 @@ def profile_for_route(route: str | None) -> str | None:
         return None
     if exists(name):
         return name
-    if route not in _warned_routes:
+    if warn_missing and route not in _warned_routes:
         _warned_routes.add(route)
         log.warning(
             "BGOS agent_route %r has no matching Hermes profile - this agent "
@@ -141,16 +147,22 @@ def multi_route_warnings(
     `routes` is the assistant_id -> agent_route map built from whoami.
     `multiplex_on` is the gateway's `multiplex_profiles` flag, or None when
     the adapter cannot see the gateway config (then the multiplex check is
-    skipped - never guess). Returns human-readable warning lines; the caller
-    logs them at WARNING.
+    skipped - never guess; the profile-existence check does not depend on
+    gateway config and still runs). Returns human-readable warning lines;
+    the caller logs them at WARNING.
+
+    Everything is gated on the pairing exposing MORE THAN ONE distinct
+    route: a single agent on a non-default route served by the active
+    profile is a correct, common topology and must not be warned about.
     """
     warnings: list[str] = []
-    non_default = sorted(
-        {r for r in routes.values() if (r or "").strip() not in ("", DEFAULT_ROUTE)},
-    )
-    if not non_default:
+    distinct = {
+        (r or "").strip() for r in routes.values() if (r or "").strip()
+    }
+    if len(distinct) < 2:
         return warnings
-    if multiplex_on is None:
+    non_default = sorted(r for r in distinct if r != DEFAULT_ROUTE)
+    if not non_default:
         return warnings
     missing = [r for r in non_default if not profile_exists(r)]
     for route in missing:
@@ -160,7 +172,7 @@ def multi_route_warnings(
             f"(wrong persona). Fix: `hermes profile create {route}` and give "
             f"it its own SOUL.md/config."
         )
-    if not multiplex_on:
+    if multiplex_on is False:
         warnings.append(
             "this pairing exposes agent route(s) "
             + ", ".join(f"'{r}'" for r in non_default)

@@ -23,6 +23,9 @@ _ARGS_LIMIT = 120
 _ERROR_FRIENDLY_LIMIT = 200
 _NAME_LIMIT = 64
 _STYLE_FILENAME = "bgos_chat_style.json"
+# Public alias so the adapter can bind the store to its captured profile
+# home without duplicating the filename literal.
+CHAT_STYLE_FILENAME = _STYLE_FILENAME
 _VALID_STYLES = frozenset({TIDY, EVERYTHING})
 
 _ERROR_PREFIX_RE = re.compile(r"^[❌⚠]\ufe0f*")
