@@ -6,7 +6,6 @@ import importlib
 import inspect
 import json
 import logging
-import os
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from typing import Any, Callable
 import httpx
 
 from .config import BgosConfig
+from .hermes_profiles import resolve_hermes_home
 
 
 log = logging.getLogger(__name__)
@@ -124,10 +124,7 @@ def _load_machinery() -> _Machinery:
 
 
 def _hermes_home() -> Path:
-    configured = os.environ.get("HERMES_HOME")
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / ".hermes"
+    return resolve_hermes_home().expanduser()
 
 
 def _skills_dir() -> Path:

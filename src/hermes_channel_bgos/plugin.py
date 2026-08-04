@@ -31,6 +31,7 @@ from .bgos_adapter import (
 )
 from .bgos_api import BgosApi, BgosApiError
 from .config import BgosConfig, choose_pairing_token, redact_token
+from .hermes_profiles import resolve_hermes_home
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def _path_is_within(path: Path, root: Path) -> bool:
 
 
 def _standalone_media_allowed_roots() -> list[Path]:
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
+    hermes_home = resolve_hermes_home().expanduser()
     roots = [hermes_home / rel for rel in _STANDALONE_MEDIA_CACHE_DIRS]
     extra_roots = os.environ.get(_STANDALONE_MEDIA_ALLOW_DIRS_ENV, "")
     for chunk in extra_roots.split(os.pathsep):
@@ -117,8 +118,10 @@ def _standalone_validate_media_path(raw_path: str) -> Path | None:
 
 
 def _secrets_path() -> Path:
-    root = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-    return root / "secrets" / "bgos.json"
+    # Profile-aware: under Hermes's context-local home override (multiplex
+    # secondaries, profile-scoped cron) this resolves the OWNING profile's
+    # secrets file; outside Hermes it is the HERMES_HOME env var as before.
+    return resolve_hermes_home() / "secrets" / "bgos.json"
 
 
 def resolve_pairing() -> tuple[str | None, str]:

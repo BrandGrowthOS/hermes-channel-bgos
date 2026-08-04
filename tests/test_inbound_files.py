@@ -199,6 +199,11 @@ async def test_rest_backfill_surfaces_files(mock_bgos_server, monkeypatch):
         # call again so we hit the new endpoint shape with files.
         await asyncio.sleep(0.15)
         handled.clear()
+        # The mock /inbound route re-serves the SAME canned ids for every
+        # fetch, which a real since-cursor backend never does. Reset the
+        # duplicate-delivery guard along with the handled list so this
+        # test stays about the backfill mechanism, not the dedup.
+        adapter._dispatched_inbound_ids.clear()
         await adapter._run_backfill(699)
 
         assert len(handled) == 1
