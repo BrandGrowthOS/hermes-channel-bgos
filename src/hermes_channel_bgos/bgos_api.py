@@ -247,6 +247,19 @@ class BgosApi:
         """Introspect the pairing scope: pairing_id + assistants[] + metadata."""
         return await self._request("GET", "/api/v1/integrations/me")
 
+    async def list_pairings(self) -> list[dict]:
+        """All ACTIVE pairings of the user who owns this pairing token.
+
+        Backend: GET /api/v1/integrations/pairings resolves the user from any
+        auth mode including X-BGOS-Pairing (clerk-auth.guard sets
+        resolvedUserId from the pairing row), and each entry carries
+        `agent_catalog`. Used by the install-time topology guard to detect a
+        re-pair leftover: a second active pairing serving the same agent
+        routes answers everything twice.
+        """
+        resp = await self._request("GET", "/api/v1/integrations/pairings")
+        return resp if isinstance(resp, list) else []
+
     async def post_heartbeat(
         self,
         *,

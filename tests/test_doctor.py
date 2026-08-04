@@ -374,3 +374,186 @@ def test_check_token_hygiene_secrets_token_without_pair_prefix(monkeypatch):
     assert "not_a_pairing_token_123456" not in r.detail
     assert "unset BGOS_API_KEY" not in r.fix
     assert "hermes-pair-bgos" in r.fix
+
+
+# -----------------------------------------------------------------------------
+# Topology checks (0.23.0 install-time topology guard, doctor surface)
+# -----------------------------------------------------------------------------
+
+
+def _write_multi_route_env(monkeypatch) -> Path:
+    monkeypatch.delenv("BGOS_AGENTS_JSON", raising=False)
+    monkeypatch.setenv("BGOS_AGENTS", "default:Achilles,shadow:Shadow")
+    return _hermes_home()
+
+
+def test_check_topology_fails_on_missing_profile(monkeypatch):
+    from hermes_channel_bgos.doctor import check_topology
+    _write_multi_route_env(monkeypatch)
+    results = check_topology()
+    fails = [r for r in results if r.status == FAIL]
+    assert any("profile" in r.detail.lower() for r in fails)
+    assert any("hermes profile create shadow" in r.fix for r in fails)
+
+
+def test_check_topology_fails_on_multiplex_off(monkeypatch):
+    from hermes_channel_bgos.doctor import check_topology
+    home = _write_multi_route_env(monkeypatch)
+    shadow = home / "profiles" / "shadow"
+    shadow.mkdir(parents=True)
+    (shadow / "SOUL.md").write_text("I am Shadow.")
+    results = check_topology()
+    fails = [r for r in results if r.status == FAIL]
+    assert any("multiplex_profiles" in r.detail for r in fails)
+    assert any(
+        "hermes config set gateway.multiplex_profiles true" in r.fix
+        for r in fails
+    )
+
+
+def test_check_topology_fails_on_stray_profile_secrets(monkeypatch):
+    from hermes_channel_bgos.doctor import check_topology
+    home = _write_multi_route_env(monkeypatch)
+    shadow = home / "profiles" / "shadow"
+    (shadow / "secrets").mkdir(parents=True)
+    (shadow / "SOUL.md").write_text("I am Shadow.")
+    (home / "config.yaml").write_text("gateway:\n  multiplex_profiles: true\n")
+    (home / "secrets").mkdir()
+    (home / "secrets" / "bgos.json").write_text(
+        json.dumps({"pairing_token": "pair_a", "pairing_id": 42}),
+    )
+    (shadow / "secrets" / "bgos.json").write_text(
+        json.dumps({"pairing_token": "pair_a", "pairing_id": 42}),
+    )
+    results = check_topology()
+    fails = [r for r in results if r.status == FAIL]
+    assert any("twice" in r.detail for r in fails)
+    assert any("rm " in r.fix for r in fails)
+
+
+def test_check_topology_ok_when_clean(monkeypatch):
+    from hermes_channel_bgos.doctor import check_topology
+    home = _write_multi_route_env(monkeypatch)
+    shadow = home / "profiles" / "shadow"
+    shadow.mkdir(parents=True)
+    (shadow / "SOUL.md").write_text("I am Shadow.")
+    (home / "config.yaml").write_text("gateway:\n  multiplex_profiles: true\n")
+    results = check_topology()
+    assert results, "clean topology should still report an OK line"
+    assert all(r.status == OK for r in results)
+
+
+def test_check_topology_single_route_is_ok(monkeypatch):
+    from hermes_channel_bgos.doctor import check_topology
+    monkeypatch.delenv("BGOS_AGENTS_JSON", raising=False)
+    monkeypatch.setenv("BGOS_AGENTS", "hades:Hades")
+    results = check_topology()
+    assert all(r.status == OK for r in results)
+
+
+def test_check_topology_reports_blocked_soul(monkeypatch):
+    """Layer A of the 2026-08-04 incident: a SOUL.md that trips Hermes's
+    threat scanner is silently replaced with [BLOCKED: ...] and the agent
+    answers with no persona. The doctor must run the scan when the scanner
+    is importable and FAIL loudly."""
+    from hermes_channel_bgos.doctor import check_topology
+    home = _write_multi_route_env(monkeypatch)
+    shadow = home / "profiles" / "shadow"
+    shadow.mkdir(parents=True)
+    (shadow / "SOUL.md").write_text("I carry controlled mythic weight.")
+    (home / "SOUL.md").write_text("Plain and harmless.")
+    (home / "config.yaml").write_text("gateway:\n  multiplex_profiles: true\n")
+
+    def fake_scanner(content: str) -> list[str]:
+        return ["known_c2_framework"] if "mythic" in content else []
+
+    results = check_topology(soul_scanner=fake_scanner)
+    fails = [r for r in results if r.status == FAIL]
+    assert any("known_c2_framework" in r.detail for r in fails)
+    assert any("SOUL.md" in r.detail for r in fails)
+
+
+def test_check_topology_reports_stale_blocked_sessions(monkeypatch):
+    """Layer B: sessions whose STORED system prompt carries the [BLOCKED:
+    placeholder replay it forever (prefix-cache prompt reuse). The doctor
+    counts them and prints the exact remediation."""
+    import sqlite3
+    from hermes_channel_bgos.doctor import check_topology
+    home = _write_multi_route_env(monkeypatch)
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, system_prompt TEXT, "
+        "ended_at REAL)"
+    )
+    conn.executemany(
+        "INSERT INTO sessions VALUES (?, ?, ?)",
+        [
+            ("s1", "[BLOCKED: SOUL.md contained potential prompt injection]", None),
+            ("s2", "[BLOCKED: SOUL.md contained potential prompt injection]", 123.0),
+            ("s3", "healthy prompt", None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    results = check_topology()
+    hits = [r for r in results if "stale_blocked_sessions" in r.name]
+    assert hits and hits[0].status == FAIL  # one affected session still open
+    assert "2 session(s)" in hits[0].detail
+    assert "system_prompt = NULL" in hits[0].fix
+
+
+async def test_check_pairing_overlap_fails_on_duplicate(mock_bgos_server):
+    from hermes_channel_bgos.doctor import check_pairing_overlap
+    cfg = BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_t")
+    mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(
+        200, [
+            {"id": 1, "device_label": "this-box",
+             "agent_catalog": [{"agent_route": "shadow", "name": "Shadow"}]},
+            {"id": 2, "device_label": "old-box",
+             "agent_catalog": [{"agent_route": "shadow", "name": "Shadow"}]},
+        ],
+    )
+    result = await check_pairing_overlap(
+        cfg, self_pairing_id=1, routes=["default", "shadow"],
+    )
+    assert result.status == FAIL
+    assert "old-box" in result.detail
+    assert "revoke" in result.fix.lower()
+
+
+async def test_check_pairing_overlap_honest_when_unavailable(mock_bgos_server):
+    """If the backend cannot answer, the doctor must say the check could not
+    run - never imply it passed."""
+    from hermes_channel_bgos.doctor import check_pairing_overlap
+    cfg = BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_t")
+    # route unstubbed -> 501
+    result = await check_pairing_overlap(
+        cfg, self_pairing_id=1, routes=["default", "shadow"],
+    )
+    assert result.status == WARN
+    assert "could not" in result.detail.lower()
+
+
+async def test_check_pairing_overlap_ok_when_clean(mock_bgos_server):
+    from hermes_channel_bgos.doctor import check_pairing_overlap
+    cfg = BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_t")
+    mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(
+        200, [
+            {"id": 1, "device_label": "this-box",
+             "agent_catalog": [{"agent_route": "shadow", "name": "Shadow"}]},
+        ],
+    )
+    result = await check_pairing_overlap(
+        cfg, self_pairing_id=1, routes=["default", "shadow"],
+    )
+    assert result.status == OK
+
+
+async def test_run_checks_includes_topology(monkeypatch):
+    """run_checks surfaces the topology tier even offline/unpaired."""
+    from hermes_channel_bgos.doctor import run_checks
+    monkeypatch.delenv("BGOS_API_KEY", raising=False)
+    _write_multi_route_env(monkeypatch)
+    results = await run_checks(offline=True)
+    names = {r.name for r in results}
+    assert any(n.startswith("topology") for n in names)

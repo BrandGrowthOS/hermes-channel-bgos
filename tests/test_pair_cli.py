@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -141,12 +142,22 @@ def test_secrets_path_respects_hermes_home(tmp_path, monkeypatch):
 
 
 async def test_pair_cli_agents_pushes_catalog(mock_bgos_server, tmp_secrets_dir):
+    # A 2-route catalog must pass the 0.23.0 topology guard to reach the
+    # exchange: give the host a hades profile + multiplexing on.
+    hermes_home = Path(os.environ["HERMES_HOME"])
+    hades = hermes_home / "profiles" / "hades"
+    hades.mkdir(parents=True)
+    (hades / "SOUL.md").write_text("I am Hades.")
+    (hermes_home / "config.yaml").write_text(
+        "gateway:\n  multiplex_profiles: true\n"
+    )
     mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
         200, {"pairing_token": "tok", "pairing_id": 55},
     )
     mock_bgos_server.on(
         "POST", "/api/v1/integrations/pairings/55/agent-catalog",
     ).respond(200, {})
+    mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(200, [])
 
     result = await _invoke_cli([
         "BGOS-CODE", "--device-label", "host",
@@ -221,3 +232,224 @@ async def test_pair_cli_wait_for_exposure_timeout(mock_bgos_server, tmp_secrets_
     ])
     assert result.exit_code == 0, result.output
     assert "expos" in result.output.lower()
+
+
+# -----------------------------------------------------------------------------
+# Install-time topology guard (0.23.0)
+#
+# The 2026-08-04 Achilles/Shadow bug was fixed in code (0.22.0) but the
+# BROKEN TOPOLOGY that produced it had to be repaired by hand: no `shadow`
+# profile, multiplexing off, a stale per-profile secrets file, and a
+# duplicate pairing. Connect-time log warnings did not prevent any of it.
+# The pair CLI now refuses to pair a multi-route catalog into a broken
+# topology, and loudly reports duplicate pairings after the exchange.
+# -----------------------------------------------------------------------------
+
+
+def _hermes_home() -> Path:
+    return Path(os.environ["HERMES_HOME"])
+
+
+def _make_profile(route: str, *, soul: bool = True) -> None:
+    d = _hermes_home() / "profiles" / route
+    d.mkdir(parents=True, exist_ok=True)
+    if soul:
+        (d / "SOUL.md").write_text(f"I am {route}.")
+
+
+def _enable_multiplex() -> None:
+    (_hermes_home() / "config.yaml").write_text(
+        "gateway:\n  multiplex_profiles: true\n"
+    )
+
+
+async def test_pair_multi_route_aborts_when_profile_missing(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    """Pairing a 2-route catalog with no `shadow` profile must FAIL LOUD
+    before the exchange, naming the exact create command. The 0.22.0 CLI
+    paired silently into this broken topology."""
+    _enable_multiplex()
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_x", "pairing_id": 1},
+    )
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "kc-box",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:Achilles,shadow:Shadow",
+    ])
+    assert result.exit_code == 1, result.output
+    assert "hermes profile create shadow" in result.output
+    # The exchange must NOT have happened - no pairing was minted.
+    assert not any(
+        r.path == "/api/v1/integrations/pair-exchange"
+        for r in mock_bgos_server.requests
+    )
+    assert not secrets_path().exists()
+
+
+async def test_pair_multi_route_aborts_when_multiplex_off(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    _make_profile("shadow")
+    # no config.yaml -> multiplex_profiles defaults to off
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "kc-box",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:Achilles,shadow:Shadow",
+    ])
+    assert result.exit_code == 1, result.output
+    assert "hermes config set gateway.multiplex_profiles true" in result.output
+
+
+async def test_pair_multi_route_aborts_on_stray_profile_secrets(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    """A leftover profiles/shadow/secrets/bgos.json makes a second adapter
+    connect with its own pairing and double-answer. The pair CLI must name
+    the exact file to delete."""
+    _enable_multiplex()
+    _make_profile("shadow")
+    stray = _hermes_home() / "profiles" / "shadow" / "secrets" / "bgos.json"
+    stray.parent.mkdir(parents=True)
+    stray.write_text(json.dumps({"pairing_token": "pair_old", "pairing_id": 9}))
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "kc-box",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:Achilles,shadow:Shadow",
+    ])
+    assert result.exit_code == 1, result.output
+    assert str(stray) in result.output
+
+
+async def test_pair_multi_route_proceeds_when_topology_is_clean(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    _enable_multiplex()
+    _make_profile("shadow")
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_ok", "pairing_id": 5},
+    )
+    mock_bgos_server.on(
+        "POST", "/api/v1/integrations/pairings/5/agent-catalog",
+    ).respond(200, {"ok": True})
+    mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(
+        200, [{
+            "id": 5, "device_label": "kc-box", "integration": "hermes",
+            "agent_catalog": [
+                {"agent_route": "default", "name": "Achilles"},
+                {"agent_route": "shadow", "name": "Shadow"},
+            ],
+        }],
+    )
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "kc-box",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:Achilles,shadow:Shadow",
+    ])
+    assert result.exit_code == 0, result.output
+    assert secrets_path().exists()
+
+
+async def test_pair_skip_topology_check_overrides(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_x", "pairing_id": 1},
+    )
+    mock_bgos_server.on(
+        "POST", "/api/v1/integrations/pairings/1/agent-catalog",
+    ).respond(200, {"ok": True})
+    mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(200, [])
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "kc-box",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:Achilles,shadow:Shadow",
+        "--skip-topology-check",
+    ])
+    assert result.exit_code == 0, result.output
+
+
+async def test_pair_warns_on_overlapping_active_pairing(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    """A re-pair leftover: another ACTIVE pairing already carries the same
+    agent route. Every inbound would be answered twice. The CLI must name
+    the duplicate pairing and where to revoke it."""
+    _enable_multiplex()
+    _make_profile("shadow")
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_new", "pairing_id": 5},
+    )
+    mock_bgos_server.on(
+        "POST", "/api/v1/integrations/pairings/5/agent-catalog",
+    ).respond(200, {"ok": True})
+    mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(
+        200, [
+            {
+                "id": 5, "device_label": "kc-box", "integration": "hermes",
+                "agent_catalog": [
+                    {"agent_route": "default", "name": "Achilles"},
+                    {"agent_route": "shadow", "name": "Shadow"},
+                ],
+            },
+            {
+                "id": 7, "device_label": "kc-box-old", "integration": "hermes",
+                "agent_catalog": [
+                    {"agent_route": "shadow", "name": "Shadow"},
+                ],
+            },
+        ],
+    )
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "kc-box",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:Achilles,shadow:Shadow",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "kc-box-old" in result.output
+    assert "twice" in result.output.lower()
+    assert "revoke" in result.output.lower()
+
+
+async def test_pair_reports_when_overlap_check_unavailable(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    """If the backend cannot answer the pairings listing, say so honestly
+    instead of implying the check passed. Non-fatal."""
+    _enable_multiplex()
+    _make_profile("shadow")
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_new", "pairing_id": 5},
+    )
+    mock_bgos_server.on(
+        "POST", "/api/v1/integrations/pairings/5/agent-catalog",
+    ).respond(200, {"ok": True})
+    # GET /pairings left unstubbed -> 501
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "kc-box",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "default:Achilles,shadow:Shadow",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "could not verify" in result.output.lower()
+
+
+async def test_pair_single_route_skips_route_profile_checks(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    """A single agent on a non-default route served by the active profile is
+    a correct, common topology - the guard must not block it."""
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_x", "pairing_id": 3},
+    )
+    mock_bgos_server.on(
+        "POST", "/api/v1/integrations/pairings/3/agent-catalog",
+    ).respond(200, {"ok": True})
+    mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(200, [])
+    result = await _invoke_cli([
+        "BGOS-CODE", "--device-label", "hades-box",
+        "--base-url", mock_bgos_server.url,
+        "--agents", "hades:Hades",
+    ])
+    assert result.exit_code == 0, result.output

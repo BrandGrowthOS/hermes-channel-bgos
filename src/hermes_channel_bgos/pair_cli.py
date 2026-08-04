@@ -21,6 +21,11 @@ import click
 from .agents import parse_agents_spec
 from .bgos_api import BgosApi, BgosApiError
 from .config import BgosConfig, normalize_base_url
+from .topology import (
+    FAIL as TOPO_FAIL,
+    local_topology_findings,
+    overlapping_pairing_findings,
+)
 
 
 def secrets_path() -> Path:
@@ -31,6 +36,84 @@ def secrets_path() -> Path:
     """
     root = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
     return root / "secrets" / "bgos.json"
+
+
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+
+
+def _print_findings(findings, *, header: str) -> None:
+    click.secho(header, fg="red", err=True, bold=True)
+    for f in findings:
+        color = "red" if f.severity == TOPO_FAIL else "yellow"
+        click.secho(f"  [{f.severity}] {f.detail}", fg=color, err=True)
+        if f.fix:
+            click.secho(f"        fix: {f.fix}", fg=color, err=True)
+
+
+def enforce_local_topology(catalog: list[dict]) -> list:
+    """Pre-exchange topology gate. Returns the FAIL findings (empty = go).
+
+    Runs the disk-only checks from `topology` against the catalog this
+    pairing is about to declare. The caller aborts BEFORE the pair exchange
+    on any FAIL: the whole point of the guard is that the 2026-08-04 broken
+    topology (missing profile, multiplex off, stray per-profile pairing
+    file) must be impossible to pair into silently.
+    """
+    routes = [entry["agent_route"] for entry in catalog]
+    findings = local_topology_findings(_hermes_home(), routes)
+    fails = [f for f in findings if f.severity == TOPO_FAIL]
+    if findings:
+        _print_findings(
+            findings,
+            header=(
+                "Topology check found problems on this host "
+                "(HERMES_HOME=" + str(_hermes_home()) + "):"
+            ),
+        )
+    return fails
+
+
+async def _report_pairing_overlap(
+    *, base_url: str, token: str, self_pairing_id: int | None,
+    catalog: list[dict], device_label: str,
+) -> None:
+    """Post-exchange duplicate-pairing report. Loud, honest, never fatal."""
+    api = BgosApi(BgosConfig(base_url=base_url, pairing_token=token))
+    try:
+        pairings = await api.list_pairings()
+    except Exception:
+        click.secho(
+            "Could not verify this host against existing pairings (the "
+            "pairings listing was unavailable). If an OLD pairing for this "
+            "machine is still active, every reply will arrive twice - check "
+            "BGOS -> Integrations -> Hermes -> Paired devices and revoke "
+            "stale entries.",
+            fg="yellow", err=True,
+        )
+        return
+    finally:
+        await api.close()
+    findings = overlapping_pairing_findings(
+        pairings,
+        self_pairing_id=self_pairing_id,
+        routes=[entry["agent_route"] for entry in catalog],
+        device_label=device_label,
+    )
+    if findings:
+        _print_findings(
+            findings,
+            header="Duplicate-pairing check found existing active pairings:",
+        )
+    else:
+        others = sum(
+            1 for p in pairings if p.get("id") != self_pairing_id
+        )
+        click.secho(
+            f"Duplicate-pairing check clean "
+            f"({others} other active pairing(s), no overlap).",
+            fg="green",
+        )
 
 
 async def wait_for_exposure(
@@ -95,9 +178,15 @@ async def wait_for_exposure(
     "--wait-interval", default=4.0, type=float, show_default=True,
     help="Seconds between exposure polls.",
 )
+@click.option(
+    "--skip-topology-check", is_flag=True,
+    help="Pair even when the multi-agent topology check fails. The broken "
+         "state WILL misbehave (wrong persona / double answers) until fixed.",
+)
 def main(
     code: str, device_label: str, base_url: str, integration: str, agents: str,
     wait_for_exposure_flag: bool, wait_timeout: float, wait_interval: float,
+    skip_topology_check: bool,
 ) -> None:
     """Exchange a BGOS pairing code for a pairing token.
 
@@ -107,13 +196,14 @@ def main(
     asyncio.run(_run(
         code, device_label, base_url, integration, agents,
         wait_for_exposure_flag, wait_timeout, wait_interval,
+        skip_topology_check=skip_topology_check,
     ))
 
 
 async def _run(
     code: str, device_label: str, base_url: str, integration: str, agents: str,
     wait_for_exposure_flag: bool = False, wait_timeout: float = 180.0,
-    wait_interval: float = 4.0,
+    wait_interval: float = 4.0, *, skip_topology_check: bool = False,
 ) -> None:
     # Normalize up front so both the live calls AND the persisted secrets file
     # carry the origin form. Pasting the app-facing base (which ends in
@@ -121,6 +211,26 @@ async def _run(
     # every later request and 404d the whole pairing.
     base_url = normalize_base_url(base_url)
     catalog = parse_agents_spec(agents)
+
+    # Install-time topology guard (0.23.0). Runs BEFORE the exchange so a
+    # broken multi-agent topology never mints a pairing: the 2026-08-04
+    # Achilles/Shadow incident was exactly this state, created silently and
+    # only warned about in a connect-time log nobody read.
+    if not skip_topology_check:
+        fails = enforce_local_topology(catalog)
+        if fails:
+            click.secho(
+                "Not pairing into a broken topology. Apply the fixes above "
+                "and re-run, or override with --skip-topology-check.",
+                fg="red", err=True, bold=True,
+            )
+            sys.exit(1)
+    elif catalog:
+        click.secho(
+            "Topology check SKIPPED (--skip-topology-check).",
+            fg="yellow", err=True,
+        )
+
     api = BgosApi(BgosConfig(base_url=base_url, pairing_token=None))
     try:
         resp = await api.pair_exchange(
@@ -189,6 +299,19 @@ async def _run(
             )
         finally:
             await auth_api.close()
+
+    # Duplicate-pairing check: a re-pair leftover (another ACTIVE pairing
+    # with the same agent catalog) answers every inbound twice. Needs the
+    # authenticated token, so it can only run AFTER the exchange - hence
+    # warn-loud rather than abort. Never fatal: the new pairing stands.
+    if not skip_topology_check:
+        await _report_pairing_overlap(
+            base_url=base_url,
+            token=resp["pairing_token"],
+            self_pairing_id=resp["pairing_id"],
+            catalog=catalog,
+            device_label=device_label,
+        )
 
     if wait_for_exposure_flag:
         auth_api = BgosApi(

@@ -26,6 +26,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/BrandGrowthOS/hermes-channel
 
 Advanced overrides: `HERMES_INSTALL`, `HERMES_PYTHON`, `REPO_DIR`, `DEVICE_LABEL`, and `HERMES_SERVICE`.
 
+**v0.23.0 (2026-08-04) - Install-time topology guard.** The 0.22.0 route-to-profile fix shipped and the two-agent bug still survived on a live host, because the topology around the code was broken and only a connect-time log line said so. Now `hermes-pair-bgos` refuses to pair a multi-route catalog until the host topology is real (profile per route, `gateway.multiplex_profiles` on, no stray per-profile `secrets/bgos.json`), and after the exchange it reports any other ACTIVE pairing serving the same routes (the double-answer re-pair leftover). `hermes-bgos-doctor` re-checks all of it any time, plus two deeper layers: a `SOUL.md` that Hermes's prompt-injection scanner silently replaces with a `[BLOCKED: ...]` placeholder, and sessions in `state.db` whose stored system prompt still carries that placeholder (they replay it forever). Upgrade note for existing installs: nothing changes at runtime; run `hermes-bgos-doctor` once after upgrading, and fix what it prints. If you intentionally run an exotic layout, `--skip-topology-check` preserves the old pair behavior.
+
 **v0.10.4 (2026-05-29) — Root install + cross-process waitForReply race fix.** Adds `install.sh` so Hermes servers can install/update the BGOS channel with one command. Fixes the peer `waitForReply` echo race found by Jeff's Hermes agent: the live gateway now refreshes consumed-reply receipts written by helper processes, writes a pending marker before the HTTP request starts, waits briefly during the WS race window for that marker to become a concrete receipt, and drops only exact already-returned peer replies instead of enqueueing them into Hermes. This prevents echo chains when an external tool/cron/helper calls `send_peer(wait_for_reply=True)` while preserving legitimate later peer turns.
 
 **v0.5.7 (2026-05-15) — Hotfix: bridge-local cursor advance.** Bridge-local slash commands (`/new`, `/status`, `/retry`, `/resume`, `/help`) were short-circuiting before the inbound cursor was persisted. The 5-second REST poll's `since_message_id` therefore stayed pinned to a stale value and kept re-fetching the same command from `/api/v1/integrations/inbound`, re-dispatching it on every tick. Caught live as 50+ "Conversation reset" acks for a single `/new`. Fix: `_save_last_id` is now called on every accepted inbound (including bridge-local) before any branch returns. If you're caught in a live loop, upgrade to 0.5.7 and restart Hermes; the cursor advances on the first tick after restart, so the loop stops within ~5s.
@@ -51,6 +53,7 @@ Backend dependencies still in flight: `DELETE /api/v1/messages/{id}` (for stream
 - [Prerequisites](#prerequisites)
 - [Manual setup](#manual-setup)
 - [Configuration (env vars)](#configuration-env-vars)
+- [Multiple agents on one machine](#multiple-agents-on-one-machine-routes-and-hermes-profiles)
 - [First-time pairing](#first-time-pairing)
 - [Peer-to-peer test/setup checklist](#peer-to-peer-testsetup-checklist)
 - [Bridge-local slash commands](#bridge-local-slash-commands)
@@ -369,34 +372,81 @@ BGOS_ALLOW_ALL_USERS=true
 Two or more BGOS agents on one host each need their own persona, memory,
 skills, and credentials. The adapter maps each assistant's `agent_route` to
 the **Hermes profile of the same name** and stamps it on the inbound turn,
-so Hermes serves that turn from `~/.hermes/profiles/<route>/`. For this to
-work, three things must line up:
+so Hermes serves that turn from `~/.hermes/profiles/<route>/`.
 
-1. **A Hermes profile per non-default route.** Route `shadow` is served by
-   profile `shadow` (`hermes profile create shadow`, then give it its own
-   `SOUL.md`/config). The `default` route is served by the gateway's active
-   profile. A non-default route with NO matching profile falls back to the
-   active profile, and on a multi-route pairing the adapter logs a
-   `wrong persona` warning for it at connect and on dispatch.
-2. **Multiplexing on.** One gateway can only serve several profiles when
-   `gateway.multiplex_profiles` is `true`
-   (`hermes config set gateway.multiplex_profiles true`, then restart).
-   With it off, Hermes runs every turn in the active profile regardless of
-   the stamp, and the adapter warns at connect.
-3. **One catalog listing every route**, e.g.
-   `BGOS_AGENTS=default:Achilles,shadow:Shadow`, and both agents ticked on
-   the SAME pairing in BGOS Integrations.
+Exactly **two topologies are supported**. Pick one BEFORE pairing. Since
+0.23.0 the pair CLI checks the host against the declared catalog and
+**refuses to pair a multi-agent catalog into a half-built topology**,
+printing the exact fix for each problem (override with
+`--skip-topology-check` only if you know why).
 
-Alternative topology: run one gateway process per profile
-(`hermes -p shadow gateway run`), each paired separately. `-p` sets
-`HERMES_HOME` to the profile dir for the whole process, so each daemon has
-its own `secrets/bgos.json`, cursor, and persona with no multiplexing
-involved. Do NOT point two processes at the same `HERMES_HOME`: they would
-share one pairing token and every message would be answered twice.
+**Topology A (recommended): one gateway, one pairing, multiplexed
+profiles.** One gateway process serves every agent; each non-default route
+is served by the Hermes profile of the same name. One `secrets/bgos.json`
+under `~/.hermes/` and NONE under any `~/.hermes/profiles/<route>/`.
+
+**Topology B: one gateway process per profile, each with its own
+pairing.** `hermes -p shadow gateway run` sets `HERMES_HOME` to the profile
+dir for the whole process, so each daemon has its own `secrets/bgos.json`,
+cursor, and persona, and each is paired separately with a SINGLE-route
+catalog. No multiplexing involved. A route must never appear on two
+pairings' catalogs at once, and two processes must never share one
+`HERMES_HOME`: either way every message is answered twice.
+
+### Topology A, step by step (copy-paste, using routes `default` + `shadow`)
+
+```bash
+# 1. One Hermes profile per NON-default route. The route name IS the
+#    profile name. Give each its own persona.
+hermes profile create shadow
+$EDITOR ~/.hermes/profiles/shadow/SOUL.md
+
+# 2. Let one gateway serve several profiles.
+hermes config set gateway.multiplex_profiles true
+
+# 3. Make sure no profile carries a leftover per-profile pairing file
+#    (topology A has exactly ONE, at ~/.hermes/secrets/bgos.json).
+ls ~/.hermes/profiles/*/secrets/bgos.json 2>/dev/null   # should print nothing
+
+# 4. Pair ONE pairing whose catalog lists EVERY route.
+#    (Get the BGOS-XXXX-XX code from BGOS -> Integrations -> Hermes.)
+hermes-pair-bgos BGOS-XXXX-XX --device-label $(hostname -s) \
+  --agents "default:Achilles,shadow:Shadow"
+
+# 5. Restart the gateway, then verify everything any time.
+hermes-bgos-doctor
+```
+
+Set the same catalog in the gateway env (`BGOS_AGENTS=default:Achilles,shadow:Shadow`)
+and tick both agents on the SAME pairing in BGOS Integrations.
+
+### What the guard checks, and the symptom each miss produces
+
+The pair CLI enforces these at pair time; `hermes-bgos-doctor` re-checks
+them any time. Each row is a real failure mode from the 2026-08-04
+two-agent incident:
+
+| Misconfiguration | Symptom in the chat |
+|---|---|
+| No Hermes profile named after a non-default route (or no `SOUL.md` in it) | Message to Shadow is answered by Achilles (wrong persona) |
+| `gateway.multiplex_profiles` off with 2+ routes | Message to Shadow is answered by Achilles, for every route |
+| Stray `~/.hermes/profiles/<route>/secrets/bgos.json` in topology A | Every reply arrives twice |
+| A second ACTIVE pairing with the same agent catalog (re-pair leftover) | Every reply arrives twice |
+
+See the Troubleshooting section for two more layers (a threat-scanner
+blocked `SOUL.md`, and stale per-session prompts) that produce the same
+symptoms with none of the causes above.
 
 ---
 
 ## First-time pairing
+
+> **Two or more agents on this machine?** Do the numbered flow in
+> [Multiple agents on one machine](#multiple-agents-on-one-machine-routes-and-hermes-profiles)
+> FIRST, then come back here for step 1. Since 0.23.0 the pair CLI refuses
+> to pair a multi-agent catalog until that topology is in place, and after
+> pairing it reports any other active pairing that would answer the same
+> agents twice.
 
 1. In BGOS → **Integrations** → ⚡ **Hermes card** → **"Connect a new Hermes server"**. Copy the generated code. `BGOS-XXXX-XX` throughout this README is a **placeholder** — your real code looks like `BGOS-7F3A-2K`. It **expires in 10 minutes**; generate a fresh one if it lapses.
 
@@ -548,6 +598,25 @@ Fix: set `BGOS_AGENTS=<route>:<Display Name>` in the systemd env. Restart. Re-ch
 **`401 PAIRING_REVOKED` in the adapter log.** Someone (you?) revoked the pairing in BGOS. Delete `~/.hermes/secrets/bgos.json`, generate a new code, re-run `hermes-pair-bgos`.
 
 **WS connected but immediately disconnected.** Token mismatch or server-side auth reject. The adapter's pairing token got overwritten or corrupted. Re-pair.
+
+### Multi-agent routing (wrong persona / double replies / persona gone)
+
+Run `hermes-bgos-doctor` first: since 0.23.0 it checks every row in this
+table and prints the matching fix. Symptom to cause to command:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Message to agent B is answered by agent A (wrong persona) | No Hermes profile named after B's route, or the profile has no `SOUL.md` | `hermes profile create <route>`, write its `SOUL.md`, restart the gateway |
+| EVERY non-default agent answers as the active profile | `gateway.multiplex_profiles` is off | `hermes config set gateway.multiplex_profiles true`, restart the gateway |
+| Every reply arrives twice | Stale `~/.hermes/profiles/<route>/secrets/bgos.json` makes a second adapter connect with the same pairing | `rm` that file (topology A keeps exactly one pairing file, at `~/.hermes/secrets/bgos.json`), restart |
+| Every reply arrives twice | TWO active pairings carry the same agent catalog (re-pair leftover) | BGOS -> Integrations -> Hermes -> Paired devices -> revoke the stale one |
+| Agent answers with NO persona (generic voice), routing all correct | Hermes's prompt-injection scanner blocked the `SOUL.md` and silently replaced it with a `[BLOCKED: ...]` placeholder at prompt build. Its `known_c2_framework` pattern matches the words `cobalt strike`, `sliver`, `havoc`, `mythic`, `metasploit`, `brainworm` even in ordinary English ("controlled mythic weight" trips it) | Reword the matched phrase in `SOUL.md` (swap the word, e.g. "mythic" to "mythical"), then clear stale session prompts (next row) |
+| A fix above "did not take" on an EXISTING chat | Hermes reuses a continuing session's STORED system prompt byte for byte, so sessions born under the broken state replay it forever | Send `/new` in each affected chat, or stop the gateway and run `sqlite3 ~/.hermes/state.db "UPDATE sessions SET system_prompt = NULL WHERE system_prompt LIKE '%[BLOCKED:%'"` (the next turn rebuilds the prompt) |
+
+The doctor's `topology_soul_blocked` check runs the SOUL files through
+Hermes's own scanner (when run from Hermes's Python env), and
+`topology_stale_blocked_sessions` counts affected sessions in `state.db`,
+so both hidden layers surface without reading any log.
 
 ### Outbound messages
 

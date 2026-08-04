@@ -28,6 +28,15 @@ from .config import (
     PAIRING_TOKEN_PREFIX, BgosConfig, TokenChoice, choose_pairing_token,
     looks_like_pairing_token, normalize_base_url, redact_token,
 )
+from .topology import (
+    FAIL as TOPO_FAIL,
+    blocked_soul_findings,
+    distinct_routes,
+    local_topology_findings,
+    overlapping_pairing_findings,
+    resolve_multiplex_flag,
+    stale_blocked_session_finding,
+)
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 
@@ -406,6 +415,128 @@ async def check_whoami(cfg: BgosConfig, token_source: str = "") -> CheckResult:
     return CheckResult("pairing_live", OK, f"pairing_id={pid}; exposed: {listing}")
 
 
+def check_topology(soul_scanner=None) -> list[CheckResult]:
+    """Multi-agent topology tier (0.23.0). One CheckResult per finding.
+
+    Same checks the pair CLI enforces at pair time, re-runnable any time:
+    per-route profile + SOUL presence, gateway.multiplex_profiles, stray
+    per-profile pairing files, a SOUL.md Hermes's threat scanner would
+    silently replace with [BLOCKED: ...], and sessions in state.db whose
+    stored prompt already carries that placeholder. Routes come from the
+    gateway-effective env (BGOS_AGENTS / BGOS_AGENTS_JSON) so the report
+    matches what the running gateway declares. `soul_scanner` is injectable
+    for tests; by default Hermes core's scanner is used when importable and
+    the SOUL scan is skipped (never faked) when it is not.
+    """
+    env, _ = gateway_env()
+    home = _hermes_home()
+    routes = [a["agent_route"] for a in enumerate_agents_from_env(env)]
+    findings = list(local_topology_findings(home, routes, env))
+    findings += blocked_soul_findings(home, routes, soul_scanner)
+    stale = stale_blocked_session_finding(home)
+    if stale is not None:
+        findings.append(stale)
+    if not findings:
+        distinct = sorted(distinct_routes(routes))
+        multiplex = resolve_multiplex_flag(home, env)
+        detail = (
+            "routes: " + (", ".join(distinct) if distinct else "none declared")
+            + f"; multiplex_profiles={multiplex}"
+        )
+        if len(distinct) > 1:
+            detail += "; every non-default route has its own profile + SOUL"
+        return [CheckResult("topology", OK, detail)]
+    return [
+        CheckResult(
+            f"topology_{f.check}",
+            FAIL if f.severity == TOPO_FAIL else WARN,
+            f.detail,
+            fix=f.fix,
+        )
+        for f in findings
+    ]
+
+
+async def check_pairing_overlap(
+    cfg: BgosConfig,
+    *,
+    self_pairing_id: int | None = None,
+    routes: list[str] | None = None,
+) -> CheckResult:
+    """Duplicate-pairing check: is another ACTIVE pairing serving the same
+    agent routes (a re-pair leftover)? Every inbound to an overlapped agent
+    is answered twice while both daemons run.
+
+    Uses GET /api/v1/integrations/pairings, which a pairing token CAN call
+    (the backend resolves the owning user from the pairing row). When the
+    listing or whoami is unavailable the result is an honest WARN that the
+    check did not run, never a silent pass.
+    """
+    api = BgosApi(cfg)
+    try:
+        if self_pairing_id is None or routes is None:
+            try:
+                me = await api.whoami()
+            except Exception:
+                me = {}
+            if self_pairing_id is None:
+                self_pairing_id = me.get("pairing_id")
+            if routes is None:
+                routes = [
+                    str(a.get("agent_route") or "")
+                    for a in (me.get("assistants") or [])
+                ]
+                env, _ = gateway_env()
+                routes += [
+                    a["agent_route"] for a in enumerate_agents_from_env(env)
+                ]
+        if self_pairing_id is None:
+            return CheckResult(
+                "pairing_overlap", WARN,
+                "could not determine this pairing's id (whoami unavailable) - "
+                "duplicate-pairing check did not run",
+                fix="check BGOS -> Integrations -> Hermes -> Paired devices "
+                    "for stale entries by hand",
+            )
+        try:
+            pairings = await api.list_pairings()
+        except BgosApiError as exc:
+            return CheckResult(
+                "pairing_overlap", WARN,
+                f"could not list this user's pairings (HTTP {exc.status}) - "
+                f"duplicate-pairing check did not run",
+                fix="check BGOS -> Integrations -> Hermes -> Paired devices "
+                    "for stale entries by hand",
+            )
+        except Exception as exc:
+            return CheckResult(
+                "pairing_overlap", WARN,
+                f"could not list this user's pairings "
+                f"({exc.__class__.__name__}) - duplicate-pairing check did "
+                f"not run",
+                fix="check BGOS -> Integrations -> Hermes -> Paired devices "
+                    "for stale entries by hand",
+            )
+    finally:
+        await api.close()
+    findings = overlapping_pairing_findings(
+        pairings, self_pairing_id=self_pairing_id, routes=routes,
+    )
+    if not findings:
+        others = sum(1 for p in pairings if p.get("id") != self_pairing_id)
+        return CheckResult(
+            "pairing_overlap", OK,
+            f"{others} other active pairing(s), none serving this pairing's "
+            f"routes",
+        )
+    worst = FAIL if any(f.severity == TOPO_FAIL for f in findings) else WARN
+    return CheckResult(
+        "pairing_overlap", worst,
+        "; ".join(f.detail for f in findings),
+        fix="; ".join(f.fix for f in findings if f.fix),
+    )
+
+
 def check_gateway_process() -> CheckResult:
     """Best-effort, informational only — never FAILs (the doctor often runs in
     a different process/user than the gateway)."""
@@ -438,11 +569,13 @@ async def run_checks(*, offline: bool = False) -> list[CheckResult]:
         results.append(hygiene)
     results.append(check_env())
     results.append(check_catalog())
+    results.extend(check_topology())
     if cfg is not None and not offline:
         choice, sp, _ = _resolve_token_state()
         results.append(
             await check_whoami(cfg, token_source=token_source_label(choice, sp)),
         )
+        results.append(await check_pairing_overlap(cfg))
     results.append(check_gateway_process())
     return results
 
