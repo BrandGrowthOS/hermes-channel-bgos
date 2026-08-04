@@ -230,7 +230,14 @@ pair_if_requested() {
   fi
   if [[ -n "$code" ]]; then
     log "Pairing this server with BGOS."
-    "$py" -m hermes_channel_bgos.pair_cli "$code" --device-label "$DEVICE_LABEL" --agents "$BGOS_AGENTS"
+    # Since 0.23.0 the pair CLI refuses to pair a multi-agent catalog into a
+    # broken topology (missing profile, multiplex off, stray per-profile
+    # pairing file) and prints the exact fixes. Do not let set -e kill the
+    # installer here: the plugin install itself is fine, and the doctor at
+    # the end re-reports the same findings. Surface it and continue.
+    if ! "$py" -m hermes_channel_bgos.pair_cli "$code" --device-label "$DEVICE_LABEL" --agents "$BGOS_AGENTS"; then
+      warn "Pairing did not complete - read the topology findings above, apply the printed fixes, then re-run: $py -m hermes_channel_bgos.pair_cli <NEW-CODE> --device-label '$DEVICE_LABEL' --agents '$BGOS_AGENTS' (pair codes expire in 10 minutes, mint a fresh one)"
+    fi
   else
     warn "Pairing skipped. Later run: $py -m hermes_channel_bgos.pair_cli BGOS-XXXX-XX --device-label '$DEVICE_LABEL' --agents '$BGOS_AGENTS'"
   fi
