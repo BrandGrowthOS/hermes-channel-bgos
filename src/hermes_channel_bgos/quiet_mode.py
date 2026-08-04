@@ -13,6 +13,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .hermes_profiles import resolve_hermes_home
+
 
 TIDY = "tidy"
 EVERYTHING = "everything"
@@ -184,8 +186,7 @@ class ChatStyleStore:
         """Return an injected path or lazily resolve the current Hermes home."""
         if self._injected_path is not None:
             return self._injected_path
-        hermes_home = Path(os.environ.get("HERMES_HOME") or "~/.hermes")
-        return hermes_home.expanduser() / _STYLE_FILENAME
+        return resolve_hermes_home().expanduser() / _STYLE_FILENAME
 
     @staticmethod
     def _read(path: Path) -> dict[str, str]:

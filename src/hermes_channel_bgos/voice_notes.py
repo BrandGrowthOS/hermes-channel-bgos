@@ -16,6 +16,8 @@ from uuid import uuid4
 
 import httpx
 
+from .hermes_profiles import resolve_hermes_home
+
 
 MAX_VOICE_NOTE_BYTES = 25 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 20.0
@@ -138,9 +140,7 @@ def cache_voice_note_bytes(data: bytes, ext: str) -> str | None:
         pass
 
     try:
-        default_home = Path.home() / ".hermes"
-        hermes_home = Path(os.environ.get("HERMES_HOME") or default_home)
-        cache_dir = hermes_home.expanduser().resolve() / "cache" / "audio"
+        cache_dir = resolve_hermes_home().expanduser().resolve() / "cache" / "audio"
         cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = cache_dir / f"bgos-{uuid4().hex}{ext}"
         path.write_bytes(data)

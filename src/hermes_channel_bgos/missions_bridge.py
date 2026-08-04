@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from .bgos_api import BgosApiError
+from .hermes_profiles import resolve_hermes_home
 
 log = logging.getLogger(__name__)
 
@@ -415,8 +416,7 @@ class MissionLane:
     def _store_path(self) -> Path:
         if self._binding_store_path is not None:
             return self._binding_store_path
-        hermes_home = Path(os.environ.get("HERMES_HOME") or "~/.hermes")
-        return hermes_home.expanduser() / self._STORE_FILENAME
+        return resolve_hermes_home().expanduser() / self._STORE_FILENAME
 
     @staticmethod
     def _optional_float(value: Any) -> float | None:

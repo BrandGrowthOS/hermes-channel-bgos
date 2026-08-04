@@ -62,6 +62,8 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from .hermes_profiles import resolve_hermes_home
+
 log = logging.getLogger(__name__)
 
 
@@ -228,7 +230,7 @@ def load_persona() -> str:
     explicit = (os.environ.get("BGOS_VOICE_PERSONA") or "").strip()
     if explicit:
         return explicit
-    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    hermes_home = resolve_hermes_home()
     soul = hermes_home / "SOUL.md"
     try:
         if soul.is_file():
@@ -258,7 +260,7 @@ def load_voice_memory() -> str:
     if (os.environ.get("BGOS_VOICE_MEMORY") or "").strip().lower() == "off":
         return ""
     explicit = (os.environ.get("BGOS_VOICE_MEMORY_FILE") or "").strip()
-    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    hermes_home = resolve_hermes_home()
     paths = (
         [Path(explicit)]
         if explicit

@@ -39,6 +39,11 @@ from .commands_sync import (
     fetch_hermes_native_commands,
 )
 from .agents import enumerate_agents_from_env
+from .hermes_profiles import (
+    multi_route_warnings,
+    profile_for_route,
+    resolve_hermes_home,
+)
 from .boards_marker import (
     BOARDS_LOOP_GUARD_LIMIT,
     BoardsCallResult,
@@ -292,10 +297,15 @@ def _sensitive_media_roots() -> list[Path]:
         home / ".kube",
     ]
     # The pairing-token store is the single most sensitive file on the host.
+    # Guard BOTH the process-level home and the (possibly profile-scoped)
+    # resolved home - either may hold a secrets dir.
     hermes_home = Path(
         os.environ.get("HERMES_HOME", home / ".hermes")
     ).expanduser()
     roots.append(hermes_home / "secrets")
+    profile_home = resolve_hermes_home().expanduser()
+    if profile_home != hermes_home:
+        roots.append(profile_home / "secrets")
     return roots
 
 
@@ -1035,6 +1045,12 @@ class BGOSAdapter(BasePlatformAdapter):
         self._config = bgos_config
         self._api = BgosApi(bgos_config)
         self._state = StateStore()
+        # Bind the profile-aware Hermes home NOW, while construction runs
+        # under the owning profile's runtime scope (multiplex secondaries are
+        # created inside `_profile_runtime_scope`). Later callbacks may run
+        # outside that scope, so path lookups must use this captured value,
+        # never re-read the environment.
+        self._hermes_home: Path = resolve_hermes_home()
         self._stt_setup = SttSetupNotifier(
             self._post_stt_setup_event,
             self._edit_stt_setup_event,
@@ -1240,6 +1256,77 @@ class BGOSAdapter(BasePlatformAdapter):
             return addressed
         return self._state.assistant_id_by_chat.get(chat_key)
 
+    # -------------------------------------------------------------------------
+    # Multi-profile routing (agent_route -> Hermes profile)
+    # -------------------------------------------------------------------------
+
+    def _route_for_chat(self, chat_key: int) -> str | None:
+        """Resolve the agent_route serving a chat via the addressed assistant
+        (owner as fallback). Used by synthetic turns (boards results, voice
+        consults) so they land in the SAME profile-scoped session as the
+        inbound turn they answer."""
+        aid = self._style_assistant_id_for_chat(chat_key)
+        return self._state.get_route(aid) if aid is not None else None
+
+    def _stamp_source_profile(self, source: Any, route: str | None) -> None:
+        """Stamp the Hermes profile serving `route` onto a gateway
+        SessionSource, in place.
+
+        This is THE handoff that makes multi-agent pairings work: Hermes's
+        multiplexer serves a turn from `source.profile`'s home (SOUL, config,
+        skills, memory, credentials). Before this stamp existed the route was
+        resolved from whoami and then dropped, so every assistant on the
+        pairing answered as the gateway's active profile (message to Shadow,
+        answered by Achilles - 2026-08-04).
+
+        Never overrides an existing stamp: an operator's `profile_routes`
+        match or a secondary adapter's per-profile ownership wins. No-op when
+        the route is `default`, has no matching Hermes profile (warned once
+        in `profile_for_route`), or the source cannot carry the attribute
+        (mock/test doubles).
+        """
+        if source is None:
+            return
+        profile = profile_for_route(route)
+        if not profile:
+            return
+        try:
+            if not getattr(source, "profile", None):
+                source.profile = profile
+        except Exception:
+            log.debug(
+                "could not stamp profile %r on source %r", profile, source,
+                exc_info=True,
+            )
+
+    def _warn_on_multi_route_misconfig(self) -> None:
+        """Log actionable warnings when the pairing's routes cannot actually
+        be served as distinct Hermes profiles (missing profile, or
+        multiplexing off). Fail-open: never raises, silent when Hermes's
+        profile helpers are unavailable (tests, standalone tools)."""
+        try:
+            from .hermes_profiles import _load_profile_helpers
+
+            helpers = _load_profile_helpers()
+            if helpers is None:
+                return
+            _, exists = helpers
+            runner = getattr(self, "gateway_runner", None)
+            runner_config = getattr(runner, "config", None)
+            multiplex_on = (
+                bool(getattr(runner_config, "multiplex_profiles", False))
+                if runner_config is not None
+                else None
+            )
+            for line in multi_route_warnings(
+                dict(self._state.assistant_route),
+                multiplex_on=multiplex_on,
+                profile_exists=exists,
+            ):
+                log.warning("BGOS multi-agent config: %s", line)
+        except Exception:
+            log.debug("multi-route misconfig check failed", exc_info=True)
+
     async def _mission_session_id_for_chat(
         self,
         chat_key: int,
@@ -1257,6 +1344,9 @@ class BGOSAdapter(BasePlatformAdapter):
                     or self.pairing_user_id
                 ),
             )
+            # Session keys are profile-namespaced under multiplexing, so the
+            # lookup must carry the same stamp the inbound dispatch used.
+            self._stamp_source_profile(source, self._route_for_chat(chat_key))
             session_key = runner._session_key_for_source(source)
             session_id = await runner.async_session_store.peek_session_id(
                 session_key
@@ -1304,11 +1394,13 @@ class BGOSAdapter(BasePlatformAdapter):
                 return obj.get(name)
             return getattr(obj, name, None)
 
-        # Load secrets file if present
+        # Load secrets file if present. Resolved through the profile-aware
+        # home so a multiplex secondary adapter (constructed under Hermes's
+        # context-local home override) reads ITS OWN profile's pairing, not
+        # the default profile's - two profiles silently sharing one token
+        # was half of the 2026-08-04 Achilles/Shadow routing bug.
         secrets: dict[str, Any] = {}
-        hermes_home = Path(
-            os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")),
-        )
+        hermes_home = resolve_hermes_home()
         secrets_path = hermes_home / "secrets" / "bgos.json"
         if secrets_path.is_file():
             try:
@@ -1447,6 +1539,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 "BGOS bound assistants: %s",
                 ", ".join(f"{aid}:{route}" for aid, route in bound),
             )
+            self._warn_on_multi_route_misconfig()
         else:
             log.warning(
                 "BGOS: 0 assistants exposed yet — open BGOS Integrations → "
@@ -1598,16 +1691,14 @@ class BGOSAdapter(BasePlatformAdapter):
         log.info("BGOS home channel %d seeded as a trusted outbound target", home_id)
 
     def _last_id_path(self) -> Path:
-        hermes_home = Path(
-            os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")),
-        )
-        return hermes_home / "bgos_last_id"
+        # Captured at __init__ under the owning profile's runtime scope -
+        # callbacks may run outside that scope, so never re-read the env here
+        # (a profile's cursor crossing into another profile's home replays or
+        # swallows messages).
+        return self._hermes_home / "bgos_last_id"
 
     def _consumed_peer_wait_replies_path(self) -> Path:
-        hermes_home = Path(
-            os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")),
-        )
-        return hermes_home / "bgos_consumed_peer_wait_replies.json"
+        return self._hermes_home / "bgos_consumed_peer_wait_replies.json"
 
     def _load_consumed_peer_wait_replies(self) -> None:
         path = self._consumed_peer_wait_replies_path()
@@ -2452,6 +2543,7 @@ class BGOSAdapter(BasePlatformAdapter):
             except AttributeError:
                 source = None
             if source is not None:
+                self._stamp_source_profile(source, self._route_for_chat(chat_key))
                 gateway_event = _GatewayMessageEvent(
                     text=text,
                     message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
@@ -4589,6 +4681,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 event.text = agent_visible_text
                 await self.handle_message(event)
                 return
+            self._stamp_source_profile(source, route)
             msg_type = (
                 _GatewayMessageType.COMMAND  # type: ignore[attr-defined]
                 if event.message_type == "slash_command"
@@ -4785,6 +4878,7 @@ class BGOSAdapter(BasePlatformAdapter):
                     event.text = merged
                     await self.handle_message(event)
                     return
+                self._stamp_source_profile(source, event.agent_route)
                 user_id = str(event.user_id) if event.user_id else None
                 is_backfill = user_id is None
                 gateway_event = _GatewayMessageEvent(
@@ -5255,6 +5349,7 @@ class BGOSAdapter(BasePlatformAdapter):
                     "dropping click for chat=%s", chat_id,
                 )
                 return
+            self._stamp_source_profile(source, route)
             gateway_event = _GatewayMessageEvent(
                 text=text,
                 message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
@@ -5647,6 +5742,7 @@ class BGOSAdapter(BasePlatformAdapter):
             except AttributeError:
                 source = None
             if source is not None:
+                self._stamp_source_profile(source, self._route_for_chat(chat_key))
                 gateway_event = _GatewayMessageEvent(
                     text=text,
                     message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
