@@ -82,19 +82,30 @@ def _default_create_profile(name: str) -> Path:
     return Path(create_profile(name, no_alias=True))
 
 
-def _seed_soul(profile_dir: Path, name: str) -> None:
-    """Give a brand-new profile a minimal persona so the route never serves
-    an empty prompt. An operator's existing SOUL.md is never touched."""
+def _seed_soul(profile_dir: Path, name: str, *, created_now: bool) -> None:
+    """Make sure the profile answers AS the named agent.
+
+    - No SOUL.md: write a minimal persona.
+    - SOUL.md exists and we created the profile IN THIS CALL: it is the
+      bootstrapper's generic template (hermes_cli.create_profile seeds one),
+      so append the identity paragraph. Without it the new agent introduces
+      itself as "Hermes Agent" (found live 2026-08-09).
+    - SOUL.md exists on a PRE-EXISTING profile: an operator's persona,
+      never touched.
+    """
     soul = profile_dir / "SOUL.md"
-    if soul.exists():
-        return
-    soul.write_text(
-        f"# {name}\n\n"
+    identity = (
+        f"\n\n# {name}\n\n"
         f"You are {name}, an agent on this Hermes gateway, reachable "
         f"through the BGOS (Home of Agents) app. Answer as {name}; your "
-        f"owner can refine this persona any time by editing this file.\n",
-        encoding="utf-8",
+        f"owner can refine this persona any time by editing this file.\n"
     )
+    if not soul.exists():
+        soul.write_text(identity.lstrip(), encoding="utf-8")
+        return
+    if created_now:
+        with soul.open("a", encoding="utf-8") as fh:
+            fh.write(identity)
 
 
 def _merge_agents_env(env_file: Path, route: str, name: str) -> str:
@@ -143,12 +154,14 @@ def apply_add_profile(
 
     create = create_profile or _default_create_profile
     profile_dir = hermes_home / "profiles" / route
+    created_now = False
     try:
         if not profile_dir.is_dir():
             created_dir = create(route)
+            created_now = True
             if created_dir is not None:
                 profile_dir = Path(created_dir)
-        _seed_soul(profile_dir, name)
+        _seed_soul(profile_dir, name, created_now=created_now)
     except Exception as exc:
         log.exception("add_profile: creating profile %r failed", route)
         return AddProfileResult(

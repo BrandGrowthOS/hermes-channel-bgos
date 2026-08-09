@@ -218,3 +218,33 @@ async def test_duplicate_rpc_id_is_ignored_while_in_flight(
 
     assert calls == ["wolf"]
     assert len(fake_api.results) == 1
+
+
+async def test_ok_result_triggers_an_immediate_scope_refresh(
+    adapter_and_api, monkeypatch,
+) -> None:
+    """Without this the new route only hot-loads on the FIRST inbound for an
+    unknown assistant id (the lazy _handle_inbound path); the add_profile
+    handler KNOWS the scope just changed, so it refreshes eagerly and the
+    agent is routable the moment the app shows success."""
+    adapter, fake_api = adapter_and_api
+    refreshed = asyncio.Event()
+
+    async def fake_refresh() -> bool:
+        refreshed.set()
+        return True
+
+    monkeypatch.setattr(adapter, "_refresh_pairing_scope", fake_refresh)
+    monkeypatch.setattr(
+        bgos_adapter_module,
+        "apply_add_profile",
+        lambda payload, **kwargs: AddProfileResult(
+            ok=True, profile="wolf", multiplex=True,
+        ),
+    )
+
+    await adapter._handle_profile_rpc(ADD_FRAME)
+    await _wait_for_result(fake_api)
+    await asyncio.wait_for(refreshed.wait(), timeout=1.0)
+
+    assert fake_api.results[0][1]["ok"] is True

@@ -53,6 +53,32 @@ def test_creates_the_profile_and_seeds_a_soul(tmp_path):
     assert "Wolf" in soul.read_text()
 
 
+def test_a_template_soul_from_the_bootstrapper_still_gets_the_identity(tmp_path):
+    """hermes_cli.create_profile seeds a GENERIC template SOUL.md; a profile
+    we created IN THIS CALL must still end up answering as the named agent
+    (found live 2026-08-09: Sandbox Beta would have introduced itself as
+    "Hermes Agent"). A pre-existing profile's SOUL is never touched (the
+    test above this one)."""
+    created: list[str] = []
+
+    def create_with_template(name: str):
+        pdir = fake_create_profile(created)(name)
+        (pdir / "SOUL.md").write_text("You are Hermes Agent, generic.\n")
+        return pdir
+
+    result = apply_add_profile(
+        PAYLOAD,
+        hermes_home=hermes_home(),
+        create_profile=create_with_template,
+        multiplex_active=True,
+    )
+
+    assert result.ok
+    soul_text = (hermes_home() / "profiles" / "wolf" / "SOUL.md").read_text()
+    assert "You are Hermes Agent, generic." in soul_text
+    assert "Wolf" in soul_text
+
+
 def test_existing_profile_is_reused_and_its_soul_untouched(tmp_path):
     pdir = hermes_home() / "profiles" / "wolf"
     pdir.mkdir(parents=True)

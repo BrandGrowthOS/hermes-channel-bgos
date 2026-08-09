@@ -5706,6 +5706,21 @@ class BGOSAdapter(BasePlatformAdapter):
                     "profile_rpc result post failed rpc=%s", rpc_id,
                     exc_info=True,
                 )
+
+            # The scope just changed by construction (the backend bound the
+            # new assistant before dispatching). Refresh eagerly so the agent
+            # is routable the moment the app shows success, instead of
+            # waiting for the lazy unknown-assistant hot-load on first
+            # inbound. Best effort: the lazy path still covers any failure.
+            if body.get("ok"):
+                try:
+                    await self._refresh_pairing_scope()
+                except Exception:
+                    log.debug(
+                        "post-add_profile scope refresh failed (the lazy "
+                        "hot-load path will cover it)",
+                        exc_info=True,
+                    )
         finally:
             self._profile_rpc_in_flight.discard(rpc_id)
 
