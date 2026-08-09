@@ -26,6 +26,29 @@ bash <(curl -fsSL https://raw.githubusercontent.com/BrandGrowthOS/hermes-channel
 
 Advanced overrides: `HERMES_INSTALL`, `HERMES_PYTHON`, `REPO_DIR`, `DEVICE_LABEL`, and `HERMES_SERVICE`.
 
+### Updating
+
+Use the same Python interpreter that runs Hermes. The default is a dry run:
+
+```bash
+<python-that-runs-hermes> -m hermes_channel_bgos.update
+```
+
+The command identifies an editable checkout or site-packages install, fetches
+the official Git refs, reports the current and target versions, prints the
+incoming shortlog, snapshots the current commit or frozen pip requirement, and
+prints exact apply and rollback commands. It does not change installed code
+unless `--yes` is supplied:
+
+```bash
+<python-that-runs-hermes> -m hermes_channel_bgos.update --yes
+```
+
+Pin a release tag or commit with `--pin v0.26.0 --yes` or
+`--pin <commit-sha> --yes`. After an applied update, the command verifies the
+version in a fresh Python process and prints the detected launchd or systemd
+restart command. It never executes the restart.
+
 **v0.23.0 (2026-08-04) - Install-time topology guard.** The 0.22.0 route-to-profile fix shipped and the two-agent bug still survived on a live host, because the topology around the code was broken and only a connect-time log line said so. Now `hermes-pair-bgos` refuses to pair a multi-route catalog until the host topology is real (profile per route, `gateway.multiplex_profiles` on, no stray per-profile `secrets/bgos.json`), and after the exchange it reports any other ACTIVE pairing serving the same routes (the double-answer re-pair leftover). `hermes-bgos-doctor` re-checks all of it any time, plus two deeper layers: a `SOUL.md` that Hermes's prompt-injection scanner silently replaces with a `[BLOCKED: ...]` placeholder, and sessions in `state.db` whose stored system prompt still carries that placeholder (they replay it forever). Upgrade note for existing installs: nothing changes at runtime; run `hermes-bgos-doctor` once after upgrading, and fix what it prints. If you intentionally run an exotic layout, `--skip-topology-check` preserves the old pair behavior.
 
 **v0.10.4 (2026-05-29) — Root install + cross-process waitForReply race fix.** Adds `install.sh` so Hermes servers can install/update the BGOS channel with one command. Fixes the peer `waitForReply` echo race found by Jeff's Hermes agent: the live gateway now refreshes consumed-reply receipts written by helper processes, writes a pending marker before the HTTP request starts, waits briefly during the WS race window for that marker to become a concrete receipt, and drops only exact already-returned peer replies instead of enqueueing them into Hermes. This prevents echo chains when an external tool/cron/helper calls `send_peer(wait_for_reply=True)` while preserving legitimate later peer turns.
@@ -48,6 +71,7 @@ Advanced overrides: `HERMES_INSTALL`, `HERMES_PYTHON`, `REPO_DIR`, `DEVICE_LABEL
 Backend dependencies still in flight: `DELETE /api/v1/messages/{id}` (for streaming-preview cleanup; missing → preview stays visible, cosmetic only) and a WS `typing` event handler (missing → no typing indicator, cosmetic only). Both degrade gracefully; no exceptions.
 
 ## Contents
+- [Updating](#updating)
 - [Quiet mode](#quiet-mode)
 - [Quick start with Claude Code (recommended)](#quick-start-with-claude-code-recommended)
 - [Prerequisites](#prerequisites)

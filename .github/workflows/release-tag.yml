@@ -1,0 +1,31 @@
+name: Release tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Tag package version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create tag if missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag="v${version}"
+          if git show-ref --verify --quiet "refs/tags/${tag}"; then
+            echo "Tag ${tag} already exists."
+            exit 0
+          fi
+          git tag "${tag}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${tag}"
