@@ -24,6 +24,7 @@ def _isolated_env(tmp_path: Path, capture_file: Path | None = None) -> dict[str,
     home.mkdir(exist_ok=True)
     env = os.environ.copy()
     for name in (
+        "BGOS_ASSISTANT_ID",
         "BGOS_CODE",
         "BGOS_PAIR_CODE",
         "CAPTURE_FILE",
@@ -300,3 +301,37 @@ def test_register_plugin_fails_loudly_on_missing_source(tmp_path: Path):
     )
     assert result.returncode != 0
     assert "Plugin source incomplete" in result.stderr
+
+
+def test_pair_if_requested_forwards_assistant_id(tmp_path: Path):
+    result, capture_file = _run_pair(
+        tmp_path,
+        "BGOS_PAIR_CODE=BGOS-AAAA-11 BGOS_ASSISTANT_ID=1012",
+    )
+    assert result.returncode == 0, result.stderr
+    args = _captured_args(capture_file)
+    assert "--assistant-id" in args
+    assert args[args.index("--assistant-id") + 1] == "1012"
+
+
+def test_pair_if_requested_omits_assistant_id_when_unset(tmp_path: Path):
+    result, capture_file = _run_pair(
+        tmp_path, "BGOS_PAIR_CODE=BGOS-AAAA-11",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--assistant-id" not in _captured_args(capture_file)
+
+
+def test_pair_if_requested_forwards_backend_url(tmp_path: Path):
+    """BGOS_BACKEND_URL must reach the pair CLI too, not only the gateway
+    env file. Found live 2026-08-09: a local-backend install paired against
+    PRODUCTION because pair_cli fell back to its default base URL."""
+    result, capture_file = _run_pair(
+        tmp_path,
+        "BGOS_PAIR_CODE=BGOS-AAAA-11 BGOS_BACKEND_URL=http://127.0.0.1:8090/api/v1",
+    )
+    assert result.returncode == 0, result.stderr
+    args = _captured_args(capture_file)
+    assert "--base-url" in args
+    # normalize_backend_url strips the app-facing /api/v1 suffix.
+    assert args[args.index("--base-url") + 1] == "http://127.0.0.1:8090"

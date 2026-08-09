@@ -453,3 +453,88 @@ async def test_pair_single_route_skips_route_profile_checks(
         "--agents", "hades:Hades",
     ])
     assert result.exit_code == 0, result.output
+
+
+async def test_pair_cli_assistant_id_flag_pins_identity(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    """--assistant-id sends intended_assistant_id (snake_case wire contract,
+    the same field the claude plugin pins with; board row 2026-08-09: the
+    guard's advice was unfollowable because this flag did not exist)."""
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_xyz", "pairing_id": 9},
+    )
+
+    result = await _invoke_cli([
+        "BGOS-WXYZ-12", "--device-label", "laptop",
+        "--assistant-id", "1012",
+        "--base-url", mock_bgos_server.url,
+    ])
+    assert result.exit_code == 0, result.output
+
+    req = mock_bgos_server.last_request(
+        "POST", "/api/v1/integrations/pair-exchange",
+    )
+    assert req.json_body["intended_assistant_id"] == 1012
+
+
+async def test_pair_cli_assistant_id_env_fallback(
+    mock_bgos_server, tmp_secrets_dir, monkeypatch,
+):
+    monkeypatch.setenv("BGOS_ASSISTANT_ID", "77")
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_xyz", "pairing_id": 9},
+    )
+
+    result = await _invoke_cli([
+        "BGOS-WXYZ-12", "--device-label", "laptop",
+        "--base-url", mock_bgos_server.url,
+    ])
+    assert result.exit_code == 0, result.output
+
+    req = mock_bgos_server.last_request(
+        "POST", "/api/v1/integrations/pair-exchange",
+    )
+    assert req.json_body["intended_assistant_id"] == 77
+
+
+async def test_pair_cli_unpinned_body_omits_the_field(
+    mock_bgos_server, tmp_secrets_dir,
+):
+    mock_bgos_server.on("POST", "/api/v1/integrations/pair-exchange").respond(
+        200, {"pairing_token": "pair_xyz", "pairing_id": 9},
+    )
+
+    result = await _invoke_cli([
+        "BGOS-WXYZ-12", "--device-label", "laptop",
+        "--base-url", mock_bgos_server.url,
+    ])
+    assert result.exit_code == 0, result.output
+
+    req = mock_bgos_server.last_request(
+        "POST", "/api/v1/integrations/pair-exchange",
+    )
+    assert "intended_assistant_id" not in req.json_body
+
+
+def test_server_error_detail_handles_parsed_dict_body():
+    """BgosApiError.body is often the ALREADY-PARSED JSON dict (the API layer
+    decodes JSON bodies), not a raw string. Found live 2026-08-09: the crash
+    (`'dict' object has no attribute 'strip'`) masked the very server
+    explanation the function exists to surface."""
+    from hermes_channel_bgos.pair_cli import server_error_detail
+
+    assert (
+        server_error_detail({"message": "Unknown pair code", "statusCode": 404})
+        == "Unknown pair code"
+    )
+    assert server_error_detail({"message": ["a", "b"]}) == "a; b"
+    assert server_error_detail({"error": "x"}) == ""
+
+
+def test_server_error_detail_still_handles_raw_strings():
+    from hermes_channel_bgos.pair_cli import server_error_detail
+
+    assert server_error_detail('{"message": "expired"}') == "expired"
+    assert server_error_detail("plain text body") == "plain text body"
+    assert server_error_detail(None) == ""

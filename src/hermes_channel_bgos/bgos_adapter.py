@@ -45,6 +45,7 @@ from .hermes_profiles import (
     profile_for_route,
     resolve_hermes_home,
 )
+from .profile_setup import apply_add_profile
 from .boards_marker import (
     BOARDS_LOOP_GUARD_LIMIT,
     BoardsCallResult,
@@ -1218,6 +1219,9 @@ class BGOSAdapter(BasePlatformAdapter):
         self._voice_tasks: set[asyncio.Task] = set()
         self._doctor_rpc_in_flight: set[str] = set()
         self._doctor_tasks: set[asyncio.Task] = set()
+        # Server-dispatched add_profile (one-click new-Hermes-agent).
+        self._profile_rpc_in_flight: set[str] = set()
+        self._profile_tasks: set[asyncio.Task] = set()
         # Agent Boards round trip ([[BGOS_BOARDS]] marker). Executor tasks
         # are fire-and-forget like _voice_tasks (tracked so exceptions are
         # retrieved and disconnect can drain them). The per-chat counter is
@@ -1552,6 +1556,7 @@ class BGOSAdapter(BasePlatformAdapter):
             on_inbound_click=self._handle_inbound_click,
             on_voice_rpc=self._handle_voice_rpc,
             on_doctor_rpc=self._handle_doctor_rpc,
+            on_profile_rpc=self._handle_profile_rpc,
             on_mission_event=self._mission_lane.handle_mission_event,
         )
         if self.pairing_id is not None:
@@ -2104,6 +2109,13 @@ class BGOSAdapter(BasePlatformAdapter):
             await asyncio.gather(*doctor_tasks, return_exceptions=True)
         self._doctor_tasks.clear()
         self._doctor_rpc_in_flight.clear()
+        profile_tasks = [t for t in self._profile_tasks if not t.done()]
+        for task in profile_tasks:
+            task.cancel()
+        if profile_tasks:
+            await asyncio.gather(*profile_tasks, return_exceptions=True)
+        self._profile_tasks.clear()
+        self._profile_rpc_in_flight.clear()
         setup_tasks = [
             task for task in self._stt_setup_tasks if not task.done()
         ]
@@ -5613,6 +5625,104 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
         finally:
             self._doctor_rpc_in_flight.discard(rpc_id)
+
+    # -------------------------------------------------------------------------
+    # Server-dispatched add_profile (profile_rpc, one-click new-Hermes-agent)
+    # -------------------------------------------------------------------------
+
+    def _multiplex_active(self) -> bool:
+        """The RUNNING gateway's multiplex flag. Config is read at gateway
+        startup, so this is the honest signal for whether a route stamp will
+        be honored WITHOUT a restart."""
+        runner = getattr(self, "gateway_runner", None)
+        cfg = getattr(runner, "config", None)
+        return bool(getattr(cfg, "multiplex_profiles", False))
+
+    async def _handle_profile_rpc(self, data: dict) -> None:
+        """Validate and dispatch a server-sent add_profile frame.
+
+        The backend has already created the assistant and bound it to this
+        pairing under the payload's agent_route; the local work (profile dir,
+        SOUL seed, BGOS_AGENTS persistence) runs in a worker thread and the
+        result settles the app's held-open request. Mirrors the doctor_rpc
+        validation ladder byte for byte where it can.
+        """
+        if not isinstance(data, dict):
+            log.warning("dropping malformed profile_rpc frame: %s", data)
+            return
+        rpc_id = data.get("rpcId")
+        if not isinstance(rpc_id, str) or not rpc_id.strip():
+            log.warning("dropping profile_rpc frame without rpcId: %s", data)
+            return
+        if data.get("op") != "add_profile":
+            log.debug("dropping profile_rpc frame with unknown op: %s", data)
+            return
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            log.warning(
+                "dropping profile_rpc frame with invalid payload: %s", data,
+            )
+            return
+        if rpc_id in self._profile_rpc_in_flight:
+            log.debug("dropping in-flight profile_rpc duplicate rpc=%s", rpc_id)
+            return
+
+        self._profile_rpc_in_flight.add(rpc_id)
+        task = asyncio.create_task(self._run_profile_rpc(rpc_id, payload))
+        self._profile_tasks.add(task)
+        task.add_done_callback(self._profile_tasks.discard)
+
+    async def _run_profile_rpc(self, rpc_id: str, payload: dict) -> None:
+        try:
+            try:
+                await self._api.post_profile_rpc_ack(rpc_id)
+            except Exception:
+                log.warning(
+                    "profile_rpc ack failed rpc=%s", rpc_id, exc_info=True,
+                )
+
+            try:
+                result = await asyncio.to_thread(
+                    apply_add_profile,
+                    payload,
+                    hermes_home=self._hermes_home,
+                    multiplex_active=self._multiplex_active(),
+                )
+                body = result.to_wire()
+            except Exception as exc:
+                log.exception("profile_rpc apply failed rpc=%s", rpc_id)
+                body = {
+                    "ok": False,
+                    "error": {
+                        "code": "ADD_PROFILE_ERROR",
+                        "message": (str(exc) or exc.__class__.__name__)[:300],
+                    },
+                }
+
+            try:
+                await self._api.post_profile_rpc_result(rpc_id, body)
+            except Exception:
+                log.warning(
+                    "profile_rpc result post failed rpc=%s", rpc_id,
+                    exc_info=True,
+                )
+
+            # The scope just changed by construction (the backend bound the
+            # new assistant before dispatching). Refresh eagerly so the agent
+            # is routable the moment the app shows success, instead of
+            # waiting for the lazy unknown-assistant hot-load on first
+            # inbound. Best effort: the lazy path still covers any failure.
+            if body.get("ok"):
+                try:
+                    await self._refresh_pairing_scope()
+                except Exception:
+                    log.debug(
+                        "post-add_profile scope refresh failed (the lazy "
+                        "hot-load path will cover it)",
+                        exc_info=True,
+                    )
+        finally:
+            self._profile_rpc_in_flight.discard(rpc_id)
 
     # -------------------------------------------------------------------------
     # Native in-app voice (voice_rpc, spec section 6.2, the Hermes broker)
