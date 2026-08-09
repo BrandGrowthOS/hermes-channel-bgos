@@ -515,3 +515,26 @@ async def test_pair_cli_unpinned_body_omits_the_field(
         "POST", "/api/v1/integrations/pair-exchange",
     )
     assert "intended_assistant_id" not in req.json_body
+
+
+def test_server_error_detail_handles_parsed_dict_body():
+    """BgosApiError.body is often the ALREADY-PARSED JSON dict (the API layer
+    decodes JSON bodies), not a raw string. Found live 2026-08-09: the crash
+    (`'dict' object has no attribute 'strip'`) masked the very server
+    explanation the function exists to surface."""
+    from hermes_channel_bgos.pair_cli import server_error_detail
+
+    assert (
+        server_error_detail({"message": "Unknown pair code", "statusCode": 404})
+        == "Unknown pair code"
+    )
+    assert server_error_detail({"message": ["a", "b"]}) == "a; b"
+    assert server_error_detail({"error": "x"}) == ""
+
+
+def test_server_error_detail_still_handles_raw_strings():
+    from hermes_channel_bgos.pair_cli import server_error_detail
+
+    assert server_error_detail('{"message": "expired"}') == "expired"
+    assert server_error_detail("plain text body") == "plain text body"
+    assert server_error_detail(None) == ""

@@ -29,22 +29,27 @@ from .topology import (
 
 
 
-def server_error_detail(body: str | None) -> str:
+def server_error_detail(body: object) -> str:
     """The server's own explanation from an error body, or empty.
 
     Nest error bodies are JSON with a `message` that is a string or a list.
     The pair-exchange 409, for example, names the exact live pairing to
     revoke; swallowing it cost a real user a working explanation (2026-08-09,
     the CLI printed only "HTTP 409" while the body said which pairing served
-    the agent and what to do). Raw non-JSON bodies are passed through
-    truncated.
+    the agent and what to do). `BgosApiError.body` is usually the
+    ALREADY-PARSED JSON (a dict) - assuming a raw string here crashed the
+    error path and masked the explanation all over again, found live the
+    same day. Raw non-JSON string bodies pass through truncated.
     """
     if not body:
         return ""
-    try:
-        parsed = json.loads(body)
-    except (ValueError, TypeError):
-        return body.strip()[:500]
+    parsed: object = body
+    if isinstance(body, (str, bytes)):
+        try:
+            parsed = json.loads(body)
+        except (ValueError, TypeError):
+            text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+            return text.strip()[:500]
     msg = parsed.get("message") if isinstance(parsed, dict) else None
     if isinstance(msg, list):
         msg = "; ".join(str(m) for m in msg)

@@ -252,6 +252,12 @@ pair_if_requested() {
     if [[ -n "${BGOS_ASSISTANT_ID:-}" ]]; then
       pin_args=(--assistant-id "$BGOS_ASSISTANT_ID")
     fi
+    # A staging/local BGOS_BACKEND_URL must reach the pair CLI too, not only
+    # the gateway env file: pair_cli otherwise falls back to its production
+    # default and pairs against the wrong backend (found live 2026-08-09).
+    if [[ -n "${BGOS_BACKEND_URL:-}" ]]; then
+      pin_args+=(--base-url "$(normalize_backend_url "$BGOS_BACKEND_URL")")
+    fi
     if ! "$py" -m hermes_channel_bgos.pair_cli "$code" --device-label "$DEVICE_LABEL" --agents "$BGOS_AGENTS" ${pin_args[@]+"${pin_args[@]}"}; then
       warn "Pairing did not complete - read the topology findings above, apply the printed fixes, then re-run: $py -m hermes_channel_bgos.pair_cli <NEW-CODE> --device-label '$DEVICE_LABEL' --agents '$BGOS_AGENTS' (pair codes expire in 10 minutes, mint a fresh one)"
     fi
