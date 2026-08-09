@@ -28,6 +28,29 @@ from .topology import (
 )
 
 
+
+def server_error_detail(body: str | None) -> str:
+    """The server's own explanation from an error body, or empty.
+
+    Nest error bodies are JSON with a `message` that is a string or a list.
+    The pair-exchange 409, for example, names the exact live pairing to
+    revoke; swallowing it cost a real user a working explanation (2026-08-09,
+    the CLI printed only "HTTP 409" while the body said which pairing served
+    the agent and what to do). Raw non-JSON bodies are passed through
+    truncated.
+    """
+    if not body:
+        return ""
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return body.strip()[:500]
+    msg = parsed.get("message") if isinstance(parsed, dict) else None
+    if isinstance(msg, list):
+        msg = "; ".join(str(m) for m in msg)
+    return str(msg).strip()[:500] if msg else ""
+
+
 def secrets_path() -> Path:
     """Resolve the BGOS secrets file path.
 
@@ -243,6 +266,9 @@ async def _run(
             f"Pair exchange failed: HTTP {exc.status}{code_str}",
             fg="red", err=True,
         )
+        detail = server_error_detail(exc.body)
+        if detail:
+            click.secho(f"Server says: {detail}", fg="yellow", err=True)
         sys.exit(1)
     finally:
         await api.close()
@@ -293,8 +319,10 @@ async def _run(
             )
             click.secho(f"Published {len(catalog)} agent(s) to BGOS.", fg="green")
         except BgosApiError as exc:
+            detail = server_error_detail(exc.body)
             click.secho(
-                f"Catalog push failed (non-fatal): HTTP {exc.status}",
+                f"Catalog push failed (non-fatal): HTTP {exc.status}"
+                + (f" - {detail}" if detail else ""),
                 fg="yellow", err=True,
             )
         finally:
