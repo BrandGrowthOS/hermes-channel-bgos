@@ -10,6 +10,7 @@ import asyncio
 
 import pytest
 
+from hermes_channel_bgos import __version__
 from hermes_channel_bgos.bgos_api import BgosApi
 from hermes_channel_bgos.config import BgosConfig
 from hermes_channel_bgos.plugin import BGOS_PLATFORM_HINT, resolve_platform_hint
@@ -42,6 +43,7 @@ async def test_get_capabilities_sends_channel_and_pairing_header(mock_bgos_serve
     assert "BGOS Channel Agent Capabilities" in resp["text"]
     req = mock_bgos_server.last_request("GET", "/api/v1/integrations/capabilities")
     assert req.query["channel"] == "hermes"
+    assert req.query["daemonVersion"] == __version__
     assert req.headers.get("X-BGOS-Pairing") == "pair_xyz"
 
 
@@ -61,6 +63,7 @@ async def test_resolve_platform_hint_prefers_served_canon(
     assert hint == SERVED
     req = mock_bgos_server.last_request("GET", "/api/v1/integrations/capabilities")
     assert req.query["channel"] == "hermes"
+    assert req.query["daemonVersion"] == __version__
 
 
 async def test_resolve_platform_hint_falls_back_on_server_error(
