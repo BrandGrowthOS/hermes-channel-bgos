@@ -96,6 +96,14 @@ install_package() {
     "${py%/python}/pip" install -e "$REPO_DIR"
     return
   fi
+  if ! "$py" -m pip --version >/dev/null 2>&1; then
+    # A uv-built Hermes venv ships without pip, so the last-resort path
+    # below dies with "No module named pip" (hit on a fresh Mac mini,
+    # 2026-08-09). ensurepip bootstraps it from the stdlib.
+    log "pip missing from the Hermes venv; bootstrapping with ensurepip"
+    "$py" -m ensurepip --upgrade \
+      || fail "Could not bootstrap pip into $py (ensurepip failed). Install uv (https://docs.astral.sh/uv/) and re-run."
+  fi
   log "Installing package with python -m pip"
   "$py" -m pip install -e "$REPO_DIR"
 }
