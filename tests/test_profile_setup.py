@@ -216,3 +216,79 @@ def test_create_profile_failure_is_an_error_result(tmp_path):
     assert not result.ok
     assert result.error_code == "profile_create_failed"
     assert "disk full" in (result.error_message or "")
+
+
+def test_comma_or_newline_in_the_name_cannot_corrupt_the_env(tmp_path):
+    """The spec is comma-delimited and .env is line-delimited: an unsanitized
+    display name could mint a phantom route or inject an arbitrary env line
+    (review finding, 2026-08-09)."""
+    result = apply_add_profile(
+        {**PAYLOAD, "name": "Wolf, Jr\nOPENAI_API_BASE=evil"},
+        hermes_home=hermes_home(),
+        create_profile=fake_create_profile([]),
+        multiplex_active=True,
+    )
+
+    assert result.ok
+    assert result.agents_spec == "wolf:Wolf Jr OPENAI_API_BASE=evil"
+    content = (hermes_home() / ".env").read_text()
+    assert "OPENAI_API_BASE" not in [
+        line.split("=", 1)[0] for line in content.splitlines()
+    ]
+    assert content.count("BGOS_AGENTS=") == 1
+
+
+def test_env_merge_recognizes_export_and_quoted_spellings(tmp_path):
+    """The doctor's own parser accepts `export BGOS_AGENTS=...` and quoted
+    values, so those spellings exist in the wild; failing to recognize them
+    used to append a SECOND line and shrink the catalog to just the new
+    route on last-wins parsing (review finding, 2026-08-09)."""
+    env_file = hermes_home() / ".env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text('export BGOS_AGENTS="default:Hermes"\n')
+
+    result = apply_add_profile(
+        PAYLOAD,
+        hermes_home=hermes_home(),
+        create_profile=fake_create_profile([]),
+        multiplex_active=True,
+    )
+
+    assert result.ok
+    assert result.agents_spec == "default:Hermes,wolf:Wolf"
+    content = env_file.read_text()
+    assert content.count("BGOS_AGENTS") == 1
+    assert "BGOS_AGENTS=default:Hermes,wolf:Wolf" in content
+
+
+def test_concurrent_add_profile_calls_do_not_lose_updates(tmp_path):
+    """Two frames with different rpcIds run in two worker threads; the .env
+    read-modify-write must be serialized or one route vanishes until the
+    next add (review finding, 2026-08-09)."""
+    import threading
+
+    barrier = threading.Barrier(2)
+
+    def create(name):
+        pdir = hermes_home() / "profiles" / name
+        pdir.mkdir(parents=True)
+        return pdir
+
+    def run(route, name):
+        barrier.wait()
+        apply_add_profile(
+            {"assistant_id": 1, "agent_route": route, "name": name},
+            hermes_home=hermes_home(),
+            create_profile=create,
+            multiplex_active=True,
+        )
+
+    t1 = threading.Thread(target=run, args=("wolf", "Wolf"))
+    t2 = threading.Thread(target=run, args=("bear", "Bear"))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    content = (hermes_home() / ".env").read_text()
+    assert content.count("BGOS_AGENTS=") == 1
+    spec_line = [l for l in content.splitlines() if l.startswith("BGOS_AGENTS=")][0]
+    assert "wolf:Wolf" in spec_line
+    assert "bear:Bear" in spec_line

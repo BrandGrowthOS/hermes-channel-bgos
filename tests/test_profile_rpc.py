@@ -248,3 +248,26 @@ async def test_ok_result_triggers_an_immediate_scope_refresh(
     await asyncio.wait_for(refreshed.wait(), timeout=1.0)
 
     assert fake_api.results[0][1]["ok"] is True
+
+
+async def test_apply_raising_unexpectedly_still_settles_the_rpc(
+    adapter_and_api, monkeypatch,
+) -> None:
+    """apply_add_profile promises never to raise, but the handler's belt and
+    braces must still settle the backend RPC if it ever does."""
+    adapter, fake_api = adapter_and_api
+
+    def exploding_apply(payload, **kwargs):
+        raise RuntimeError("unexpected explosion")
+
+    monkeypatch.setattr(
+        bgos_adapter_module, "apply_add_profile", exploding_apply,
+    )
+
+    await adapter._handle_profile_rpc(ADD_FRAME)
+    await _wait_for_result(fake_api)
+
+    _rpc_id, body = fake_api.results[0]
+    assert body["ok"] is False
+    assert body["error"]["code"] == "ADD_PROFILE_ERROR"
+    assert "unexpected explosion" in body["error"]["message"]

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -108,25 +109,59 @@ def _seed_soul(profile_dir: Path, name: str, *, created_now: bool) -> None:
             fh.write(identity)
 
 
+def _safe_name(name: str, route: str) -> str:
+    """A display name safe for the comma-delimited spec and the line-based
+    .env file. The route gets a strict regex; the name gets this: commas and
+    line breaks collapse to spaces (a comma would mint a phantom route via
+    parse_agents_spec, a newline would inject an arbitrary env line), quotes
+    are dropped (they break the shell command and the quote-stripping .env
+    readers). Empty after sanitizing falls back to the route."""
+    cleaned = re.sub(r"\s+", " ", re.sub(r"[,\r\n]+", " ", name))
+    cleaned = cleaned.replace('"', "").replace("'", "").strip()
+    return cleaned or route
+
+
+# Serializes the .env read-modify-write across worker threads: two
+# add_profile frames with different rpcIds run concurrently and an
+# unserialized merge is the classic lost update.
+_ENV_MERGE_LOCK = threading.Lock()
+
+# Matches the doctor's _parse_env_file dialect: optional `export `, then the
+# key, then a value that may be symmetrically quoted.
+_AGENTS_LINE_RE = re.compile(r"^(?:export\s+)?BGOS_AGENTS=(.*)$")
+
+
+def _unquote(value: str) -> str:
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return v[1:-1]
+    return v
+
+
 def _merge_agents_env(env_file: Path, route: str, name: str) -> str:
     """Append `route:name` to BGOS_AGENTS in `env_file`, preserving every
-    other line. Returns the merged spec. Idempotent for a known route."""
-    lines: list[str] = []
-    current = ""
-    if env_file.is_file():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            if line.startswith("BGOS_AGENTS="):
-                current = line.split("=", 1)[1]
-            else:
-                lines.append(line)
-    entries = parse_agents_spec(current)
-    if not any(e["agent_route"] == route for e in entries):
-        entries.append({"agent_route": route, "name": name})
-    spec = ",".join(f"{e['agent_route']}:{e['name']}" for e in entries)
-    lines.append(f"BGOS_AGENTS={spec}")
-    env_file.parent.mkdir(parents=True, exist_ok=True)
-    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return spec
+    other line. Recognizes the `export` and quoted spellings the repo's own
+    .env parser accepts, so the old line is always REPLACED, never joined by
+    a second one (last-wins parsing would shrink the catalog). Returns the
+    merged spec. Idempotent for a known route."""
+    with _ENV_MERGE_LOCK:
+        lines: list[str] = []
+        current = ""
+        if env_file.is_file():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                m = _AGENTS_LINE_RE.match(line)
+                if m:
+                    current = _unquote(m.group(1))
+                else:
+                    lines.append(line)
+        entries = parse_agents_spec(current)
+        if not any(e["agent_route"] == route for e in entries):
+            entries.append({"agent_route": route, "name": name})
+        spec = ",".join(f"{e['agent_route']}:{e['name']}" for e in entries)
+        lines.append(f"BGOS_AGENTS={spec}")
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return spec
 
 
 def apply_add_profile(
@@ -139,8 +174,10 @@ def apply_add_profile(
     """Perform the local half of add_profile. Synchronous disk work; the
     adapter runs it in a worker thread. Never raises: every failure is an
     error result so the backend RPC always settles."""
+    # payload.assistant_id is intentionally unused here: the backend already
+    # bound the assistant to this pairing before dispatching; the local half
+    # only needs the route and the display name.
     route = str(payload.get("agent_route") or "").strip()
-    name = str(payload.get("name") or "").strip() or route
     if not _ROUTE_RE.match(route) or route == DEFAULT_ROUTE:
         return AddProfileResult(
             ok=False,
@@ -151,6 +188,8 @@ def apply_add_profile(
                 f"'{DEFAULT_ROUTE}')"
             ),
         )
+
+    name = _safe_name(str(payload.get("name") or ""), route)
 
     create = create_profile or _default_create_profile
     profile_dir = hermes_home / "profiles" / route
