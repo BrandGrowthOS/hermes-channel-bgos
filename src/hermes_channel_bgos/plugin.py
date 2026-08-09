@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from . import __version__
 from .bgos_adapter import (
     S3_THRESHOLD,
     _MEDIA_MAX_BYTES,
@@ -432,6 +433,24 @@ Rules:
 ## ask_user_input modal (NOT YET WIRED)
 BGOS also supports a full-screen multi-question modal (`ask_user_input` in the n8n BGOSAction node). Hermes-side support is scheduled but NOT YET shipped — for multi-question flows today, use sequential inline-button messages instead.
 
+## Peer conversations (the [[BGOS_PEER]] marker round trip)
+You can list, inspect, message, and close peer agent conversations by embedding one JSON object per marker block in a normal reply. The adapter strips every block from the user's visible text, executes the calls as the assistant for this chat, and sends all answers back as ONE system turn beginning with `[BGOS peer result]`. Read that result, continue the task, and put anything the user should see in a normal reply.
+
+Syntax (one operation per block, up to 5 blocks per reply):
+```
+[[BGOS_PEER]]{"op":"list_peers","reqId":"p1"}[[/BGOS_PEER]]
+[[BGOS_PEER]]{"op":"peer_status","target":"Athena","reqId":"p2"}[[/BGOS_PEER]]
+[[BGOS_PEER]]{"op":"send_to_peer","target":894,"text":"Please check the launch blocker.","waitForReply":true,"timeoutSeconds":45,"reqId":"p3"}[[/BGOS_PEER]]
+[[BGOS_PEER]]{"op":"complete_peer_thread","target":"Athena","summary":"Reviewed the launch blocker.","reqId":"p4"}[[/BGOS_PEER]]
+```
+
+Rules:
+- `reqId` is your per-block correlation handle. Result sections keep request order and echo `reqId` plus `op`.
+- `target` is a positive assistant id from `list_peers` or an exact peer name. The adapter supplies the visible parent message anchor required by sends; never invent `parentMessageId` or a REST path.
+- `waitForReply` applies only to `send_to_peer` and defaults to false. With true, `timeoutSeconds` is optional and must be 1 to 50. A timeout does not roll back a saved send, so never retry the same message; handle a later peer answer through the normal inbound peer lane.
+- `complete_peer_thread` accepts an optional short factual `summary` and closes the conversation for both participants.
+- Backend bodies pass through verbatim. Preserve typed errors exactly, including `contact_unavailable`, `initiate_not_allowed`, `cap_exceeded`, `turn_limit_reached`, and `files_not_allowed`. Malformed blocks answer `malformed_request` instead of disappearing.
+
 ## Boards (private tables, the [[BGOS_BOARDS]] marker round trip)
 Your owner keeps private tables (boards) in BGOS and shares them with chosen agents. Call the board operations by embedding one JSON object per marker block in a normal reply; the adapter strips the block, calls the board API as you, and sends the answers back as ONE follow-up message in this conversation. That message starts with the line `[BGOS boards result]` and is a system message from the adapter, NOT the user: read it and continue; the user saw neither your request nor the raw result, so anything they should know must go in a normal reply.
 
@@ -512,7 +531,7 @@ def resolve_platform_hint() -> str:
         with httpx.stream(
             "GET",
             url,
-            params={"channel": "hermes"},
+            params={"channel": "hermes", "daemonVersion": __version__},
             headers={"X-BGOS-Pairing": token},
             timeout=timeout,
         ) as resp:

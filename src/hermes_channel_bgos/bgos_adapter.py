@@ -55,6 +55,15 @@ from .boards_marker import (
     parse_boards_blocks,
     plan_request,
 )
+from .peer_marker import (
+    PEER_LOOP_GUARD_LIMIT,
+    PeerCallResult,
+    PeerParseError,
+    PeerRequest,
+    build_result_turn as build_peer_result_turn,
+    parse_peer_blocks,
+    plan_request as plan_peer_request,
+)
 from .config import BgosConfig, choose_pairing_token, redact_token
 from .doctor import run_checks
 from .missions_bridge import MissionLane, classify_goal_line
@@ -1230,6 +1239,11 @@ class BGOSAdapter(BasePlatformAdapter):
         # but an agent ping-ponging with the adapter cannot run forever.
         self._boards_tasks: set[asyncio.Task] = set()
         self._boards_consecutive_results: dict[int, int] = {}
+        # Agent peer round trip ([[BGOS_PEER]] marker). This follows the
+        # boards executor lifecycle and loop guard so chained peer calls can
+        # continue without letting synthetic result turns ping pong forever.
+        self._peer_tasks: set[asyncio.Task] = set()
+        self._peer_consecutive_results: dict[int, int] = {}
         # Poll cadence for turn-completion detection, and the quiet window
         # after the last captured reply that resolves a turn when session
         # tracking is unavailable. The settle window MUST exceed the
@@ -2102,6 +2116,12 @@ class BGOSAdapter(BasePlatformAdapter):
         if boards_tasks:
             await asyncio.gather(*boards_tasks, return_exceptions=True)
         self._boards_tasks.clear()
+        peer_tasks = [t for t in self._peer_tasks if not t.done()]
+        for task in peer_tasks:
+            task.cancel()
+        if peer_tasks:
+            await asyncio.gather(*peer_tasks, return_exceptions=True)
+        self._peer_tasks.clear()
         doctor_tasks = [t for t in self._doctor_tasks if not t.done()]
         for task in doctor_tasks:
             task.cancel()
@@ -2624,6 +2644,322 @@ class BGOSAdapter(BasePlatformAdapter):
         )
         await self.handle_message(event)
 
+    # -------------------------------------------------------------------------
+    # Agent peer round trip ([[BGOS_PEER]] marker)
+    # -------------------------------------------------------------------------
+
+    def _schedule_peer_requests(
+        self,
+        chat_key: int,
+        requests: list[PeerRequest],
+        errors: list[PeerParseError],
+        parent_message_id: int | None,
+    ) -> None:
+        """Start one tracked executor task for one agent reply."""
+        task = asyncio.create_task(
+            self._run_peer_requests(
+                chat_key, requests, errors, parent_message_id,
+            )
+        )
+        self._peer_tasks.add(task)
+        task.add_done_callback(self._peer_tasks.discard)
+
+    async def _run_peer_requests(
+        self,
+        chat_key: int,
+        requests: list[PeerRequest],
+        errors: list[PeerParseError],
+        parent_message_id: int | None,
+    ) -> None:
+        """Execute one reply's peer calls and dispatch one result turn.
+
+        Backend success and error bodies are passed unchanged to the peer
+        renderer. Parse and transport failures become local typed sections.
+        Nothing here raises into the outbound send path.
+        """
+        try:
+            count = self._peer_consecutive_results.get(chat_key, 0)
+            if count >= PEER_LOOP_GUARD_LIMIT:
+                if count > PEER_LOOP_GUARD_LIMIT:
+                    log.warning(
+                        "peer loop guard: dropping %d request(s) on chat %s",
+                        len(requests) + len(errors), chat_key,
+                    )
+                    return
+                refusal = {
+                    "error": "loop_guard",
+                    "message": (
+                        f"more than {PEER_LOOP_GUARD_LIMIT} consecutive peer "
+                        "result turns without a user message. No call was "
+                        "executed. Reply to the user; peer calls resume on "
+                        "the next real inbound message."
+                    ),
+                }
+                results = [
+                    PeerCallResult(
+                        req_id=req.req_id,
+                        op=req.op,
+                        ok=False,
+                        status=0,
+                        body=refusal,
+                    )
+                    for req in requests
+                ]
+                self._peer_consecutive_results[chat_key] = count + 1
+                await self._dispatch_peer_result_turn(
+                    chat_key,
+                    build_peer_result_turn(
+                        results
+                        or [
+                            PeerCallResult(
+                                req_id="loop",
+                                op="parse",
+                                ok=False,
+                                status=0,
+                                body=refusal,
+                            )
+                        ]
+                    ),
+                )
+                return
+
+            results: list[PeerCallResult] = []
+            for err in errors:
+                results.append(
+                    PeerCallResult(
+                        req_id=err.req_id,
+                        op="parse",
+                        ok=False,
+                        status=0,
+                        body={
+                            "error": "malformed_request",
+                            "message": err.message,
+                        },
+                    )
+                )
+            if requests:
+                caller_assistant_id = await self._assistant_id_for_chat(chat_key)
+                for req in requests:
+                    if caller_assistant_id is None:
+                        results.append(
+                            PeerCallResult(
+                                req_id=req.req_id,
+                                op=req.op,
+                                ok=False,
+                                status=0,
+                                body={
+                                    "error": "no_assistant",
+                                    "message": (
+                                        "could not resolve the assistant for "
+                                        "this chat; the call was not executed"
+                                    ),
+                                },
+                            )
+                        )
+                        continue
+                    results.append(
+                        await self._execute_peer_request(
+                            int(caller_assistant_id),
+                            parent_message_id,
+                            req,
+                        )
+                    )
+            if not results:
+                return
+            self._peer_consecutive_results[chat_key] = count + 1
+            await self._dispatch_peer_result_turn(
+                chat_key, build_peer_result_turn(results),
+            )
+        except Exception:  # noqa: BLE001 - background task, never propagate
+            log.warning(
+                "peer request execution failed on chat %s",
+                chat_key,
+                exc_info=True,
+            )
+
+    async def _resolve_peer_name(
+        self, caller_assistant_id: int, target_name: str,
+    ) -> tuple[int | None, dict | None]:
+        """Resolve one exact peer name through the existing roster helper."""
+        roster = await self._api.list_peers(
+            caller_assistant_id=caller_assistant_id,
+        )
+        matches: list[int] = []
+        for row in roster:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            if name is None:
+                name = row.get("assistantName", row.get("assistant_name"))
+            if name != target_name:
+                continue
+            raw_id = row.get("assistantId", row.get("assistant_id"))
+            peer_id = self._int_or_none(raw_id)
+            if peer_id is not None and peer_id > 0:
+                matches.append(peer_id)
+        unique_matches = list(dict.fromkeys(matches))
+        if len(unique_matches) == 1:
+            return unique_matches[0], None
+        if not unique_matches:
+            return None, {
+                "error": "unknown_peer",
+                "message": (
+                    f"no peer with exact name {target_name!r} appears in "
+                    "list_peers; use a listed exact name or assistant id"
+                ),
+            }
+        return None, {
+            "error": "ambiguous_peer",
+            "message": (
+                f"more than one peer has exact name {target_name!r}; use "
+                "the assistant id"
+            ),
+        }
+
+    async def _execute_peer_request(
+        self,
+        caller_assistant_id: int,
+        parent_message_id: int | None,
+        req: PeerRequest,
+    ) -> PeerCallResult:
+        """Execute one peer plan through the existing BgosApi helpers."""
+        try:
+            plan = plan_peer_request(req)
+            kwargs = dict(plan.kwargs)
+            kwargs["caller_assistant_id"] = caller_assistant_id
+            if plan.helper == "send_peer":
+                anchor = self._int_or_none(parent_message_id)
+                if anchor is None or anchor <= 0:
+                    return PeerCallResult(
+                        req_id=req.req_id,
+                        op=req.op,
+                        ok=False,
+                        status=0,
+                        body={
+                            "error": "no_parent_message",
+                            "message": (
+                                "send_to_peer needs a visible assistant "
+                                "message in this chat to anchor its side "
+                                "thread; include normal visible text with "
+                                "the marker and try again"
+                            ),
+                        },
+                    )
+                kwargs["parent_message_id"] = anchor
+                if kwargs.get("wait_for_reply"):
+                    kwargs["on_wait_reply_consumed"] = (
+                        self._record_consumed_peer_wait_reply
+                    )
+
+            if plan.target_kwarg is not None:
+                target_id: int | None
+                if isinstance(plan.target, int):
+                    target_id = plan.target
+                elif isinstance(plan.target, str):
+                    target_id, target_error = await self._resolve_peer_name(
+                        caller_assistant_id, plan.target,
+                    )
+                    if target_error is not None:
+                        return PeerCallResult(
+                            req_id=req.req_id,
+                            op=req.op,
+                            ok=False,
+                            status=0,
+                            body=target_error,
+                        )
+                else:
+                    target_id = None
+                if target_id is None:
+                    return PeerCallResult(
+                        req_id=req.req_id,
+                        op=req.op,
+                        ok=False,
+                        status=0,
+                        body={
+                            "error": "invalid_target",
+                            "message": "peer target could not be resolved",
+                        },
+                    )
+                kwargs[plan.target_kwarg] = target_id
+
+            helpers = {
+                "list_peers": self._api.list_peers,
+                "peer_status": self._api.peer_status,
+                "send_peer": self._api.send_peer,
+                "close_peer_conversation": self._api.close_peer_conversation,
+            }
+            helper = helpers[plan.helper]
+            body = await helper(**kwargs)
+            return PeerCallResult(
+                req_id=req.req_id,
+                op=req.op,
+                ok=True,
+                status=200,
+                body=body,
+            )
+        except BgosApiError as exc:
+            return PeerCallResult(
+                req_id=req.req_id,
+                op=req.op,
+                ok=False,
+                status=exc.status,
+                body=exc.body,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface, never raise
+            log.warning(
+                "peer %s failed on assistant %s",
+                req.op,
+                caller_assistant_id,
+                exc_info=True,
+            )
+            return PeerCallResult(
+                req_id=req.req_id,
+                op=req.op,
+                ok=False,
+                status=0,
+                body={
+                    "error": "transport_error",
+                    "message": exc.__class__.__name__,
+                },
+            )
+
+    async def _dispatch_peer_result_turn(self, chat_key: int, text: str) -> None:
+        """Deliver one peer result turn into the same Hermes session."""
+        user_id = self.pairing_user_id or None
+        if _GatewayMessageEvent is not None and _GatewayMessageType is not None:
+            try:
+                source = self.build_source(  # type: ignore[attr-defined]
+                    chat_id=str(chat_key), user_id=user_id,
+                )
+            except AttributeError:
+                source = None
+            if source is not None:
+                self._stamp_source_profile(source, self._route_for_chat(chat_key))
+                gateway_event = _GatewayMessageEvent(
+                    text=text,
+                    message_type=_GatewayMessageType.TEXT,  # type: ignore[attr-defined]
+                    source=source,
+                    message_id=None,
+                    raw_message=None,
+                    internal=True,
+                )
+                await self.handle_message(gateway_event)
+                return
+        event = MessageEvent(
+            platform="bgos",
+            chat_id=chat_key,
+            message_id=0,
+            user_id=user_id or "",
+            assistant_id=self._state.assistant_id_by_chat.get(chat_key, 0),
+            agent_route="",
+            text=text,
+            files=[],
+            message_type="standard",
+            command_name=None,
+            command_args=None,
+        )
+        await self.handle_message(event)
+
     async def send(
         self,
         chat_id: int | str,
@@ -2704,6 +3040,28 @@ class BGOSAdapter(BasePlatformAdapter):
             boards_task.add_done_callback(self._boards_tasks.discard)
             if not formatted:
                 return SendResult(success=True)  # type: ignore[call-arg]
+        # Agent peer intercept ([[BGOS_PEER]] JSON blocks). Parsing happens
+        # beside boards so marker JSON cannot reach buttons or visible text.
+        # Execution is deferred until this send's visible outcome is known:
+        # send_to_peer must anchor its side thread to a real assistant message.
+        formatted, peer_requests, peer_errors = parse_peer_blocks(formatted)
+        peer_pending = bool(peer_requests or peer_errors)
+
+        def _schedule_peer_once(parent_message_id: int | None = None) -> None:
+            nonlocal peer_pending
+            if not peer_pending:
+                return
+            anchor = self._int_or_none(parent_message_id)
+            if anchor is None or anchor <= 0:
+                anchor = self._state.last_assistant_message_by_chat.get(chat_key)
+            self._schedule_peer_requests(
+                chat_key, peer_requests, peer_errors, anchor,
+            )
+            peer_pending = False
+
+        if peer_pending and not formatted:
+            _schedule_peer_once()
+            return SendResult(success=True)  # type: ignore[call-arg]
         formatted, status_text = _parse_status_line(formatted)
         cleaned_text, options, render_mode = _parse_buttons_block(formatted)
         # Agent-emitted `MEDIA:/abs/path` lines → real BGOS attachments. The
@@ -2719,6 +3077,7 @@ class BGOSAdapter(BasePlatformAdapter):
             cleaned_text, agent_event_meta = _parse_event_block(cleaned_text)
         except InvalidEventMeta as exc:
             log.warning("send rejected: %s (chat=%s)", exc, chat_key)
+            _schedule_peer_once()
             return SendResult(  # type: ignore[call-arg]
                 success=False, error=f"invalid_event_meta: {exc}",
             )
@@ -2825,9 +3184,13 @@ class BGOSAdapter(BasePlatformAdapter):
                     session_handle=session_handle,
                     reply_to_id=effective_reply_to,
                 )
-            return await self._handle_tool_progress_edit(
+            result = await self._handle_tool_progress_edit(
                 chat_key, 0, parsed_tools, None,
             )
+            _schedule_peer_once(
+                self._int_or_none(getattr(result, "message_id", None))
+            )
+            return result
 
         if goal_line is not None:
             try:
@@ -2861,6 +3224,9 @@ class BGOSAdapter(BasePlatformAdapter):
                         None,
                         replace=False,
                     )
+                _schedule_peer_once(
+                    self._int_or_none(getattr(result, "message_id", None))
+                )
                 return result
 
             if robot is not None and robot.kind == "error":
@@ -2894,6 +3260,7 @@ class BGOSAdapter(BasePlatformAdapter):
                     self._state.last_assistant_message_by_chat[
                         chat_key
                     ] = message_id
+                _schedule_peer_once(message_id)
                 return _send_result(message_id=message_id)
 
             cleaned_text = strip_voice_prefixes(cleaned_text)
@@ -2903,6 +3270,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 and not options
                 and agent_event_meta is None
             ):
+                _schedule_peer_once()
                 return _send_result(message_id=None)
 
         # End-of-turn signal: this send() is delivering a plain agent reply
@@ -2939,6 +3307,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 "send: media-only reply but no attachments survived; "
                 "nothing to post (chat=%s)", chat_key,
             )
+            _schedule_peer_once()
             return _send_result(message_id=None)
 
         chunks = self._chunk_text(cleaned_text)
@@ -3011,6 +3380,7 @@ class BGOSAdapter(BasePlatformAdapter):
             # consult/dispatch answer. Never suppressed — the chat keeps
             # the ground truth; the waiter just records the text.
             self._offer_voice_reply(chat_key, cleaned_text)
+        _schedule_peer_once(last_message_id)
         return last_result or _send_result(message_id=None)
 
     def _chunk_text(self, text: str) -> list[str]:
@@ -4634,12 +5004,11 @@ class BGOSAdapter(BasePlatformAdapter):
         # verbatim rather than re-read by field name downstream.
         inbound_chat_id = self._int_or_none(data.get("chat_id"))
         if inbound_chat_id is not None:
-            # A real inbound message re-arms the boards loop guard: chained
-            # board calls are allowed again once the human (or a peer) has
-            # spoken. Synthetic board result turns never pass through here,
-            # they go straight to handle_message, so this reset only fires
-            # on genuine inbound.
+            # A real inbound message re-arms both marker loop guards. Their
+            # synthetic result turns go straight to handle_message, so this
+            # reset only fires on genuine inbound from a human or peer.
             self._boards_consecutive_results.pop(inbound_chat_id, None)
+            self._peer_consecutive_results.pop(inbound_chat_id, None)
             session_handle = data.get("sessionHandle") or data.get("session_handle")
             self._state.record_inbound_chat(
                 inbound_chat_id,
@@ -5357,11 +5726,12 @@ class BGOSAdapter(BasePlatformAdapter):
         callback_data = data.get("callbackData") or ""
         custom_text = data.get("customText")
 
-        # A button tap is real user activity: it re-arms the boards loop
-        # guard exactly like a typed message (review finding, 2026-08-03).
+        # A button tap is real user activity, so it re-arms both marker loop
+        # guards exactly like a typed message.
         click_chat_key = self._int_or_none(chat_id)
         if click_chat_key is not None:
             self._boards_consecutive_results.pop(click_chat_key, None)
+            self._peer_consecutive_results.pop(click_chat_key, None)
 
         # Approval/slash-confirm taps may arrive as `inbound_click` instead of
         # `callback_result` on some BGOS deployments. Route those through the

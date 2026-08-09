@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from . import __version__
 from .config import BgosConfig
 
 log = logging.getLogger(__name__)
@@ -300,7 +301,11 @@ class BgosApi:
             "POST", "/api/v1/integrations/heartbeat", json=body,
         )
 
-    async def get_capabilities(self, channel: str = "hermes") -> dict:
+    async def get_capabilities(
+        self,
+        channel: str = "hermes",
+        daemon_version: str = __version__,
+    ) -> dict:
         """GET /api/v1/integrations/capabilities, the backend-served agent
         capability canon for this channel (capability bootstrap).
 
@@ -311,7 +316,7 @@ class BgosApi:
         return await self._request(
             "GET",
             "/api/v1/integrations/capabilities",
-            params={"channel": channel},
+            params={"channel": channel, "daemonVersion": daemon_version},
         )
 
     # -------------------------------------------------------------------------
