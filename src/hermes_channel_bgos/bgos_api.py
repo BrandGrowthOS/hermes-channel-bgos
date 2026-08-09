@@ -223,6 +223,7 @@ class BgosApi:
         device_label: str,
         integration: str,
         agent_catalog: list[dict] | None = None,
+        intended_assistant_id: int | None = None,
     ) -> dict:
         """Exchange a pair code for a pairing token. Pre-auth — no X-BGOS-Pairing header.
 
@@ -230,16 +231,27 @@ class BgosApi:
         this function's Python signature is snake_case for idiomatic use. We
         translate at the wire. `integration` is a lowercase-string literal on
         both sides — matches the `integration_pairings.integration` column.
+
+        `intended_assistant_id` pins the exchange to one assistant: the
+        backend's overlap guard then resolves overlap by IDENTITY (the
+        pairing serving that assistant) instead of by the shared catalog
+        label. Snake_case on the wire on purpose: the field is part of the
+        cross-repo exchange contract (backend PairExchangeDto), pinned
+        identically by the claude plugin. Omitted entirely when None so the
+        unpinned body stays byte-identical.
         """
+        body: dict = {
+            "code": code,
+            "deviceLabel": device_label,
+            "integration": integration,
+            "agentCatalog": agent_catalog or [],
+        }
+        if intended_assistant_id is not None:
+            body["intended_assistant_id"] = intended_assistant_id
         return await self._request(
             "POST",
             "/api/v1/integrations/pair-exchange",
-            json={
-                "code": code,
-                "deviceLabel": device_label,
-                "integration": integration,
-                "agentCatalog": agent_catalog or [],
-            },
+            json=body,
             require_pairing=False,
         )
 
@@ -783,6 +795,18 @@ class BgosApi:
         """POST a doctor_rpc success or failure result."""
         return await self._request(
             "POST", f"/api/v1/integrations/doctor-rpc/{rpc_id}/result", json=body,
+        )
+
+    async def post_profile_rpc_ack(self, rpc_id: str) -> Any:
+        """POST the pairing-authenticated profile_rpc (add_profile) ack."""
+        return await self._request(
+            "POST", f"/api/v1/integrations/profile-rpc/{rpc_id}/ack",
+        )
+
+    async def post_profile_rpc_result(self, rpc_id: str, body: dict) -> Any:
+        """POST an add_profile success or failure result."""
+        return await self._request(
+            "POST", f"/api/v1/integrations/profile-rpc/{rpc_id}/result", json=body,
         )
 
     async def post_voice_task_result(self, task_id: str, body: dict) -> Any:

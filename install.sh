@@ -8,6 +8,7 @@
 #   BGOS_AGENTS="default:Hermes"
 #   BGOS_PAIR_CODE="BGOS-XXXX-XX"
 #     BGOS_CODE is accepted as a synonym for BGOS_PAIR_CODE.
+#   BGOS_ASSISTANT_ID=1012   # pin the pairing to one assistant (one-click flow)
 #   DEVICE_LABEL="my-server"
 #   HERMES_SERVICE="hermes-gateway.service"
 #   REPO_DIR="$HOME/hermes-channel-bgos"
@@ -243,7 +244,15 @@ pair_if_requested() {
     # pairing file) and prints the exact fixes. Do not let set -e kill the
     # installer here: the plugin install itself is fine, and the doctor at
     # the end re-reports the same findings. Surface it and continue.
-    if ! "$py" -m hermes_channel_bgos.pair_cli "$code" --device-label "$DEVICE_LABEL" --agents "$BGOS_AGENTS"; then
+    # BGOS_ASSISTANT_ID pins this pairing to one assistant (the one-click
+    # new-agent flow mints the code pinned to a freshly created assistant
+    # and passes its id here, so the exchange can never collide with the
+    # account's existing agents).
+    local pin_args=()
+    if [[ -n "${BGOS_ASSISTANT_ID:-}" ]]; then
+      pin_args=(--assistant-id "$BGOS_ASSISTANT_ID")
+    fi
+    if ! "$py" -m hermes_channel_bgos.pair_cli "$code" --device-label "$DEVICE_LABEL" --agents "$BGOS_AGENTS" ${pin_args[@]+"${pin_args[@]}"}; then
       warn "Pairing did not complete - read the topology findings above, apply the printed fixes, then re-run: $py -m hermes_channel_bgos.pair_cli <NEW-CODE> --device-label '$DEVICE_LABEL' --agents '$BGOS_AGENTS' (pair codes expire in 10 minutes, mint a fresh one)"
     fi
   else

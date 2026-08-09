@@ -206,10 +206,19 @@ async def wait_for_exposure(
     help="Pair even when the multi-agent topology check fails. The broken "
          "state WILL misbehave (wrong persona / double answers) until fixed.",
 )
+@click.option(
+    "--assistant-id", "assistant_id", type=int, default=None,
+    envvar="BGOS_ASSISTANT_ID",
+    help="Pin this pairing to ONE BGOS assistant id. On accounts with "
+         "several Hermes agents the backend's overlap guard requires it "
+         "(it resolves overlap by identity instead of the shared catalog "
+         "label). The one-click flow passes it automatically; also settable "
+         "via BGOS_ASSISTANT_ID.",
+)
 def main(
     code: str, device_label: str, base_url: str, integration: str, agents: str,
     wait_for_exposure_flag: bool, wait_timeout: float, wait_interval: float,
-    skip_topology_check: bool,
+    skip_topology_check: bool, assistant_id: int | None,
 ) -> None:
     """Exchange a BGOS pairing code for a pairing token.
 
@@ -220,6 +229,7 @@ def main(
         code, device_label, base_url, integration, agents,
         wait_for_exposure_flag, wait_timeout, wait_interval,
         skip_topology_check=skip_topology_check,
+        assistant_id=assistant_id,
     ))
 
 
@@ -227,6 +237,7 @@ async def _run(
     code: str, device_label: str, base_url: str, integration: str, agents: str,
     wait_for_exposure_flag: bool = False, wait_timeout: float = 180.0,
     wait_interval: float = 4.0, *, skip_topology_check: bool = False,
+    assistant_id: int | None = None,
 ) -> None:
     # Normalize up front so both the live calls AND the persisted secrets file
     # carry the origin form. Pasting the app-facing base (which ends in
@@ -258,7 +269,7 @@ async def _run(
     try:
         resp = await api.pair_exchange(
             code=code, device_label=device_label, integration=integration,
-            agent_catalog=catalog,
+            agent_catalog=catalog, intended_assistant_id=assistant_id,
         )
     except BgosApiError as exc:
         code_str = f" {exc.code}" if exc.code else ""
