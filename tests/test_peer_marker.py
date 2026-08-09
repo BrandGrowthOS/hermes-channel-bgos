@@ -77,14 +77,41 @@ class TestParsePeerBlocks:
         assert "BGOS_PEER" not in cleaned
         assert "list_peers" not in cleaned
 
-    def test_orphan_closing_marker_is_stripped_and_answered(self):
+    def test_orphan_closing_marker_is_redacted_silently(self):
         text = "Before [[/BGOS_PEER]] after"
         cleaned, requests, errors = parse_peer_blocks(text)
         assert cleaned == "Before  after"
         assert requests == []
-        assert len(errors) == 1
-        assert "no opening marker" in errors[0].message
+        assert errors == []
         assert "BGOS_PEER" not in cleaned
+
+    def test_bare_mention_keeps_prose_and_sends_no_error(self):
+        # First live specimen (Athena, 2026-08-10): quoting the marker name
+        # while describing guidance ate the rest of her message and fired a
+        # malformed_request round trip. A mention is not an attempt.
+        text = (
+            "My guidance describes these capabilities:\n"
+            "- `[[BGOS_PEER]]` for peer operations\n"
+            "- boards and the call marker as before."
+        )
+        cleaned, requests, errors = parse_peer_blocks(text)
+        assert requests == []
+        assert errors == []
+        assert "BGOS_PEER" not in cleaned
+        assert "for peer operations" in cleaned
+        assert "boards and the call marker as before." in cleaned
+
+    def test_mention_then_real_block_still_executes(self):
+        text = (
+            "The [[BGOS_PEER]] marker works like this.\n"
+            '[[BGOS_PEER]]{"op":"list_peers","reqId":"ok1"}[[/BGOS_PEER]]'
+        )
+        cleaned, requests, errors = parse_peer_blocks(text)
+        assert len(requests) == 1
+        assert requests[0].req_id == "ok1"
+        assert errors == []
+        assert "BGOS_PEER" not in cleaned
+        assert "marker works like this." in cleaned
 
     def test_multiple_blocks_keep_request_order_and_strip_all_markers(self):
         text = "\n".join(

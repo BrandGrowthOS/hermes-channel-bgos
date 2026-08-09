@@ -30,8 +30,14 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# The payload may not span another opening marker: a bare mention of
+# [[BGOS_PEER]] in prose therefore cannot pair with a later real block's
+# closing marker and swallow the prose between them (Athena's mention
+# specimen, 2026-08-10). A delimited pair with a non-object payload still
+# matches and still comes back as an error, because between full delimiters
+# it is an attempt, not a mention.
 PEER_BLOCK_RE = re.compile(
-    r"\[\[BGOS_PEER\]\](.*?)\[\[/BGOS_PEER\]\]",
+    r"\[\[BGOS_PEER\]\]((?:(?!\[\[BGOS_PEER\]\]).)*?)\[\[/BGOS_PEER\]\]",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -264,35 +270,40 @@ def parse_peer_blocks(
         remainder = PEER_BLOCK_RE.sub("", segment)
         bare_open = _PEER_OPEN_RE.search(remainder)
         if bare_open is not None:
-            matched_any = True
-            errors.append(
-                PeerParseError(
-                    req_id=_mint_req_id(),
-                    raw=remainder[bare_open.end():].strip(),
-                    message=(
-                        "missing closing [[/BGOS_PEER]] marker. "
-                        + _grammar_reminder()
-                    ),
+            after = remainder[bare_open.end():]
+            if after.lstrip().startswith("{"):
+                # An opener with a JSON payload and no closer is an attempted
+                # request. Without the closing delimiter there is no safe way
+                # to identify where the private request ends, so keep only the
+                # text before the open marker and answer with an error section
+                # so the waiting agent is not stranded.
+                matched_any = True
+                errors.append(
+                    PeerParseError(
+                        req_id=_mint_req_id(),
+                        raw=after.strip(),
+                        message=(
+                            "missing closing [[/BGOS_PEER]] marker. "
+                            + _grammar_reminder()
+                        ),
+                    )
                 )
-            )
-            # Without a closing delimiter there is no safe way to identify
-            # where the private request ends. Keep only text before the open
-            # marker so neither syntax nor payload can reach the user.
-            remainder = remainder[:bare_open.start()]
+                remainder = remainder[:bare_open.start()]
+            else:
+                # An opener with no payload is a MENTION of the capability in
+                # prose, not an attempted operation (first live specimen:
+                # Athena quoting the marker name while describing her own
+                # guidance, 2026-08-10). Redact only the token so users never
+                # see marker syntax, keep the surrounding prose, and send no
+                # error round trip.
+                matched_any = True
+                remainder = _PEER_OPEN_RE.sub("", remainder)
         orphan_closes = list(_PEER_CLOSE_RE.finditer(remainder))
         if orphan_closes:
+            # A closer with no opener can never delimit a private payload:
+            # mention-grade, redact the token silently. A genuinely botched
+            # request is caught by the opener-with-payload branch above.
             matched_any = True
-            errors.extend(
-                PeerParseError(
-                    req_id=_mint_req_id(),
-                    raw=match.group(0),
-                    message=(
-                        "closing [[/BGOS_PEER]] marker has no opening marker. "
-                        + _grammar_reminder()
-                    ),
-                )
-                for match in orphan_closes
-            )
             remainder = _PEER_CLOSE_RE.sub("", remainder)
         segments[idx] = remainder
     if not matched_any:
