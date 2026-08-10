@@ -1,7 +1,7 @@
 name: bgos-platform
 label: BGOS
 kind: platform
-version: 0.25.1
+version: 0.26.0
 description: >
   BGOS (Brand GrowthOS) channel adapter for Hermes — chat with your Hermes
   agents from the BGOS mobile/desktop app. Pairs via `hermes-pair-bgos`;

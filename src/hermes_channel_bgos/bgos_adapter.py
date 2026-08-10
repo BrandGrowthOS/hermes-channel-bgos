@@ -537,6 +537,8 @@ _INBOUND_CAMEL_ALIASES: dict[str, str] = {
     "messageId": "message_id",
     "userId": "user_id",
     "messageType": "message_type",
+    "eventMeta": "event_meta",
+
     "commandName": "command_name",
     "commandArgs": "command_args",
     "replyToId": "reply_to_id",
@@ -640,6 +642,7 @@ class MessageEvent:
     command_args: str | None
     reply_to_id: int | None = None
     peer_conversation_id: int | None = None
+    event_meta: dict | None = None
     turn_state: str | None = None
 
     @classmethod
@@ -658,6 +661,15 @@ class MessageEvent:
             command_args=data.get("command_args"),
             reply_to_id=data.get("reply_to_id"),
             peer_conversation_id=data.get("peer_conversation_id"),
+            event_meta=(
+
+                data.get("event_meta")
+
+                if isinstance(data.get("event_meta"), dict)
+
+                else None
+
+            ),
             turn_state=data.get("turn_state"),
         )
 

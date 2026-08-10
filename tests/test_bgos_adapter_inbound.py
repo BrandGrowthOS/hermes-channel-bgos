@@ -166,6 +166,37 @@ async def test_inbound_carries_command_metadata_for_slash_commands(
         await adapter.disconnect()
 
 
+@pytest.mark.parametrize("metadata_key", ["eventMeta", "event_meta"])
+async def test_inbound_preserves_scheduled_wake_event_metadata(metadata_key):
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "hades")
+    handled: list[MessageEvent] = []
+    event_meta = {
+        "source": "scheduler",
+        "payload": {
+            "scheduledTaskId": 432,
+            "fireId": "scheduled-wake:432:2026-08-09T22:07:20.487Z",
+        },
+    }
+
+    async def capture(event):
+        handled.append(event)
+
+    adapter.handle_message = capture
+    await adapter._handle_inbound({
+        "assistantId": 7,
+        "chatId": 1048,
+        "messageId": 47689,
+        "userId": "user_1",
+        "text": "Run the nightly retrospective",
+        "messageType": "event",
+        metadata_key: event_meta,
+    })
+
+    assert len(handled) == 1
+    assert handled[0].event_meta == event_meta
+
+
 async def test_reconnect_triggers_backfill(mock_bgos_server, monkeypatch):
     """After reconnect the adapter calls fetch_inbound_since(last_id) and
     feeds each returned message through the translation pipeline."""
