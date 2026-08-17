@@ -4681,7 +4681,20 @@ class BGOSAdapter(BasePlatformAdapter):
         session_key: str,
         description: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        allow_permanent: bool = True,
+        allow_session: bool = True,
+        smart_denied: bool = False,
     ) -> SendResult:
+        # The Hermes gateway's _approval_notify_sync closure calls this hook
+        # with allow_permanent / allow_session / smart_denied describing which
+        # approval scopes the caller may offer. These MUST be accepted: the
+        # gateway passes them unconditionally, and a hook that rejects them
+        # raises TypeError, which the gateway catches and downgrades to the
+        # plain-text "/approve" fallback (no buttons). Regression 2026-08:
+        # the buttons vanished for exactly this reason. We also honor the
+        # flags so the button set matches the gateway's own text-fallback
+        # choice logic in _format_exec_approval_fallback.
         approval_id = next(self._approval_id_counter)
 
         # Option shape matches backend CreateMessageOptionDto (camelCase
@@ -4689,16 +4702,29 @@ class BGOSAdapter(BasePlatformAdapter):
         # `style` and `row_index` are dropped by the backend's whitelist
         # today (Phase F schema extension will add them); we still send
         # them for forward-compat.
-        options = [
-            {"text": "Allow once",         "callbackData": f"ea:once:{approval_id}",
+        #
+        # Scope buttons follow the gateway's fallback logic: a smart-DENY
+        # owner override is always a single operation (Allow once + Deny
+        # only); otherwise "Allow for session" appears when allow_session,
+        # and "Always allow" only when allow_session AND allow_permanent.
+        options: list[dict[str, Any]] = [
+            {"text": "Allow once", "callbackData": f"ea:once:{approval_id}",
              "style": "success", "row_index": 0},
-            {"text": "Allow for session",  "callbackData": f"ea:session:{approval_id}",
-             "style": "success", "row_index": 0},
-            {"text": "Always allow",       "callbackData": f"ea:always:{approval_id}",
-             "style": "default", "row_index": 1},
-            {"text": "Deny",               "callbackData": f"ea:deny:{approval_id}",
-             "style": "danger",  "row_index": 1},
         ]
+        if not smart_denied and allow_session:
+            options.append(
+                {"text": "Allow for session", "callbackData": f"ea:session:{approval_id}",
+                 "style": "success", "row_index": 0},
+            )
+            if allow_permanent:
+                options.append(
+                    {"text": "Always allow", "callbackData": f"ea:always:{approval_id}",
+                     "style": "default", "row_index": 1},
+                )
+        options.append(
+            {"text": "Deny", "callbackData": f"ea:deny:{approval_id}",
+             "style": "danger", "row_index": 1},
+        )
         # Resolve the agent route for this approval (best-effort): prefer an
         # explicit assistant_id in the gateway-provided metadata, else fall
         # back to the single bound assistant. Mirrors the resolution used by
