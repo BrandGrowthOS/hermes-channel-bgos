@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 # One-command installer for hermes-channel-bgos.
-# Usage:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/BrandGrowthOS/hermes-channel-bgos/main/install.sh)
+# Usage (what the HOAI app hands you, two plain lines):
+#   curl -fsSL https://raw.githubusercontent.com/BrandGrowthOS/hermes-channel-bgos/main/install.sh -o hoai-hermes-install.sh
+#   bash hoai-hermes-install.sh --pair-code BGOS-XXXX-XX
+#
+# The app used to hand out `BGOS_PAIR_CODE=<code> bash <(curl -fsSL <url>)`.
+# That is valid POSIX and nothing else: a leading VAR=value is not a command in
+# Windows PowerShell (it answers "is not recognized as the name of a cmdlet"),
+# and <(...) process substitution does not exist there at all, so a Windows
+# owner got a shell error that named nothing. Downloading first and then
+# running the file removes both, and the pair code rides a normal flag.
+#
+# Options (all optional; the env vars below still work unchanged):
+#   --pair-code BGOS-XXXX-XX   pair this server as part of the install
+#   --assistant-id 1012        pin the pairing to one assistant
+#   --device-label my-server   how this machine is labelled in the app
+#   BGOS-XXXX-XX               a bare pair code also works as the first argument
 # Optional env:
 #   HERMES_INSTALL=/path/to/hermes-agent
 #   HERMES_PYTHON=/path/to/hermes/python
@@ -27,6 +41,27 @@ log() { printf '\033[1;34m[bgos-install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[bgos-install][warn]\033[0m %s\n' "$*" >&2; }
 fail() { printf '\033[1;31m[bgos-install][fail]\033[0m %s\n' "$*" >&2; exit 1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
+
+# Command-line arguments, which exist so the pair code can travel as a normal
+# flag instead of a POSIX env prefix (see the header). Flags WIN over the
+# matching env var when both are given: the flag is what the person just typed.
+# An unknown flag warns and is ignored rather than aborting: this file is
+# fetched fresh from main every run, so the only way to meet one is a typo or a
+# newer app, and neither should cost someone a working install (a mistyped
+# --pair-code simply falls through to the interactive prompt below).
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --pair-code)   BGOS_PAIR_CODE="${2:-}"; shift 2 ;;
+      --assistant-id) BGOS_ASSISTANT_ID="${2:-}"; shift 2 ;;
+      --device-label) DEVICE_LABEL="${2:-}"; shift 2 ;;
+      -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
+      BGOS-*|OC-*)   BGOS_PAIR_CODE="$1"; shift ;;
+      "")            shift ;;
+      *)             warn "Ignoring unrecognized argument: $1"; shift ;;
+    esac
+  done
+}
 
 find_hermes_install() {
   if [[ -n "${HERMES_INSTALL:-}" ]]; then
@@ -281,6 +316,7 @@ restart_hermes() {
 }
 
 main() {
+  parse_args "$@"
   need_cmd git
   local install py
   install="$(find_hermes_install)"

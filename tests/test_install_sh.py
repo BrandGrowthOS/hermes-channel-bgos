@@ -335,3 +335,76 @@ def test_pair_if_requested_forwards_backend_url(tmp_path: Path):
     assert "--base-url" in args
     # normalize_backend_url strips the app-facing /api/v1 suffix.
     assert args[args.index("--base-url") + 1] == "http://127.0.0.1:8090"
+
+
+# --- argument surface --------------------------------------------------------
+#
+# The pair code travels as a FLAG now, not as a `BGOS_PAIR_CODE=<code>` prefix
+# in front of the command. A leading VAR=value is POSIX-only: Windows
+# PowerShell reads it as a command name and answers "is not recognized as the
+# name of a cmdlet", which is exactly what an owner saw when he pasted the old
+# one-liner on his PC. The env vars still work; the flags simply give the app a
+# line it can hand to any shell.
+
+
+def _run_parse_args(tmp_path: Path, argv: str) -> subprocess.CompletedProcess[str]:
+    """Source install.sh, run parse_args with argv, print what it resolved."""
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source install.sh; "
+            f"parse_args {argv}; "
+            'printf "code=%s\\nid=%s\\nlabel=%s\\n" '
+            '"${BGOS_PAIR_CODE:-}" "${BGOS_ASSISTANT_ID:-}" "${DEVICE_LABEL:-}"',
+        ],
+        cwd=REPO_ROOT,
+        env=_isolated_env(tmp_path),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _resolved(result: subprocess.CompletedProcess[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            out[key] = value
+    return out
+
+
+def test_parse_args_reads_the_pair_code_from_a_flag(tmp_path: Path):
+    result = _run_parse_args(tmp_path, "--pair-code BGOS-7F3A-2K --assistant-id 901")
+    assert result.returncode == 0, result.stderr
+    resolved = _resolved(result)
+    assert resolved["code"] == "BGOS-7F3A-2K"
+    assert resolved["id"] == "901"
+
+
+def test_parse_args_accepts_a_bare_pair_code(tmp_path: Path):
+    result = _run_parse_args(tmp_path, "BGOS-7F3A-2K")
+    assert result.returncode == 0, result.stderr
+    assert _resolved(result)["code"] == "BGOS-7F3A-2K"
+
+
+def test_parse_args_keeps_a_device_label_containing_a_space(tmp_path: Path):
+    result = _run_parse_args(tmp_path, "'--device-label' 'Kc office mac'")
+    assert result.returncode == 0, result.stderr
+    assert _resolved(result)["label"] == "Kc office mac"
+
+
+def test_parse_args_ignores_an_unknown_flag_instead_of_aborting(tmp_path: Path):
+    # A typo or a newer app must never cost someone a working install: the run
+    # continues and the installer falls through to its interactive prompt.
+    result = _run_parse_args(tmp_path, "--pair-code BGOS-7F3A-2K --future-flag x")
+    assert result.returncode == 0, result.stderr
+    assert _resolved(result)["code"] == "BGOS-7F3A-2K"
+    assert "Ignoring unrecognized argument" in result.stderr
+
+
+def test_parse_args_with_no_arguments_leaves_the_env_path_untouched(tmp_path: Path):
+    result = _run_parse_args(tmp_path, "")
+    assert result.returncode == 0, result.stderr
+    assert _resolved(result)["code"] == ""
