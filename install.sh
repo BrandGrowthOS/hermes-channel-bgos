@@ -14,6 +14,7 @@
 # Options (all optional; the env vars below still work unchanged):
 #   --pair-code BGOS-XXXX-XX   pair this server as part of the install
 #   --assistant-id 1012        pin the pairing to one assistant
+#   --agents 'route:Name'      the agent catalog to register (comma-delimited)
 #   --device-label my-server   how this machine is labelled in the app
 #   BGOS-XXXX-XX               a bare pair code also works as the first argument
 # Optional env:
@@ -54,6 +55,7 @@ parse_args() {
     case "${1:-}" in
       --pair-code)   BGOS_PAIR_CODE="${2:-}"; shift 2 ;;
       --assistant-id) BGOS_ASSISTANT_ID="${2:-}"; shift 2 ;;
+      --agents)      BGOS_AGENTS="${2:-}"; shift 2 ;;
       --device-label) DEVICE_LABEL="${2:-}"; shift 2 ;;
       -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
       BGOS-*|OC-*)   BGOS_PAIR_CODE="$1"; shift ;;

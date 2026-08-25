@@ -408,3 +408,27 @@ def test_parse_args_with_no_arguments_leaves_the_env_path_untouched(tmp_path: Pa
     result = _run_parse_args(tmp_path, "")
     assert result.returncode == 0, result.stderr
     assert _resolved(result)["code"] == ""
+
+
+def test_parse_args_takes_the_agent_catalog_as_a_flag(tmp_path: Path):
+    # The new-agent wizard's line carried BGOS_AGENTS='route:Name' as a third
+    # env prefix. As a flag it survives the quoting and reaches BGOS_AGENTS.
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source install.sh; "
+            "parse_args --pair-code BGOS-WOLF-01 --assistant-id 1012 "
+            "--agents 'wolf:Wolf Two'; "
+            'printf "agents=%s\\ncode=%s\\n" "${BGOS_AGENTS:-}" "${BGOS_PAIR_CODE:-}"',
+        ],
+        cwd=REPO_ROOT,
+        env=_isolated_env(tmp_path),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    resolved = _resolved(result)
+    assert resolved["agents"] == "wolf:Wolf Two"
+    assert resolved["code"] == "BGOS-WOLF-01"
