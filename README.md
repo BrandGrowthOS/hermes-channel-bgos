@@ -4,6 +4,10 @@ BGOS channel adapter for [Nous Research's Hermes agent](https://github.com/NousR
 
 **Status:** Phase 1 — running in production. Message round-trips work end-to-end. Approvals render as 4-button inline bubbles. A handful of gotchas documented below.
 
+## Canonical setup runbook
+
+This README is the **canonical committed copy** of the BGOS partner setup runbook for Hermes hosts. The BGOS Claude Code plugin's `bgos-partner-setup` skill routes here by section anchor rather than carrying a copy of its own, and the app's setup prompts point here. The section headings below are stable deep-link targets — rename one only together with the surfaces that point at it.
+
 ## One-command install
 
 Run this **on the server where Hermes runs**:
