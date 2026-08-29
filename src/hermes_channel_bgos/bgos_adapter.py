@@ -32,6 +32,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from . import __version__
+from . import self_update
 from .bgos_api import BgosApi, BgosApiError, NOT_MODIFIED
 from .bgos_ws import BgosWs
 from .commands_sync import (
@@ -276,6 +277,11 @@ S3_THRESHOLD = 500 * 1024
 _MEDIA_MAX_BYTES = 100 * 1024 * 1024
 
 _DOCTOR_RPC_TIMEOUT_SECONDS = 45.0
+
+# Best-effort settle window before a one-click update restarts the gateway:
+# long enough for a typical in-flight dispatch to finish writing its reply,
+# short enough that the app's live progress card never looks stuck.
+_UPDATE_DRAIN_SECONDS = 5.0
 
 # System locations that always hold secrets or credentials. SECURITY: outbound
 # MEDIA:/path markers and send_image/file local sources are agent-emitted, and
@@ -1243,6 +1249,10 @@ class BGOSAdapter(BasePlatformAdapter):
         # Server-dispatched add_profile (one-click new-Hermes-agent).
         self._profile_rpc_in_flight: set[str] = set()
         self._profile_tasks: set[asyncio.Task] = set()
+        # One-click update (update_rpc). Doctor-style lifecycle: rpcId
+        # dedupe set + fire-and-forget task tracking.
+        self._update_rpc_in_flight: set[str] = set()
+        self._update_tasks: set[asyncio.Task] = set()
         # Agent Boards round trip ([[BGOS_BOARDS]] marker). Executor tasks
         # are fire-and-forget like _voice_tasks (tracked so exceptions are
         # retrieved and disconnect can drain them). The per-chat counter is
@@ -1583,6 +1593,7 @@ class BGOSAdapter(BasePlatformAdapter):
             on_voice_rpc=self._handle_voice_rpc,
             on_doctor_rpc=self._handle_doctor_rpc,
             on_profile_rpc=self._handle_profile_rpc,
+            on_update_rpc=self._handle_update_rpc,
             on_mission_event=self._mission_lane.handle_mission_event,
         )
         if self.pairing_id is not None:
@@ -1651,11 +1662,26 @@ class BGOSAdapter(BasePlatformAdapter):
         Strictly best-effort: every failure is swallowed (logged at DEBUG)
         so a flaky backend can never block or crash the daemon. Exactly one
         INFO line per successful beat.
+
+        Each beat also carries the one-click update fields (wire contract
+        section 1): latestKnownVersion from the daily pinned-source check
+        (an explicit null when the check failed, clearing any stale
+        persisted value) and the updateReadiness object. Both helpers are
+        blocking (HTTP fetch, systemctl probe, pyproject read) and never
+        raise, so they run in a worker thread off the event loop.
         """
         while True:
             try:
+                latest = await asyncio.to_thread(
+                    self_update.latest_known_version,
+                )
+                readiness = await asyncio.to_thread(
+                    self_update.update_readiness,
+                )
                 await self._api.post_heartbeat(
                     daemon_version=__version__, env=_daemon_env(),
+                    latest_known_version=latest,
+                    update_readiness=readiness,
                 )
                 log.info(
                     "BGOS heartbeat sent (daemonVersion=%s)", __version__,
@@ -2148,6 +2174,13 @@ class BGOSAdapter(BasePlatformAdapter):
             await asyncio.gather(*profile_tasks, return_exceptions=True)
         self._profile_tasks.clear()
         self._profile_rpc_in_flight.clear()
+        update_tasks = [t for t in self._update_tasks if not t.done()]
+        for task in update_tasks:
+            task.cancel()
+        if update_tasks:
+            await asyncio.gather(*update_tasks, return_exceptions=True)
+        self._update_tasks.clear()
+        self._update_rpc_in_flight.clear()
         setup_tasks = [
             task for task in self._stt_setup_tasks if not task.done()
         ]
@@ -6131,6 +6164,173 @@ class BGOSAdapter(BasePlatformAdapter):
                     )
         finally:
             self._profile_rpc_in_flight.discard(rpc_id)
+
+    # -------------------------------------------------------------------------
+    # One-click update (update_rpc)
+    # -------------------------------------------------------------------------
+
+    async def _handle_update_rpc(self, data: dict) -> None:
+        """Validate and dispatch a server-sent update_now frame.
+
+        Wire contract section 3: the frame is `{rpcId, op: 'update_now'}`
+        and NOTHING else; the daemon resolves versions from its own pinned
+        source only. Mirrors the doctor_rpc validation ladder.
+        """
+        if not isinstance(data, dict):
+            log.warning("dropping malformed update_rpc frame: %s", data)
+            return
+        rpc_id = data.get("rpcId")
+        if not isinstance(rpc_id, str) or not rpc_id.strip():
+            log.warning("dropping update_rpc frame without rpcId: %s", data)
+            return
+        if data.get("op") != "update_now":
+            log.debug("dropping update_rpc frame with unknown op: %s", data)
+            return
+        if rpc_id in self._update_rpc_in_flight:
+            log.debug("dropping in-flight update_rpc duplicate rpc=%s", rpc_id)
+            return
+
+        self._update_rpc_in_flight.add(rpc_id)
+        task = asyncio.create_task(self._run_update_rpc(rpc_id))
+        self._update_tasks.add(task)
+        task.add_done_callback(self._update_tasks.discard)
+
+    async def _post_update_progress(
+        self,
+        rpc_id: str,
+        stage: str,
+        *,
+        target_version: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Best-effort progress POST: a failed report must never abort the
+        update itself (the backend's own timeouts settle the app view)."""
+        try:
+            await self._api.post_update_rpc_progress(
+                rpc_id,
+                stage=stage,
+                target_version=target_version,
+                message=message,
+            )
+        except Exception:
+            log.warning(
+                "update_rpc progress post failed rpc=%s stage=%s",
+                rpc_id, stage, exc_info=True,
+            )
+
+    async def _drain_for_update(self, timeout: float) -> None:
+        """Let in-flight fire-and-forget work settle before the restart.
+
+        Best-effort by contract: asyncio.wait with a timeout, never a
+        cancel; the point is to avoid cutting a reply mid-write, not to
+        guarantee quiescence (the gateway's own systemd stop handles the
+        rest)."""
+        tasks = [
+            t for t in (
+                *self._voice_tasks, *self._boards_tasks, *self._peer_tasks,
+            ) if not t.done()
+        ]
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            log.warning(
+                "update_rpc drain: %d task(s) still running after %.0fs, "
+                "proceeding", len(pending), timeout,
+            )
+
+    async def _run_update_rpc(self, rpc_id: str) -> None:
+        try:
+            try:
+                await self._api.post_update_rpc_ack(rpc_id)
+            except Exception:
+                log.warning(
+                    "update_rpc ack failed rpc=%s", rpc_id, exc_info=True,
+                )
+
+            # Kill switch first: ack then a terminal error, never a stale
+            # silent drop (fail closed, but visibly).
+            if not self_update.auto_update_enabled():
+                await self._post_update_progress(
+                    rpc_id, "error", message="updates_disabled",
+                )
+                return
+
+            # Relaunch authority BEFORE any work: it decides whether this
+            # run may exit for relaunch or must stage to disk. Attachment
+            # mode is log-only (both modes update the same editable clone).
+            unit = await asyncio.to_thread(self_update.systemd_user_unit)
+            log.info(
+                "update_rpc rpc=%s unit=%s attachment=%s",
+                rpc_id, unit or "none",
+                self_update.detect_attachment_mode(self._hermes_home),
+            )
+
+            await self._post_update_progress(rpc_id, "draining")
+            await self._drain_for_update(_UPDATE_DRAIN_SECONDS)
+
+            await self._post_update_progress(rpc_id, "installing")
+            try:
+                applied = await asyncio.to_thread(self_update.apply_update)
+                target_version = applied.after_version
+            except self_update.SelfUpdateError as exc:
+                if exc.reason == "no_update_available":
+                    # The clone may already hold a newer install from an
+                    # earlier staged run; a restart is then all that is
+                    # missing, so update_now completes it instead of
+                    # erroring on a technicality.
+                    pending_version = await asyncio.to_thread(
+                        self_update.pending_restart_version,
+                    )
+                    if pending_version is None:
+                        await self._post_update_progress(
+                            rpc_id, "error", message=exc.reason,
+                        )
+                        return
+                    target_version = pending_version
+                else:
+                    log.warning(
+                        "update_rpc apply failed rpc=%s reason=%s",
+                        rpc_id, exc.reason, exc_info=True,
+                    )
+                    await self._post_update_progress(
+                        rpc_id, "error", message=exc.reason,
+                    )
+                    return
+            except Exception as exc:
+                log.exception("update_rpc apply crashed rpc=%s", rpc_id)
+                await self._post_update_progress(
+                    rpc_id, "error",
+                    message=(str(exc) or exc.__class__.__name__)[:300],
+                )
+                return
+
+            if unit is None:
+                # No verified supervisor: NEVER exit. The install is on
+                # disk; 'staged' is daemon-terminal and the next heartbeat
+                # carries pendingRestartVersion.
+                await self._post_update_progress(
+                    rpc_id, "staged", target_version=target_version,
+                )
+                return
+
+            # 'restarting' arms the backend's completion detection, then
+            # the detached 2s systemd-run timer restarts our own unit so
+            # this POST has flushed before the process dies.
+            await self._post_update_progress(
+                rpc_id, "restarting", target_version=target_version,
+            )
+            spawned = await asyncio.to_thread(
+                self_update.schedule_unit_restart, unit,
+            )
+            if not spawned:
+                # Without the error the app would wait out the backend's
+                # full 5 minute no-comeback window for nothing.
+                await self._post_update_progress(
+                    rpc_id, "error", message="restart_spawn_failed",
+                )
+        finally:
+            self._update_rpc_in_flight.discard(rpc_id)
 
     # -------------------------------------------------------------------------
     # Native in-app voice (voice_rpc, spec section 6.2, the Hermes broker)

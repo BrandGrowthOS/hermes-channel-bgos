@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
 
+from hermes_channel_bgos import self_update
 from tests.mocks.mock_bgos_server import MockBgosServer
 
 
@@ -35,6 +37,18 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> N
     # hermes-agent checkout at one of the well-known paths. Pin the install
     # search to the same tmp dir so tests never read the developer's env.
     monkeypatch.setenv("HERMES_INSTALL", str(hermes_home))
+
+
+@pytest.fixture(autouse=True)
+def _no_network_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto-used: pre-seed the self-update daily version cache so the
+    heartbeat loop of any connected adapter under test never reaches out to
+    GitHub. Tests exercising the check itself reset `_latest_check`."""
+    monkeypatch.setattr(
+        self_update,
+        "_latest_check",
+        self_update._LatestCheck(None, time.monotonic()),
+    )
 
 
 @pytest.fixture
