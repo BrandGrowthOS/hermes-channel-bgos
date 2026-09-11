@@ -66,3 +66,37 @@ class TestParseCallBlock:
 
     def test_empty_input_is_safe(self):
         assert _parse_call_block("") == ("", None)
+
+class TestStructuredCall:
+    def test_private_context_unicode_paths_and_opening_roundtrip(self):
+        import json
+        request = {"reason": "Build ready", "context": 'Path C:\\Work\\notes.md\n"approved" 🙂', "openingMessage": "Your build is ready."}
+        cleaned, result = _parse_call_block("Hello. [[BGOS_CALL]]" + json.dumps(request) + "[[/BGOS_CALL]]")
+        assert cleaned == "Hello."
+        assert result == request
+
+    @pytest.mark.parametrize("raw", ['{"context":', '{"context":42}', '{"assistantId":99}', '{"context":"' + ('x' * 4001) + '"}'])
+    def test_malformed_json_never_becomes_a_public_reason(self, raw):
+        cleaned, result = _parse_call_block("[[BGOS_CALL]]" + raw + "[[/BGOS_CALL]]")
+        assert cleaned == ""
+        assert result is None
+
+
+@pytest.mark.asyncio
+async def test_structured_marker_rings_as_the_addressed_agent(mock_bgos_server):
+    import json
+    from hermes_channel_bgos.bgos_adapter import BGOSAdapter
+    from hermes_channel_bgos.config import BgosConfig
+
+    adapter = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_test"))
+    adapter._state.assistant_id_by_chat[12] = 7
+    adapter._state.addressed_assistant_id_by_chat[12] = 8
+    mock_bgos_server.on("POST", "/api/v1/voice/outbound-call").respond(201, {"callId": "c1"})
+    request = {"reason": "Build ready", "context": 'Path C:\\Work\\notes.md\n"Ready" 🙂', "openingMessage": "Ready."}
+    try:
+        _, parsed = _parse_call_block("[[BGOS_CALL]]" + json.dumps(request) + "[[/BGOS_CALL]]")
+        await adapter._ring_owner(12, parsed)
+        wire = mock_bgos_server.last_request("POST", "/api/v1/voice/outbound-call")
+        assert wire.json_body == {"assistantId": 8, "chatId": 12, **request}
+    finally:
+        await adapter._api.close()
