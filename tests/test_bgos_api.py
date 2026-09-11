@@ -624,3 +624,16 @@ async def test_boards_call_denial_body_is_preserved_verbatim(mock_bgos_server):
     assert exc_info.value.status == 404
     assert exc_info.value.body == denial
     await api.close()
+
+async def test_call_owner_private_context_wire_and_legacy_payload(mock_bgos_server):
+    api = BgosApi(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
+    mock_bgos_server.on("POST", "/api/v1/voice/outbound-call").respond(201, {"callId": "c1"})
+    try:
+        await api.call_owner(assistant_id=7, chat_id=12, context="Private build 42", opening_message="Your build is ready.")
+        req = mock_bgos_server.last_request("POST", "/api/v1/voice/outbound-call")
+        assert req.json_body == {"assistantId": 7, "chatId": 12, "context": "Private build 42", "openingMessage": "Your build is ready."}
+        await api.call_owner(assistant_id=7, reason="Daily standup")
+        req = mock_bgos_server.last_request("POST", "/api/v1/voice/outbound-call")
+        assert req.json_body == {"assistantId": 7, "reason": "Daily standup"}
+    finally:
+        await api.close()
