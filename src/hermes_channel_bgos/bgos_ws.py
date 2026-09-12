@@ -59,6 +59,7 @@ class BgosWs:
         on_voice_rpc: _Handler | None = None,
         on_doctor_rpc: _Handler | None = None,
         on_profile_rpc: _Handler | None = None,
+        on_update_rpc: _Handler | None = None,
         on_mission_event: _Handler | None = None,
         reconnection_delay: float = 1.0,
         reconnection_delay_max: float = 30.0,
@@ -71,6 +72,7 @@ class BgosWs:
         self._on_voice_rpc = on_voice_rpc
         self._on_doctor_rpc = on_doctor_rpc
         self._on_profile_rpc = on_profile_rpc
+        self._on_update_rpc = on_update_rpc
         self._memory_bridge: MemoryBridge | None = None
         self._memory_tasks: set[asyncio.Task[None]] = set()
         self._on_mission_event = on_mission_event
@@ -258,6 +260,16 @@ class BgosWs:
                 await _maybe_await(self._on_profile_rpc(data))
             except Exception:
                 log.exception("bgos_ws.on_profile_rpc callback failed")
+
+        @self._sio.on("update_rpc")  # type: ignore[misc]
+        async def _update_rpc(data: dict) -> None:
+            if self._on_update_rpc is None:
+                log.debug("update_rpc received but no handler registered")
+                return
+            try:
+                await _maybe_await(self._on_update_rpc(data))
+            except Exception:
+                log.exception("bgos_ws.on_update_rpc callback failed")
 
         @self._sio.on("skills_rpc")  # type: ignore[misc]
         async def _skills_rpc(data: dict) -> None:

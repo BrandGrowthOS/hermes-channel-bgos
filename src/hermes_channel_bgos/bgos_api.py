@@ -45,6 +45,11 @@ class BgosApiError(Exception):
 # re-serializing the message list every few seconds.
 NOT_MODIFIED = object()
 
+# Sentinel for "caller did not supply this field" on endpoints where an
+# explicit JSON null is itself meaningful (heartbeat latestKnownVersion:
+# null clears a stale persisted value server-side, absent leaves it alone).
+UNSET: Any = object()
+
 
 class BgosApi:
     def __init__(self, config: BgosConfig) -> None:
@@ -279,6 +284,8 @@ class BgosApi:
         daemon_version: str,
         env: dict | None = None,
         last_error: dict | None = None,
+        latest_known_version: str | None | Any = UNSET,
+        update_readiness: dict | None = None,
     ) -> Any:
         """POST /api/v1/integrations/heartbeat (pairing-authed).
 
@@ -291,12 +298,26 @@ class BgosApi:
         `{code, message, at}` (the backend rejects bare strings here).
         Callers on the daemon cycle must treat this as best-effort and
         swallow failures — a heartbeat must never block or crash the daemon.
+
+        One-click update extension (wire contract section 1):
+        `latest_known_version` is the newest version this daemon found at
+        its own pinned source; an EXPLICIT null is sent when the daily
+        check failed (clears a stale persisted value; the UNSET default
+        omits the key entirely), and `update_readiness` is the
+        `{supervised, autoUpdateEnabled, rollbackLatched,
+        pendingRestartVersion}` object from self_update.update_readiness().
+        Backend-side validation is lenient (invalid semver ignored, never a
+        400), so sending is always safe.
         """
         body: dict[str, Any] = {"daemonVersion": daemon_version}
         if env is not None:
             body["env"] = env
         if last_error is not None:
             body["lastError"] = last_error
+        if latest_known_version is not UNSET:
+            body["latestKnownVersion"] = latest_known_version
+        if update_readiness is not None:
+            body["updateReadiness"] = update_readiness
         return await self._request(
             "POST", "/api/v1/integrations/heartbeat", json=body,
         )
@@ -800,6 +821,45 @@ class BgosApi:
         """POST a doctor_rpc success or failure result."""
         return await self._request(
             "POST", f"/api/v1/integrations/doctor-rpc/{rpc_id}/result", json=body,
+        )
+
+    async def post_update_rpc_ack(self, rpc_id: str) -> Any:
+        """POST /api/v1/integrations/update-rpc/{rpcId}/ack (pairing-authed).
+
+        Cancels the backend's 1.5 s update_rpc retry re-emit (10 s of no
+        ack goes terminal 'unreachable' server-side). Doctor-style
+        cross-check on the backend: the responding pairing must be the
+        targeted one.
+        """
+        return await self._request(
+            "POST", f"/api/v1/integrations/update-rpc/{rpc_id}/ack",
+        )
+
+    async def post_update_rpc_progress(
+        self,
+        rpc_id: str,
+        *,
+        stage: str,
+        target_version: str | None = None,
+        message: str | None = None,
+    ) -> Any:
+        """POST /api/v1/integrations/update-rpc/{rpcId}/progress.
+
+        `stage` is one of draining|installing|restarting|staged|error
+        (staged and error are daemon-terminal; restarting arms the
+        backend's heartbeat-based completion detection: a comeback beat
+        with daemonVersion >= targetVersion settles 'done', silence for
+        5 minutes settles 'unknown').
+        """
+        body: dict[str, Any] = {"stage": stage}
+        if target_version is not None:
+            body["targetVersion"] = target_version
+        if message is not None:
+            body["message"] = message
+        return await self._request(
+            "POST",
+            f"/api/v1/integrations/update-rpc/{rpc_id}/progress",
+            json=body,
         )
 
     async def post_profile_rpc_ack(self, rpc_id: str) -> Any:

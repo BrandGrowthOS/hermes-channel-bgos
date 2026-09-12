@@ -744,3 +744,9 @@ pytest -v
 ```
 
 Expected on v0.5.0: **153 passed, 1 skipped**. The reconnect test needs a real BGOS backend.
+
+## One-click updates (0.29.0)
+
+BGOS can request a plugin update from its existing update control. The daemon reports progress and fetches only the official plugin repository, preserving dirty local checkouts and refusing cross-major updates. An active chat, voice, board or peer operation defers the update instead of being interrupted.
+
+Only a verified systemd user service owning this process can restart automatically. Other hosts keep running and report the downloaded update as staged until the operator restarts the gateway. Restart scheduling failures are reported immediately. This updates the channel plugin; it does not upgrade the Hermes host itself. The recent custom call context and opening sentence support remain available.
