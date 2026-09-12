@@ -4,6 +4,10 @@ BGOS channel adapter for [Nous Research's Hermes agent](https://github.com/NousR
 
 **Status:** Phase 1 — running in production. Message round-trips work end-to-end. Approvals render as 4-button inline bubbles. A handful of gotchas documented below.
 
+## Canonical setup runbook
+
+This README is the **canonical committed copy** of the BGOS partner setup runbook for Hermes hosts. The BGOS Claude Code plugin's `bgos-partner-setup` skill routes here by section anchor rather than carrying a copy of its own, and the app's setup prompts point here. The section headings below are stable deep-link targets — rename one only together with the surfaces that point at it.
+
 ## One-command install
 
 Run this **on the server where Hermes runs**:
@@ -463,6 +467,55 @@ symptoms with none of the causes above.
 
 ---
 
+### Which agent is this? Identity on a multi-agent host
+
+The Hermes profile above decides which persona serves a turn. This section is a
+different question: how the **connector** knows which assistant it is. On a host
+running one agent it never comes up. On a host running several it is the thing
+that bites.
+
+**Give every agent its own folder.** Not a convention, a requirement. A Claude
+Code session started with `--continue` resumes the most recent conversation *in
+its working directory*, not its own. Two agents sharing a folder means
+restarting one can bring it back as its neighbour, with the wrong identity and
+the wrong memory. That has happened: six agents restarted, and all six resumed a
+single agent's conversation.
+
+**Identity resolves in this order, first match wins:**
+
+| order | source | how you set it |
+|---|---|---|
+| 1 | `BGOS_CREDENTIALS_PATH` | an explicit path, rarely needed |
+| 2 | `BGOS_ASSISTANT_ID` | env var, usually in the folder's `.mcp.json` |
+| 3 | folder pin | a `.bgos-agent-id` file in the agent's folder, containing just the assistant id |
+| 4 | sole credentials file | only when the host has exactly one |
+
+**Set the folder pin even when the env var already works**, and this is the part
+people skip. An env-pinned agent on a host with several credential files is
+resolving by rule 2 and nothing else. Remove that variable, whether by tidying a
+config, copying a folder, or launching from a different shell, and resolution
+falls to rule 4, finds several candidates, and **refuses**. The daemon does not
+degrade, it exits. A host in that state boots perfectly today and its logs look
+identical to a robust one.
+
+Writing the pin costs one command per agent and removes the whole class:
+
+```bash
+echo -n "<assistant-id>" > /path/to/that/agent/.bgos-agent-id
+```
+
+**Check it rather than assume it.** The pin must name a credentials file that
+actually exists (`~/.bgos-agent/credentials-<id>.json`). A pin pointing at a
+missing file is treated as stale and skipped, so a pin that looks right and
+resolves to nothing is worse than no pin at all. If your agent predates
+per-assistant credential files it may still be on the legacy
+`~/.bgos-agent/credentials.json`, in which case copy it to the per-assistant
+name before pinning.
+
+**Never commit `.bgos-agent-id`.** It names which assistant runs from a
+directory, so a committed one pins every clone of that repo to the same agent.
+
+
 ## First-time pairing
 
 > **Two or more agents on this machine?** Do the numbered flow in
@@ -691,3 +744,9 @@ pytest -v
 ```
 
 Expected on v0.5.0: **153 passed, 1 skipped**. The reconnect test needs a real BGOS backend.
+
+## One-click updates (0.29.0)
+
+BGOS can request a plugin update from its existing update control. The daemon reports progress and fetches only the official plugin repository, preserving dirty local checkouts and refusing cross-major updates. An active chat, voice, board or peer operation defers the update instead of being interrupted.
+
+Only a verified systemd user service owning this process can restart automatically. Other hosts keep running and report the downloaded update as staged until the operator restarts the gateway. Restart scheduling failures are reported immediately. This updates the channel plugin; it does not upgrade the Hermes host itself. The recent custom call context and opening sentence support remain available.

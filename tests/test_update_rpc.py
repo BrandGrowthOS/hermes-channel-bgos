@@ -226,6 +226,40 @@ async def test_supervised_update_acks_then_walks_the_full_stage_ladder(
     assert adapter._update_rpc_in_flight == set()
 
 
+async def test_active_chat_turn_defers_update(adapter_and_api, monkeypatch):
+    adapter, api = adapter_and_api
+    monkeypatch.setattr(bgos_adapter_module, "_UPDATE_DRAIN_SECONDS", 0.01)
+    adapter._active_sessions = {"chat": object()}
+    await adapter._handle_update_rpc(UPDATE_FRAME)
+    await _settle_update_tasks(adapter)
+    assert _stages(api) == ["draining", "error"]
+    assert adapter._test_restarts == []
+    adapter._active_sessions = {}
+
+
+async def test_work_arriving_during_install_stays_staged(adapter_and_api, monkeypatch):
+    adapter, api = adapter_and_api
+    monkeypatch.setattr(bgos_adapter_module, "_UPDATE_DRAIN_SECONDS", 0.01)
+    def apply(clone_dir=None):
+        adapter._active_sessions = {"chat": object()}
+        return AppliedUpdate("0.28.0", "0.28.1")
+    monkeypatch.setattr(self_update, "apply_update", apply)
+    await adapter._handle_update_rpc(UPDATE_FRAME)
+    await _settle_update_tasks(adapter)
+    assert _stages(api) == ["draining", "installing", "staged"]
+    assert adapter._test_restarts == []
+    adapter._active_sessions = {}
+
+
+async def test_different_rpc_cannot_install_concurrently(adapter_and_api):
+    adapter, api = adapter_and_api
+    adapter._update_rpc_in_flight.add("other-update")
+    await adapter._handle_update_rpc(UPDATE_FRAME)
+    assert api.acks == ["rpc-update-1"]
+    assert api.progresses[-1][1]["message"] == "update_in_flight"
+    assert adapter._test_restarts == []
+
+
 async def test_kill_switch_acks_then_reports_updates_disabled(
     adapter_and_api, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -366,9 +400,10 @@ async def test_drain_waits_for_in_flight_work_without_cancelling(
     try:
         await adapter._handle_update_rpc(UPDATE_FRAME)
         await _settle_update_tasks(adapter)
-        # The drain timed out and moved on; the in-flight task was NOT
-        # cancelled by the drain itself.
-        assert _stages(fake_api) == ["draining", "installing", "restarting"]
+        # Refuse the update without touching the in-flight turn.
+        assert _stages(fake_api) == ["draining", "error"]
+        assert fake_api.progresses[-1][1]["message"] == "agent_busy"
+        assert adapter._test_restarts == []
         assert not hung.cancelled()
     finally:
         adapter._voice_tasks.discard(hung)

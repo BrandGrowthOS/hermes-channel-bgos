@@ -739,7 +739,7 @@ def _format_inbound_files(text: str, files: list[dict]) -> str:
     return f"[User attached {len(files)} file(s)]" + suffix
 
 
-def _parse_call_block(content: str) -> tuple[str, str | None]:
+def _parse_call_block(content: str) -> tuple[str, str | dict | None]:
     """Strip a `[[BGOS_CALL]]` block and return `(cleaned_text, ring_reason)`.
 
     Returns `(content, None)` when absent, so the normal send path is
@@ -753,6 +753,21 @@ def _parse_call_block(content: str) -> tuple[str, str | None]:
     if match is None:
         return content, None
     reason = (match.group(1) or "").strip()
+    cleaned = _CALL_BLOCK_RE.sub("", content).strip()
+    if reason.startswith("{"):
+        try:
+            request = json.loads(reason)
+            if not isinstance(request, dict) or set(request) - {"reason", "context", "openingMessage"}:
+                raise ValueError("Unsupported call fields")
+            for key, limit in (("reason", 200), ("context", 4000), ("openingMessage", 400)):
+                if key in request and (not isinstance(request[key], str) or len(request[key]) > limit):
+                    raise ValueError("Invalid call field or length")
+            return cleaned, request
+        except (ValueError, TypeError):
+            # Do not turn malformed JSON (including private context) into a
+            # public ring reason or repeat it in logs.
+            log.warning("Invalid structured BGOS_CALL; call not placed")
+            return cleaned, None
     # The backend caps the ring reason at 200 chars; trim here so a long agent
     # sentence rings with a truncated reason instead of failing validation.
     if len(reason) > 200:
@@ -1285,7 +1300,7 @@ class BGOSAdapter(BasePlatformAdapter):
             self._style_assistant_id_for_chat(chat_key)
         )
 
-    async def _ring_owner(self, chat_key: int, reason: str) -> None:
+    async def _ring_owner(self, chat_key: int, reason: str | dict) -> None:
         """Ring the owner as the agent that owns this chat. Never raises.
 
         The assistant id is resolved PER CHAT, the same way the send path
@@ -1302,11 +1317,18 @@ class BGOSAdapter(BasePlatformAdapter):
         if assistant_id is None:
             log.warning("call marker ignored: no assistant for chat %s", chat_key)
             return
+        fields = reason if isinstance(reason, dict) else {"reason": reason}
+        extra = {}
+        if "context" in fields:
+            extra["context"] = fields["context"]
+        if "openingMessage" in fields:
+            extra["opening_message"] = fields["openingMessage"]
         try:
             await self._api.call_owner(
                 assistant_id=int(assistant_id),
-                reason=reason or None,
+                reason=fields.get("reason") or None,
                 chat_id=chat_key,
+                **extra,
             )
             log.info("ringing owner (assistant %s, chat %s)", assistant_id, chat_key)
         except BgosApiError as exc:
@@ -6190,6 +6212,14 @@ class BGOSAdapter(BasePlatformAdapter):
             log.debug("dropping in-flight update_rpc duplicate rpc=%s", rpc_id)
             return
 
+        if self._update_rpc_in_flight:
+            try:
+                await self._api.post_update_rpc_ack(rpc_id)
+            except Exception:
+                log.warning("update_rpc busy ack failed rpc=%s", rpc_id)
+            await self._post_update_progress(rpc_id, "error", message="update_in_flight")
+            return
+
         self._update_rpc_in_flight.add(rpc_id)
         task = asyncio.create_task(self._run_update_rpc(rpc_id))
         self._update_tasks.add(task)
@@ -6218,26 +6248,23 @@ class BGOSAdapter(BasePlatformAdapter):
                 rpc_id, stage, exc_info=True,
             )
 
-    async def _drain_for_update(self, timeout: float) -> None:
+    async def _drain_for_update(self, timeout: float) -> bool:
         """Let in-flight fire-and-forget work settle before the restart.
 
-        Best-effort by contract: asyncio.wait with a timeout, never a
-        cancel; the point is to avoid cutting a reply mid-write, not to
-        guarantee quiescence (the gateway's own systemd stop handles the
-        rest)."""
-        tasks = [
-            t for t in (
+        A timeout refuses the update, never cancels a live turn."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            tasks = (
                 *self._voice_tasks, *self._boards_tasks, *self._peer_tasks,
-            ) if not t.done()
-        ]
-        if not tasks:
-            return
-        done, pending = await asyncio.wait(tasks, timeout=timeout)
-        if pending:
-            log.warning(
-                "update_rpc drain: %d task(s) still running after %.0fs, "
-                "proceeding", len(pending), timeout,
+                *self._doctor_tasks, *self._profile_tasks,
+                *self._pending_text_tasks.values(),
             )
+            if not any(not t.done() for t in tasks) and not getattr(self, "_active_sessions", {}):
+                return True
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.1, remaining))
 
     async def _run_update_rpc(self, rpc_id: str) -> None:
         try:
@@ -6267,7 +6294,9 @@ class BGOSAdapter(BasePlatformAdapter):
             )
 
             await self._post_update_progress(rpc_id, "draining")
-            await self._drain_for_update(_UPDATE_DRAIN_SECONDS)
+            if not await self._drain_for_update(_UPDATE_DRAIN_SECONDS):
+                await self._post_update_progress(rpc_id, "error", message="agent_busy")
+                return
 
             await self._post_update_progress(rpc_id, "installing")
             try:
@@ -6312,6 +6341,12 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._post_update_progress(
                     rpc_id, "staged", target_version=target_version,
                 )
+                return
+
+            # Work can arrive while git runs in its worker thread. Keep the
+            # install staged instead of cutting off a turn that arrived then.
+            if not await self._drain_for_update(_UPDATE_DRAIN_SECONDS):
+                await self._post_update_progress(rpc_id, "staged", target_version=target_version)
                 return
 
             # 'restarting' arms the backend's completion detection, then

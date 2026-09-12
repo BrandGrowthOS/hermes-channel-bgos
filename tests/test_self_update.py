@@ -184,6 +184,7 @@ def test_systemd_user_unit_parses_status_header(
 ) -> None:
     _fresh_unit_cache(monkeypatch)
     calls: list[list[str]] = []
+    monkeypatch.setattr(self_update, "_owns_systemd_unit", lambda unit: unit == "hermes-gateway-ava.service")
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
@@ -233,6 +234,25 @@ def test_systemd_user_unit_oserror_is_none(
 
     monkeypatch.setattr(self_update.subprocess, "run", fake_run)
     assert self_update.systemd_user_unit() is None
+
+
+def test_systemd_unit_must_own_this_process(monkeypatch):
+    _fresh_unit_cache(monkeypatch)
+    monkeypatch.setattr(self_update.subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        returncode=0, stdout="● someone-else.service - Other gateway\n",
+    ))
+    monkeypatch.setattr(self_update, "_owns_systemd_unit", lambda unit: False)
+    assert self_update.systemd_user_unit() is None
+
+
+@pytest.mark.parametrize("group,expected", [
+    ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/hermes.service", True),
+    ("0::/user.slice/app.slice/another.service", False),
+    ("0::/user.slice/hermes.service/session.scope", False),
+])
+def test_systemd_cgroup_ownership(monkeypatch, group, expected):
+    monkeypatch.setattr(Path, "read_text", lambda *a, **kw: group)
+    assert self_update._owns_systemd_unit("hermes.service") is expected
 
 
 # -----------------------------------------------------------------------------
@@ -354,7 +374,7 @@ def _commit_all(repo: Path, message: str) -> None:
 
 
 @pytest.fixture
-def cloned_repos(tmp_path: Path) -> tuple[Path, Path]:
+def cloned_repos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """(origin, clone) pair: origin holds v0.28.0 on main, clone tracks it."""
     origin = tmp_path / "origin"
     origin.mkdir()
@@ -363,6 +383,9 @@ def cloned_repos(tmp_path: Path) -> tuple[Path, Path]:
     _commit_all(origin, "v0.28.0")
     clone = tmp_path / "clone"
     _run_git(tmp_path, "clone", str(origin), str(clone))
+    # A local throwaway remote substitutes for GitHub; source validation is
+    # tested separately without permitting external sources in production.
+    monkeypatch.setattr(self_update, "_is_official_remote", lambda url: True)
     return origin, clone
 
 
@@ -403,6 +426,18 @@ def test_apply_update_no_update_available(
     with pytest.raises(SelfUpdateError) as excinfo:
         self_update.apply_update(clone)
     assert excinfo.value.reason == "no_update_available"
+
+
+def test_apply_update_refuses_unofficial_origin(cloned_repos, monkeypatch):
+    from hermes_channel_bgos.update_cli import _is_official_remote
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all(origin, "candidate")
+    before = _run_git(clone, "rev-parse", "HEAD")
+    monkeypatch.setattr(self_update, "_is_official_remote", _is_official_remote)
+    with pytest.raises(SelfUpdateError, match="untrusted_update_source"):
+        self_update.apply_update(clone)
+    assert _run_git(clone, "rev-parse", "HEAD") == before
 
 
 def test_apply_update_refuses_major_jump(
@@ -480,12 +515,12 @@ def test_schedule_unit_restart_spawns_detached_timer(
 ) -> None:
     spawned: list[list[str]] = []
 
-    def fake_popen(argv, **kwargs):
+    def fake_run(argv, **kwargs):
         spawned.append(argv)
         assert kwargs["start_new_session"] is True
-        return SimpleNamespace(pid=4242)
+        return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(self_update.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(self_update.subprocess, "run", fake_run)
     assert self_update.schedule_unit_restart("hermes-gateway.service") is True
     assert spawned == [[
         "systemd-run", "--user", "--on-active=2s",
@@ -496,8 +531,13 @@ def test_schedule_unit_restart_spawns_detached_timer(
 def test_schedule_unit_restart_spawn_failure_is_false(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_popen(argv, **kwargs):
+    def fake_run(argv, **kwargs):
         raise OSError("no systemd-run")
 
-    monkeypatch.setattr(self_update.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(self_update.subprocess, "run", fake_run)
+    assert self_update.schedule_unit_restart("hermes-gateway.service") is False
+
+
+def test_schedule_unit_restart_rejected_timer_is_false(monkeypatch):
+    monkeypatch.setattr(self_update.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
     assert self_update.schedule_unit_restart("hermes-gateway.service") is False

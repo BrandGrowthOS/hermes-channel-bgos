@@ -31,7 +31,7 @@ from pathlib import Path
 import httpx
 
 from . import __version__
-from .update_cli import find_checkout_root
+from .update_cli import find_checkout_root, _is_official_remote
 
 log = logging.getLogger(__name__)
 
@@ -198,10 +198,23 @@ def _probe_systemd_user_unit() -> str | None:
         return None
     if result.returncode != 0:
         return None
-    match = re.search(r"([A-Za-z0-9:@_.\\-]+\.service)\b", result.stdout or "")
-    if match is None:
+    # Only the header names the service. A log line mentioning a different
+    # service is not restart authority. Confirm this process belongs to it.
+    match = re.match(r"^[\s●*]*([A-Za-z0-9:@_.\\-]+\.service)(?:\s|$)", result.stdout or "")
+    if match is None or not _owns_systemd_unit(match.group(1)):
         return None
     return match.group(1)
+
+
+def _owns_systemd_unit(unit: str) -> bool:
+    try:
+        groups = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(
+        line.split(":", 2)[-1].rstrip("/").split("/")[-1] == unit
+        for line in groups.splitlines()
+    )
 
 
 def auto_update_enabled() -> bool:
@@ -320,6 +333,10 @@ def apply_update(clone_dir: Path | None = None) -> AppliedUpdate:
     if status.stdout.strip():
         raise SelfUpdateError("dirty_tree")
 
+    remote = _git(root, "remote", "get-url", "origin")
+    if remote.returncode != 0 or not _is_official_remote(remote.stdout):
+        raise SelfUpdateError("untrusted_update_source")
+
     fetch = _git(
         root, "fetch", "--prune", "origin",
         f"+refs/heads/{MAIN_BRANCH}:refs/remotes/origin/{MAIN_BRANCH}",
@@ -367,7 +384,7 @@ def schedule_unit_restart(unit: str) -> bool:
     on any spawn failure (the caller reports it; never raises).
     """
     try:
-        subprocess.Popen(
+        result = subprocess.run(
             [
                 "systemd-run", "--user", "--on-active=2s",
                 "systemctl", "--user", "restart", unit,
@@ -376,8 +393,10 @@ def schedule_unit_restart(unit: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            timeout=10,
+            check=False,
         )
     except Exception:
         log.exception("self_update restart spawn failed unit=%s", unit)
         return False
-    return True
+    return result.returncode == 0

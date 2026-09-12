@@ -932,6 +932,8 @@ class BgosApi:
         assistant_id: int,
         reason: str | None = None,
         chat_id: int | None = None,
+        context: str | None = None,
+        opening_message: str | None = None,
     ) -> dict:
         """POST /api/v1/voice/outbound-call, ring the owner in the app now.
 
@@ -955,6 +957,12 @@ class BgosApi:
         setup guidance, which the caller should relay verbatim.
         """
         body: dict = {"assistantId": assistant_id}
+        for key, value, limit in (("context", context, 4000), ("openingMessage", opening_message, 400)):
+            if value is not None:
+                if not isinstance(value, str) or len(value) > limit:
+                    raise ValueError(f"{key} must be text of at most {limit} characters")
+                if value.strip():
+                    body[key] = value.strip()
         if reason is not None:
             body["reason"] = reason
         if chat_id is not None:

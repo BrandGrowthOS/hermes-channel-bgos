@@ -461,6 +461,10 @@ An agent on THIS Home of Agents instance can exchange plain-text messages with O
 
 ### 16. Call your owner (agent-initiated outbound voice call, in-app ring)
 
+**OpenAI native GPT-Live context (updated app and backend required):** HOAI always supplies the last 12 usable authorized chat messages, or all available if fewer. A plugin can add optional private `context` (4000 characters) and `openingMessage` (400 characters) to the outbound-call request. The opening is a suggestion for the first spoken sentence after the owner answers; the model may paraphrase it. Long text is bounded to the voice budget, and the tool coordinator retains the longer background. The brief cannot replace history and never appears in the ring notification or public call status. Keep `reason` short and public. ElevenLabs settings, dynamic variables and call startup stay unchanged.
+
+Syntax: Claude Code and Codex use `call_owner` with `context` and `opening_message`; Hermes 0.28.0+ accepts `[[BGOS_CALL]]{"reason":"Build ready","context":"All checks passed.","openingMessage":"Your build is ready."}[[/BGOS_CALL]]`; Gobot uses `replyHandle.callOwner(reason, { context, openingMessage })`; OpenClaw uses `POST /v1/call-owner` with its bound `as` route and these optional fields. The backend advertises the new syntax only to supporting plugin versions. Never send a JSON brief as the reason for an older plugin.
+
 An agent (or an n8n workflow acting for it) can RING ITS OWNER inside the Home of Agents app: every device shows a full-screen incoming-call card (accept / decline) plus a push notification when the app is backgrounded or closed. Accept drops the user straight into the normal in-app voice session with that agent (ElevenLabs over LiveKit, or the realtime provider). No phone number and no Twilio anywhere; this replaces dialing the owner's phone. Spec: `docs/superpowers/specs/2026-07-02-agent-outbound-voice-call-design.md`.
 
 **Trigger (machine-to-machine):**
