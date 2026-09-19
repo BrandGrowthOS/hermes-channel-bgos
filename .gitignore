@@ -28,3 +28,16 @@ Thumbs.db
 
 # e2e scratch state (per-run HERMES_HOMEs + daemon logs)
 e2e/.work/
+
+# Local debugging artifacts: browser-session snapshots and scratch state.
+# These capture whatever was on screen (names, chats), so they never belong
+# in this public repo. Removed 2026-09-19; keep them ignored.
+.playwright-mcp/
+.superpowers/
+/*-pre.md
+/pre-*.md
+/post-*.md
+/post-*.png
+/diag*.md
+/jeff-*.md
+/test-*.png
