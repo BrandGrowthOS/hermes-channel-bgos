@@ -1097,6 +1097,138 @@ async def test_another_platform_adapter_with_a_live_session_blocks(sched):
     assert await _tick(adapter) == "settling"
 
 
+# Finding H3: the gateway runs agent work no platform adapter's sessions
+# show. Cron jobs run on cron.scheduler's own thread pool in this process
+# (tracked only by its get_running_job_ids, upstream #60432), API server runs
+# and turns of secondary multiplexed profiles are in the runner's
+# _active_work_count() / _running_agents, and a secondary profile's platform
+# adapters live in runner._profile_adapters, not runner.adapters. A restart
+# ends all of them.
+
+
+def _inject_cron_scheduler(monkeypatch, get_running_job_ids) -> None:
+    """Stand in for Hermes upstream's cron/scheduler.py, as the gateway
+    process has it loaded."""
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    module = types.ModuleType("cron.scheduler")
+    module.get_running_job_ids = get_running_job_ids
+    cron_pkg.scheduler = module
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.scheduler", module)
+
+
+async def test_a_running_cron_job_holds_the_scheduled_apply(sched, monkeypatch):
+    adapter, _api, clock, state = sched
+    running = {"nightly-fixer"}
+    _inject_cron_scheduler(monkeypatch, lambda: frozenset(running))
+    assert await _tick(adapter) == "background_job"
+    clock[0] += 10 * QUIET
+    assert await _tick(adapter) == "background_job"
+    assert state.applied == [] and state.restarts == []
+    running.clear()
+    assert await _tick(adapter) == "settling"
+    clock[0] += QUIET
+    assert await _tick(adapter) == "restarting"
+
+
+async def test_a_cron_job_starting_during_the_pull_keeps_it_staged(
+    sched, monkeypatch,
+):
+    adapter, _api, clock, state = sched
+    running: set[str] = set()
+    _inject_cron_scheduler(monkeypatch, lambda: frozenset(running))
+
+    def apply_then_a_cron_job_starts():
+        running.add("nightly-fixer")
+        return AppliedUpdate(__version__, NEWER)
+
+    state.apply_result = apply_then_a_cron_job_starts
+    assert await _idle_through_quiet_window(adapter, clock) == "staged"
+    assert state.restarts == []
+
+
+async def test_a_cron_scheduler_that_cannot_answer_is_busy(sched, monkeypatch):
+    adapter, _api, _clock, state = sched
+
+    def broken():
+        raise RuntimeError("lock poisoned")
+
+    _inject_cron_scheduler(monkeypatch, broken)
+    assert await _tick(adapter) == "background_job"
+    assert state.restarts == []
+
+
+async def test_update_now_refuses_while_a_cron_job_runs(sched, monkeypatch):
+    adapter, api, _clock, state = sched
+    monkeypatch.setattr(bgos_adapter_module, "_UPDATE_DRAIN_SECONDS", 0.2)
+    _inject_cron_scheduler(monkeypatch, lambda: frozenset({"nightly-fixer"}))
+    await adapter._handle_update_rpc({"rpcId": "rpc-cron", "op": "update_now"})
+    await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
+    assert api.progresses[-1][1]["message"] == "background_job"
+    assert state.applied == [] and state.restarts == []
+
+
+async def test_gateway_runner_work_is_busy(sched):
+    """Upstream's own drain total: turns on every profile and API server
+    runs (cron jobs, counted in it too, are reported apart)."""
+    adapter, _api, clock, state = sched
+    work = [1]
+    adapter.gateway_runner = SimpleNamespace(
+        adapters={}, _active_work_count=lambda: work[0],
+    )
+    assert await _tick(adapter) == "busy"
+    clock[0] += 10 * QUIET
+    assert await _tick(adapter) == "busy"
+    work[0] = 0
+    assert await _tick(adapter) == "settling"
+    clock[0] += QUIET
+    assert await _tick(adapter) == "restarting"
+    assert len(state.restarts) == 1
+
+
+async def test_a_cron_job_inside_the_runner_total_reads_as_background_job(
+    sched, monkeypatch,
+):
+    adapter, _api, _clock, _state = sched
+    _inject_cron_scheduler(monkeypatch, lambda: frozenset({"nightly-fixer"}))
+    adapter.gateway_runner = SimpleNamespace(
+        adapters={}, _active_work_count=lambda: 1,
+    )
+    assert await _tick(adapter) == "background_job"
+
+
+async def test_an_older_runner_counts_its_running_agents(sched):
+    adapter, _api, _clock, state = sched
+    adapter.gateway_runner = SimpleNamespace(
+        adapters={}, _running_agents={"telegram:shadow:1": object()},
+    )
+    assert await _tick(adapter) == "busy"
+    assert state.restarts == []
+
+
+async def test_a_secondary_profile_platform_session_is_busy(sched):
+    adapter, _api, _clock, state = sched
+    telegram = SimpleNamespace(_active_sessions={"telegram:9": object()})
+    adapter.gateway_runner = SimpleNamespace(
+        adapters={}, _profile_adapters={"shadow": {"telegram": telegram}},
+    )
+    assert await _tick(adapter) == "busy"
+    telegram._active_sessions = {}
+    assert await _tick(adapter) == "settling"
+
+
+async def test_a_runner_that_cannot_count_its_work_is_busy(sched):
+    adapter, _api, _clock, state = sched
+
+    def broken() -> int:
+        raise RuntimeError("runner torn down")
+
+    adapter.gateway_runner = SimpleNamespace(adapters={}, _active_work_count=broken)
+    assert await _tick(adapter) == "busy"
+    assert state.restarts == []
+
+
 async def test_only_one_scheduled_loop_acts_per_process(sched):
     adapter, _api, clock, state = sched
     other, _other_api = _new_adapter(clock)

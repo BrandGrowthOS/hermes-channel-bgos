@@ -22,6 +22,7 @@ import os
 import platform
 import re
 import struct
+import sys
 import time
 import weakref
 from dataclasses import asdict, dataclass
@@ -419,6 +420,55 @@ def _running_background_processes() -> int:
     except Exception:
         log.debug("Hermes process registry count failed", exc_info=True)
         return 1
+
+
+def _running_cron_jobs() -> int:
+    """In-flight Hermes cron jobs (finding H3). Upstream runs them on
+    cron.scheduler's own thread pool inside this gateway process, outside
+    every session and `_running_agents` (#60432), so a restart cuts them
+    off. Read from the loaded module, never imported here: a process that
+    never loaded the scheduler runs no cron job, and an older Hermes without
+    get_running_job_ids has none to report (0). A scheduler that cannot
+    answer reads as running (1): a guard that fails open would kill a job."""
+    module = sys.modules.get("cron.scheduler")
+    get_running_job_ids = getattr(module, "get_running_job_ids", None)
+    if not callable(get_running_job_ids):
+        return 0
+    try:
+        return len(get_running_job_ids())
+    except Exception:
+        log.debug("Hermes cron scheduler running jobs read failed", exc_info=True)
+        return 1
+
+
+def _gateway_runner_turns(runner: Any, cron_jobs: int, own: Any) -> int:
+    """Agent work the Hermes gateway runner holds outside every BGOS adapter
+    (finding H3): upstream's own drain total `_active_work_count()` (turns of
+    EVERY multiplexed profile in `_running_agents`, API server runs, and the
+    cron jobs it also counts, taken out here because the caller reports them
+    as background_job), else an older runner's `_running_agents`; plus a live
+    session on any platform adapter, the primary profile's
+    (`runner.adapters`) and every secondary profile's
+    (`runner._profile_adapters`). Raises when the runner cannot answer; the
+    caller reads that as busy."""
+    work_count = getattr(runner, "_active_work_count", None)
+    if callable(work_count):
+        count = int(work_count()) - cron_jobs
+    else:
+        count = len(getattr(runner, "_running_agents", None) or ())
+    adapters: list[Any] = []
+    primary = getattr(runner, "adapters", None)
+    if isinstance(primary, dict):
+        adapters.extend(primary.values())
+    profiles = getattr(runner, "_profile_adapters", None)
+    if isinstance(profiles, dict):
+        for profile_map in profiles.values():
+            if isinstance(profile_map, dict):
+                adapters.extend(profile_map.values())
+    for adapter in adapters:
+        if adapter is not own and getattr(adapter, "_active_sessions", None):
+            count += 1
+    return count
 
 # System locations that always hold secrets or credentials. SECURITY: outbound
 # MEDIA:/path markers and send_image/file local sources are agent-emitted, and
@@ -6503,22 +6553,27 @@ class BGOSAdapter(BasePlatformAdapter):
         """The ONE busy definition every update path uses (update_now's
         drain and the scheduled apply), None when idle. A restart ends the
         whole gateway process, so a session or pending plugin task on ANY
-        BGOS adapter in it (multiplexed profiles) is `busy`, and, best
-        effort, so is a live session on any other platform adapter the
-        gateway runner holds. A running Hermes background process (terminal
-        tool, background=true) is `background_job` (finding 9)."""
+        BGOS adapter in it (multiplexed profiles) is `busy`, and so is the
+        agent work the gateway runner holds: a turn on any profile, an API
+        server run, a live session on any platform adapter of any profile
+        (finding H3). A runner that cannot answer is `busy`. A running
+        Hermes cron job (finding H3) or background process (terminal tool,
+        background=true; finding 9) is `background_job`."""
         if any(
             adapter._local_update_busy()
             for adapter in (self, *_live_adapters())
         ):
             return "busy"
+        cron_jobs = _running_cron_jobs()
         runner = getattr(self, "gateway_runner", None)
-        others = getattr(runner, "adapters", None)
-        if isinstance(others, dict):
-            for adapter in others.values():
-                if adapter is not self and getattr(adapter, "_active_sessions", None):
+        if runner is not None:
+            try:
+                if _gateway_runner_turns(runner, cron_jobs, self) > 0:
                     return "busy"
-        if _running_background_processes() > 0:
+            except Exception:
+                log.debug("gateway runner work count failed", exc_info=True)
+                return "busy"
+        if cron_jobs > 0 or _running_background_processes() > 0:
             return "background_job"
         return None
 

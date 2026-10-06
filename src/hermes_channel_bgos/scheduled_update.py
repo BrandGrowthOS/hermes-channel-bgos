@@ -12,8 +12,9 @@ decisions the adapter's scheduled-update loop runs every minute:
   gateway back), only while BGOS_AUTO_UPDATE allows it, and never a fourth
   time onto a target that already failed to come up three times.
 - `decide_safe_moment`: WHEN. The update_now drain's busy definition (no
-  active session, no pending plugin task, no running Hermes background
-  process) HELD for the whole quiet window,
+  active session, no pending plugin task, no agent work the gateway runner
+  holds for any profile, no running Hermes cron job or background process)
+  HELD for the whole quiet window,
   plus 10 minutes with no inbound or outbound message, plus any backoff
   after an attempt. It never cancels or interrupts a turn: an unsafe moment
   is simply not yet.
