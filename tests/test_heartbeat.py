@@ -85,6 +85,24 @@ async def test_post_heartbeat_optional_fields(mock_bgos_server):
     await api.close()
 
 
+async def test_post_heartbeat_sends_explicit_null_last_error(mock_bgos_server):
+    """`lastError: null` clears the stored error (backend HeartbeatDto); an
+    omitted lastError leaves it untouched."""
+    api = BgosApi(
+        BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
+    )
+    mock_bgos_server.on("POST", HEARTBEAT_PATH).respond(204)
+
+    await api.post_heartbeat(daemon_version="1.2.3", last_error=None)
+    req = mock_bgos_server.last_request("POST", HEARTBEAT_PATH)
+    assert req.json_body == {"daemonVersion": "1.2.3", "lastError": None}
+
+    await api.post_heartbeat(daemon_version="1.2.3")
+    req = mock_bgos_server.last_request("POST", HEARTBEAT_PATH)
+    assert req.json_body == {"daemonVersion": "1.2.3"}
+    await api.close()
+
+
 # -----------------------------------------------------------------------------
 # Adapter lifecycle: boot heartbeat + failure tolerance
 # -----------------------------------------------------------------------------

@@ -333,6 +333,41 @@ def _release_scheduled_update(adapter: "BGOSAdapter") -> None:
         _scheduled_update_owner = None
 
 
+# The scheduled apply's outcome for the app: the heartbeat lastError (a run
+# nobody requested has no update_rpc to report to). Process wide, because one
+# run updates every multiplexed profile in the process and each one's pairing
+# must hear it. None until there is something to say, then (generation,
+# lastError dict, or None to clear). Every adapter remembers the generation
+# its heartbeat delivered, so a failed POST is retried by its next beat.
+_scheduled_update_outcome: tuple[int, dict | None] | None = None
+
+# The first look of a process checks the persisted record once: did the
+# restart that ended the previous process land (clear), or is a reported
+# failure still standing (say it again)?
+_scheduled_update_boot_checked = False
+
+
+def _publish_scheduled_update_outcome(error: dict | None) -> bool:
+    """Set the outcome every adapter's next heartbeat carries. False when it
+    says nothing new (the same code and message, or a second clear), so a
+    failure that repeats every retry is not resent each time."""
+    global _scheduled_update_outcome
+    current = _scheduled_update_outcome
+    if current is not None:
+        previous = current[1]
+        if previous is None and error is None:
+            return False
+        if (
+            previous is not None
+            and error is not None
+            and (previous["code"], previous["message"]) == (error["code"], error["message"])
+        ):
+            return False
+    generation = current[0] + 1 if current is not None else 1
+    _scheduled_update_outcome = (generation, error)
+    return True
+
+
 # Finding 9 (design section 6): never restart under a running background job.
 # Hermes upstream tracks the processes its terminal tool starts with
 # background=true in tools/process_registry.py, and they die with the gateway
@@ -1357,6 +1392,11 @@ class BGOSAdapter(BasePlatformAdapter):
         # outbound through the BgosApi hook (every post, patch, send-message
         # and peer send, whichever adapter path made it).
         self._clock: Callable[[], float] = time.monotonic
+        # Epoch seconds, for what is compared with real dates: the lastError
+        # `at` stamp and the soak against a git committer time.
+        self._wall_clock: Callable[[], float] = time.time
+        # The scheduled outcome generation this adapter's heartbeat delivered.
+        self._scheduled_outcome_delivered: int = 0
         self._last_inbound_message_at: float | None = None
         self._last_outbound_message_at: float | None = None
         self._scheduled_update_task: asyncio.Task | None = None
@@ -1807,7 +1847,9 @@ class BGOSAdapter(BasePlatformAdapter):
     async def _post_heartbeat_once(self) -> None:
         """One best-effort heartbeat (the loop's body). The scheduled apply
         also calls it so a staged or restarting update is visible at once
-        (pendingRestartVersion), not up to 6 hours later."""
+        (pendingRestartVersion), not up to 6 hours later. A scheduled
+        outcome this adapter has not delivered yet rides along as lastError
+        (an object sets the app's error, None clears it)."""
         try:
             latest = await asyncio.to_thread(
                 self_update.latest_known_version,
@@ -1815,11 +1857,18 @@ class BGOSAdapter(BasePlatformAdapter):
             readiness = await asyncio.to_thread(
                 self_update.update_readiness,
             )
+            outcome = _scheduled_update_outcome
+            extra: dict[str, Any] = {}
+            if outcome is not None and outcome[0] != self._scheduled_outcome_delivered:
+                extra["last_error"] = outcome[1]
             await self._api.post_heartbeat(
                 daemon_version=__version__, env=_daemon_env(),
                 latest_known_version=latest,
                 update_readiness=readiness,
+                **extra,
             )
+            if outcome is not None:
+                self._scheduled_outcome_delivered = outcome[0]
             log.info(
                 "BGOS heartbeat sent (daemonVersion=%s)", __version__,
             )
@@ -6607,8 +6656,12 @@ class BGOSAdapter(BasePlatformAdapter):
     async def _scheduled_update_tick(self) -> str:
         """One look: returns a short status token (the plan or safe-moment
         reason, or the run's outcome)."""
+        global _scheduled_update_boot_checked
         if not _claim_scheduled_update(self):
             return "not_owner"
+        if not _scheduled_update_boot_checked:
+            _scheduled_update_boot_checked = True
+            await self._scheduled_update_boot_check()
         now = self._clock()
         if self._update_rpc_in_flight_in_process() or self._scheduled_update_running:
             # An update_now owns the clone and the restart right now; its
@@ -6632,10 +6685,77 @@ class BGOSAdapter(BasePlatformAdapter):
             attempts=attempts,
         )
         if plan.action == "none":
+            if plan.reason == "attempts_exhausted":
+                await self._scheduled_update_exhausted(plan.target_version)
             return plan.reason
         if not moment.safe:
             return moment.reason
         return await self._run_scheduled_update(plan, supervisor)
+
+    async def _scheduled_update_boot_check(self) -> None:
+        """Once per process: did the restart that ended the previous one
+        land? Then the update took: clear the app's error (lastError: null)
+        and forget the record. A reported failure whose target has not
+        landed is said again (a restart can cut off the heartbeat that
+        carried it)."""
+        attempts_path = scheduled_update.attempts_path()
+        report_path = scheduled_update.report_path()
+        attempts = await asyncio.to_thread(
+            scheduled_update.load_attempts, attempts_path,
+        )
+        report = await asyncio.to_thread(scheduled_update.load_report, report_path)
+        attempt_landed = any(
+            scheduled_update.landed(target, __version__) for target in attempts
+        )
+        report_landed = report is not None and scheduled_update.landed(
+            report["target"], __version__,
+        )
+        if attempt_landed:
+            await asyncio.to_thread(scheduled_update.clear_record, attempts_path)
+        if report_landed:
+            await asyncio.to_thread(scheduled_update.clear_record, report_path)
+        if report is not None and not report_landed:
+            error: dict | None = report["lastError"]
+        elif attempt_landed or report_landed:
+            log.info("scheduled update landed: running %s", __version__)
+            error = None
+        else:
+            return
+        if _publish_scheduled_update_outcome(error):
+            await self._announce_scheduled_outcome()
+
+    async def _announce_scheduled_outcome(self) -> None:
+        """Send the outcome now, from every BGOS adapter in the process,
+        instead of waiting up to 6 hours for each one's next beat."""
+        adapters: list[BGOSAdapter] = []
+        for adapter in (self, *_live_adapters()):
+            if not any(adapter is seen for seen in adapters):
+                adapters.append(adapter)
+        for adapter in adapters:
+            await adapter._post_heartbeat_once()
+
+    async def _report_scheduled_error(
+        self, code: str, target: str | None, message: str,
+    ) -> None:
+        """A failed or exhausted run, for the app: kept for the next process
+        and sent at once as the heartbeat lastError (new news only)."""
+        error = scheduled_update.last_error(code, message, at=self._wall_clock())
+        if not _publish_scheduled_update_outcome(error):
+            return
+        await asyncio.to_thread(
+            scheduled_update.save_report,
+            scheduled_update.report_path(), target or "unknown", error,
+        )
+        await self._announce_scheduled_outcome()
+
+    async def _scheduled_update_exhausted(self, target: str | None) -> None:
+        await self._report_scheduled_error(
+            scheduled_update.EXHAUSTED_CODE,
+            target,
+            f"Update to {target or 'unknown'} did not take after "
+            f"{scheduled_update.MAX_ATTEMPTS_PER_TARGET} restarts; "
+            "left for a person to update",
+        )
 
     async def _report_scheduled_update(
         self,
@@ -6689,12 +6809,15 @@ class BGOSAdapter(BasePlatformAdapter):
                             self_update.pending_restart_version,
                         )
                     if pending is None:
-                        return await self._scheduled_update_failed(exc.reason)
+                        return await self._scheduled_update_failed(
+                            exc.reason, target_version,
+                        )
                     target_version = pending
                 except Exception as exc:
                     log.exception("scheduled update apply crashed")
                     return await self._scheduled_update_failed(
                         (str(exc) or exc.__class__.__name__)[:300],
+                        target_version,
                     )
 
             # Work can arrive while git runs in its worker thread: judge the
@@ -6737,20 +6860,25 @@ class BGOSAdapter(BasePlatformAdapter):
                 self_update.schedule_supervisor_restart, supervisor,
             )
             if not spawned:
-                await self._report_scheduled_update(
-                    "error", target_version=target_version,
-                    message="restart_spawn_failed",
+                return await self._scheduled_update_failed(
+                    "restart_spawn_failed", target_version,
                 )
-                return "error"
             return "restarting"
         finally:
             self._scheduled_update_running = False
 
-    async def _scheduled_update_failed(self, reason: str) -> str:
+    async def _scheduled_update_failed(self, reason: str, target: str | None) -> str:
         self._scheduled_update_not_before = (
             self._clock() + scheduled_update.RETRY_SECONDS
         )
-        await self._report_scheduled_update("error", message=reason)
+        await self._report_scheduled_update(
+            "error", target_version=target, message=reason,
+        )
+        await self._report_scheduled_error(
+            scheduled_update.FAILED_CODE,
+            target,
+            f"Scheduled update to {target or 'unknown'} failed: {reason}",
+        )
         return "error"
 
     # -------------------------------------------------------------------------

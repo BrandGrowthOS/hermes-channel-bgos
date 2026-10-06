@@ -297,7 +297,7 @@ class BgosApi:
         *,
         daemon_version: str,
         env: dict | None = None,
-        last_error: dict | None = None,
+        last_error: dict | None | Any = UNSET,
         latest_known_version: str | None | Any = UNSET,
         update_readiness: dict | None = None,
     ) -> Any:
@@ -309,7 +309,9 @@ class BgosApi:
         match the backend HeartbeatDto: `{daemonVersion, env?, lastError?}`
         where `env` is an object of short strings (`{platform?, python?,
         hermes?}`, each <=64 chars) and `lastError` is an object
-        `{code, message, at}` (the backend rejects bare strings here).
+        `{code, message, at}` (the backend rejects bare strings here). An
+        EXPLICIT `last_error=None` sends `lastError: null`, which clears the
+        stored error; the UNSET default omits the key and leaves it as is.
         Callers on the daemon cycle must treat this as best-effort and
         swallow failures — a heartbeat must never block or crash the daemon.
 
@@ -326,7 +328,7 @@ class BgosApi:
         body: dict[str, Any] = {"daemonVersion": daemon_version}
         if env is not None:
             body["env"] = env
-        if last_error is not None:
+        if last_error is not UNSET:
             body["lastError"] = last_error
         if latest_known_version is not UNSET:
             body["latestKnownVersion"] = latest_known_version

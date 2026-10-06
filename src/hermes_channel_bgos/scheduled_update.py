@@ -20,6 +20,10 @@ decisions the adapter's scheduled-update loop runs every minute:
 - the attempt record: a tiny JSON file in the process Hermes home that
   survives the very restart it counts (a restart that keeps landing on the
   old code must not loop forever).
+- the visible outcome: a failed or exhausted run reaches the app as the
+  heartbeat `lastError` (backend HeartbeatErrorDto), kept in a report file
+  beside the attempt record so the next process can say it again, or clear
+  it (`lastError: null`) once the target landed.
 
 Everything here is pure or best-effort file IO; the adapter owns the clock,
 the probes and the effects.
@@ -30,10 +34,11 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
-from .self_update import decide_version_update
+from .self_update import decide_version_update, parse_version_tuple
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +58,16 @@ RETRY_SECONDS = 30 * 60
 MAX_ATTEMPTS_PER_TARGET = 3
 
 ATTEMPTS_FILENAME = "bgos_scheduled_update.json"
+REPORT_FILENAME = "bgos_scheduled_update_error.json"
+
+# The heartbeat lastError codes a scheduled run reports (backend
+# HeartbeatErrorDto: code <= 64 characters, message <= 300, `at` ISO 8601).
+# Neither is the reserved session_unresponsive code, so presence still reads
+# the agent as healthy: it answers, its update did not take.
+FAILED_CODE = "scheduled_update_failed"
+EXHAUSTED_CODE = "scheduled_update_exhausted"
+_ERROR_CODE_MAX = 64
+_ERROR_MESSAGE_MAX = 300
 
 
 @dataclass(frozen=True)
@@ -186,3 +201,76 @@ def record_attempt(path: Path, target: str) -> dict[str, int]:
     except OSError:
         log.warning("scheduled update attempt record not written: %s", path)
     return attempts
+
+
+def clear_record(path: Path) -> None:
+    """Forget a record (attempts or report). Best effort, never raises."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        log.warning("scheduled update record not removed: %s", path)
+
+
+# -----------------------------------------------------------------------------
+# Visible outcome (heartbeat lastError)
+# -----------------------------------------------------------------------------
+
+
+def landed(target: str | None, current: str | None) -> bool:
+    """Pure: the running version is `target` or past it (same major), so a
+    restart onto it took. Unparsable versions never count as landed."""
+    if parse_version_tuple(target) is None or parse_version_tuple(current) is None:
+        return False
+    return target == current or decide_version_update(target, current)
+
+
+def last_error(code: str, message: str, *, at: float) -> dict:
+    """The heartbeat lastError object, bounded to the backend DTO. `at` is
+    epoch seconds (the adapter's wall clock)."""
+    stamp = datetime.fromtimestamp(at, tz=timezone.utc)
+    return {
+        "code": code[:_ERROR_CODE_MAX],
+        "message": message[:_ERROR_MESSAGE_MAX],
+        "at": stamp.isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+
+
+def report_path() -> Path:
+    """Beside the attempt record, in the PROCESS Hermes home."""
+    return attempts_path().with_name(REPORT_FILENAME)
+
+
+def load_report(path: Path) -> dict | None:
+    """`{target, lastError}` of the last reported failure, else None
+    (missing or malformed reads as nothing reported). Never raises."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("target"), str):
+        return None
+    error = raw.get("lastError")
+    if not isinstance(error, dict) or not all(
+        isinstance(error.get(key), str) for key in ("code", "message", "at")
+    ):
+        return None
+    return {
+        "target": raw["target"],
+        "lastError": {key: error[key] for key in ("code", "message", "at")},
+    }
+
+
+def save_report(path: Path, target: str, error: dict) -> None:
+    """Keep the reported failure for the next process. Best effort: a write
+    failure is logged (the heartbeat already carried it). Never raises."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"target": target, "lastError": error}), encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        log.warning("scheduled update report not written: %s", path)

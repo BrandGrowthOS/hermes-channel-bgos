@@ -235,3 +235,76 @@ def test_attempts_path_is_in_the_process_hermes_home(monkeypatch, tmp_path) -> N
     assert json.loads((tmp_path / scheduled_update.ATTEMPTS_FILENAME).read_text()) == {
         "0.30.1": 1,
     }
+
+
+# -----------------------------------------------------------------------------
+# Visible outcomes: the heartbeat lastError a failed or exhausted run sets,
+# and the record that lets the next process clear it once the target landed
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("target", "current", "expected"),
+    [
+        ("0.30.1", "0.30.1", True),
+        # Already past it (a later version, or Update now went further).
+        ("0.30.1", "0.31.0", True),
+        # Still on the old code: the restart did not take.
+        ("0.30.1", "0.30.0", False),
+        (None, "0.30.1", False),
+        ("garbage", "0.30.1", False),
+        ("unknown", "0.30.1", False),
+    ],
+)
+def test_landed(target, current, expected) -> None:
+    assert scheduled_update.landed(target, current) is expected
+
+
+def test_last_error_matches_the_heartbeat_dto_bounds() -> None:
+    """backend HeartbeatErrorDto: code <= 64, message <= 300, at ISO 8601."""
+    error = scheduled_update.last_error(
+        scheduled_update.FAILED_CODE, "x" * 1000, at=0.0,
+    )
+    assert error == {
+        "code": "scheduled_update_failed",
+        "message": "x" * 300,
+        "at": "1970-01-01T00:00:00Z",
+    }
+    assert scheduled_update.EXHAUSTED_CODE == "scheduled_update_exhausted"
+    assert len(scheduled_update.EXHAUSTED_CODE) <= 64
+
+
+def test_report_round_trips_and_clears(tmp_path: Path) -> None:
+    path = tmp_path / "report.json"
+    error = scheduled_update.last_error(
+        scheduled_update.FAILED_CODE, "dirty_tree", at=0.0,
+    )
+    scheduled_update.save_report(path, "0.30.1", error)
+    assert scheduled_update.load_report(path) == {
+        "target": "0.30.1", "lastError": error,
+    }
+    scheduled_update.clear_record(path)
+    assert scheduled_update.load_report(path) is None
+    # Clearing what is not there is not an error.
+    scheduled_update.clear_record(path)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "not json",
+        "[]",
+        '{"target": "0.30.1"}',
+        '{"target": 3, "lastError": {"code": "c", "message": "m", "at": "t"}}',
+        '{"target": "0.30.1", "lastError": {"code": "c", "message": 1, "at": "t"}}',
+    ],
+)
+def test_corrupt_report_is_ignored(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "report.json"
+    path.write_text(body, encoding="utf-8")
+    assert scheduled_update.load_report(path) is None
+
+
+def test_report_path_is_in_the_process_hermes_home(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert scheduled_update.report_path() == tmp_path / scheduled_update.REPORT_FILENAME

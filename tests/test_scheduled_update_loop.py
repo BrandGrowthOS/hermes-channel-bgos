@@ -31,6 +31,7 @@ _MAJOR, _MINOR, _PATCH = (int(p) for p in __version__.split(".")[:3])
 NEWER = f"{_MAJOR}.{_MINOR + 1}.0"
 QUIET = scheduled_update.QUIET_SECONDS
 LAUNCHD = self_update.Supervisor("launchd", "gui/501/ai.hermes.gateway")
+WALL_EPOCH = 1_790_000_000.0
 
 
 @dataclass
@@ -60,6 +61,9 @@ def _new_adapter(clock: list[float]) -> tuple[BGOSAdapter, FakeApi]:
     adapter._real_api = adapter._api  # type: ignore[attr-defined]
     adapter._api = api  # type: ignore[assignment]
     adapter._clock = lambda: clock[0]
+    # Wall clock for lastError `at` and the soak: the monotonic clock plus a
+    # fixed epoch, so both move together.
+    adapter._wall_clock = lambda: WALL_EPOCH + clock[0]
     return adapter, api
 
 
@@ -69,6 +73,8 @@ async def sched(monkeypatch: pytest.MonkeyPatch):
     adapter, api = _new_adapter(clock)
     monkeypatch.setattr(bgos_adapter_module, "_LIVE_ADAPTERS", [])
     monkeypatch.setattr(bgos_adapter_module, "_scheduled_update_owner", None)
+    monkeypatch.setattr(bgos_adapter_module, "_scheduled_update_outcome", None)
+    monkeypatch.setattr(bgos_adapter_module, "_scheduled_update_boot_checked", False)
     monkeypatch.delenv("BGOS_AUTO_UPDATE", raising=False)
     state = SimpleNamespace(
         supervisor=LAUNCHD,
@@ -354,6 +360,168 @@ async def test_restarts_are_spaced_by_the_retry_window(sched):
     clock[0] += QUIET
     assert await _tick(adapter) == "backoff"
     assert len(state.restarts) == 1
+
+
+# -----------------------------------------------------------------------------
+# Visible outcomes: a failed or exhausted run reaches the app as the
+# heartbeat lastError, and a landed one clears it (backend HeartbeatErrorDto)
+# -----------------------------------------------------------------------------
+
+
+def _errors(api: FakeApi) -> list[Any]:
+    """The lastError each heartbeat carried; heartbeats without the key
+    (leave the stored error untouched) are skipped."""
+    return [hb["last_error"] for hb in api.heartbeats if "last_error" in hb]
+
+
+async def test_a_failed_pull_reaches_the_app_as_last_error(sched):
+    adapter, api, clock, state = sched
+
+    def dirty():
+        raise SelfUpdateError("dirty_tree")
+
+    state.apply_result = dirty
+    assert await _idle_through_quiet_window(adapter, clock) == "error"
+    [error] = _errors(api)
+    assert error["code"] == "scheduled_update_failed"
+    assert "dirty_tree" in error["message"] and NEWER in error["message"]
+    assert len(error["message"]) <= 300
+    assert error["at"].endswith("Z")
+    # Persisted, so the next process can re-send or clear it.
+    report = scheduled_update.load_report(scheduled_update.report_path())
+    assert report == {"target": NEWER, "lastError": error}
+
+    # The same failure again after the backoff is not news.
+    clock[0] += scheduled_update.RETRY_SECONDS
+    assert await _tick(adapter) == "error"
+    assert len(_errors(api)) == 1
+
+
+async def test_a_restart_spawn_failure_reaches_the_app(sched):
+    adapter, api, clock, state = sched
+    state.spawn_ok = False
+    assert await _idle_through_quiet_window(adapter, clock) == "error"
+    [error] = _errors(api)
+    assert error["code"] == "scheduled_update_failed"
+    assert "restart_spawn_failed" in error["message"]
+
+
+async def test_exhausted_attempts_reach_the_app_once(sched):
+    adapter, api, clock, state = sched
+    state.latest = None
+    state.pending = NEWER
+    path = scheduled_update.attempts_path()
+    for _ in range(scheduled_update.MAX_ATTEMPTS_PER_TARGET):
+        scheduled_update.record_attempt(path, NEWER)
+    assert await _tick(adapter) == "attempts_exhausted"
+    clock[0] += QUIET
+    assert await _tick(adapter) == "attempts_exhausted"
+    [error] = _errors(api)
+    assert error["code"] == "scheduled_update_exhausted"
+    assert NEWER in error["message"]
+    assert state.restarts == []
+
+
+async def test_a_landed_update_clears_last_error_on_the_next_boot(sched):
+    """The restart recorded an attempt onto the version this process now
+    runs: the update took, so the first look clears any stored error
+    (lastError: null) and forgets the record."""
+    adapter, api, _clock, state = sched
+    state.latest = __version__
+    attempts = scheduled_update.attempts_path()
+    report = scheduled_update.report_path()
+    scheduled_update.record_attempt(attempts, __version__)
+    scheduled_update.save_report(
+        report, __version__,
+        scheduled_update.last_error(
+            scheduled_update.FAILED_CODE, "fetch_failed", at=0.0,
+        ),
+    )
+    assert await _tick(adapter) == "up_to_date"
+    assert _errors(api) == [None]
+    assert scheduled_update.load_attempts(attempts) == {}
+    assert scheduled_update.load_report(report) is None
+    # Said once: later beats leave the (now empty) stored error alone.
+    assert await _tick(adapter) == "up_to_date"
+    await adapter._post_heartbeat_once()
+    assert _errors(api) == [None]
+
+
+async def test_a_landed_scheduled_update_clears_without_a_report(sched):
+    adapter, api, _clock, state = sched
+    state.latest = __version__
+    scheduled_update.record_attempt(scheduled_update.attempts_path(), __version__)
+    await _tick(adapter)
+    assert _errors(api) == [None]
+
+
+async def test_an_unresolved_report_is_sent_again_after_a_restart(sched):
+    """A restart can cut off the heartbeat that carried the error; the next
+    process says it again while the target has not landed."""
+    adapter, api, _clock, state = sched
+    error = scheduled_update.last_error(
+        scheduled_update.FAILED_CODE, "Scheduled update to x failed: merge_failed",
+        at=0.0,
+    )
+    scheduled_update.save_report(scheduled_update.report_path(), NEWER, error)
+    await _tick(adapter)
+    assert _errors(api) == [error]
+
+
+async def test_no_record_means_nothing_to_say(sched):
+    adapter, api, _clock, state = sched
+    state.latest = __version__
+    assert await _tick(adapter) == "up_to_date"
+    assert _errors(api) == []
+
+
+async def test_every_bgos_adapter_in_the_process_carries_the_outcome(sched):
+    """Multiplexed profiles: one run updates every pairing in the process,
+    so each one's heartbeat carries the outcome."""
+    adapter, api, clock, state = sched
+    other, other_api = _new_adapter(clock)
+    try:
+        bgos_adapter_module._register_live_adapter(adapter)
+        bgos_adapter_module._register_live_adapter(other)
+        state.spawn_ok = False
+        assert await _idle_through_quiet_window(adapter, clock) == "error"
+        assert [e["code"] for e in _errors(api)] == ["scheduled_update_failed"]
+        assert [e["code"] for e in _errors(other_api)] == ["scheduled_update_failed"]
+    finally:
+        bgos_adapter_module._unregister_live_adapter(other)
+        await other._real_api.close()  # type: ignore[attr-defined]
+
+
+async def test_a_failed_heartbeat_post_retries_the_outcome(sched):
+    adapter, api, clock, state = sched
+    real_post = api.post_heartbeat
+    failures = [RuntimeError("backend down")]
+
+    async def flaky(**kwargs):
+        if failures and "last_error" in kwargs:
+            raise failures.pop()
+        await real_post(**kwargs)
+
+    api.post_heartbeat = flaky  # type: ignore[method-assign]
+    state.spawn_ok = False
+    assert await _idle_through_quiet_window(adapter, clock) == "error"
+    assert _errors(api) == []
+    await adapter._post_heartbeat_once()
+    assert [e["code"] for e in _errors(api)] == ["scheduled_update_failed"]
+    await adapter._post_heartbeat_once()
+    assert len(_errors(api)) == 1
+
+
+async def test_a_staged_run_is_not_an_error(sched):
+    adapter, api, clock, state = sched
+
+    def apply_then_message_arrives():
+        adapter._note_inbound_message()
+        return AppliedUpdate(__version__, NEWER)
+
+    state.apply_result = apply_then_message_arrives
+    assert await _idle_through_quiet_window(adapter, clock) == "staged"
+    assert _errors(api) == []
 
 
 # -----------------------------------------------------------------------------
