@@ -71,6 +71,15 @@ REPORT_FILENAME = "bgos_scheduled_update_error.json"
 # HeartbeatErrorDto: code <= 64 characters, message <= 300, `at` ISO 8601).
 # Neither is the reserved session_unresponsive code, so presence still reads
 # the agent as healthy: it answers, its update did not take.
+#
+# Both are STANDING conditions, not events (finding M1): the plugin clears
+# them itself with lastError: null when they stop being true (the target
+# landed; the apply no longer runs here: switched off, no supervisor, a
+# pinned clone), and the backend keeps lastError until that null. The app's
+# pairingHasActiveError (connectFrameworks.ts) shows an error only while
+# last_error_at is newer than last_seen_at, which a live agent's 5 s poll
+# passes within 10 s, so the app must show these two codes for as long as
+# they are set, whatever last_seen_at says.
 FAILED_CODE = "scheduled_update_failed"
 EXHAUSTED_CODE = "scheduled_update_exhausted"
 _ERROR_CODE_MAX = 64
