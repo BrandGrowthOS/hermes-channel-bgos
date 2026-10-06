@@ -620,6 +620,26 @@ def test_apply_update_refuses_a_branch_other_than_main(cloned_repos) -> None:
     assert _run_git(clone, "rev-parse", "HEAD") == before
 
 
+def test_apply_update_reports_an_unreadable_repository_not_a_pin(
+    cloned_repos, monkeypatch,
+) -> None:
+    """Only git's quiet "not a symbolic ref" (exit 1, a detached HEAD) is a
+    pin. A repository git cannot read (exit 128) is a failure the app must
+    see, as the status read reported it before the pin check existed: read
+    as `pinned`, the scheduled apply would wait on it quietly and withdraw
+    a failure it reported before."""
+    _origin, clone = cloned_repos
+    # Git must not climb out of the broken clone to a repository above it.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(clone.parent))
+    (clone / ".git" / "HEAD").write_text("not a ref\n", encoding="utf-8")
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + 2 * DAY,
+        )
+    assert excinfo.value.reason == "git_status_failed"
+
+
 def test_apply_update_takes_updates_again_once_back_on_main(cloned_repos) -> None:
     """Undoing the pin is `git checkout main` (or re-running install.sh)."""
     origin, clone = cloned_repos

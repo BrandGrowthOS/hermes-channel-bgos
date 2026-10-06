@@ -545,6 +545,12 @@ def apply_update(
     # rolled away from. Another branch is a developer's, not ours to move.
     # Checked first, so a held clone is a quiet `pinned`, never an error.
     branch = _git(root, "symbolic-ref", "-q", "HEAD")
+    if branch.returncode not in (0, 1):
+        # Only exit 1 is git's quiet "not a symbolic ref" (a detached HEAD).
+        # Anything else is a repository git cannot read: a failure the app
+        # must see, as the status read below reports it, never a quiet pin
+        # (which would also withdraw a failure reported before).
+        raise SelfUpdateError("git_status_failed", branch.stderr)
     if branch.returncode != 0 or branch.stdout.strip() != f"refs/heads/{MAIN_BRANCH}":
         raise SelfUpdateError("pinned", branch.stdout.strip() or "detached HEAD")
 
