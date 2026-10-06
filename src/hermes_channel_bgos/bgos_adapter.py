@@ -6942,12 +6942,14 @@ class BGOSAdapter(BasePlatformAdapter):
                 "restarting", target_version=target_version,
             )
             # The heartbeat POST took real time: one last look before the
-            # point of no return. Never cancel or interrupt a turn.
-            busy = self._update_busy_reason()
-            if busy is not None:
-                self._scheduled_update_idle_since = None
+            # point of no return, the whole safe moment and not only busy, so
+            # a message stamped on its way in (not yet a session) counts too.
+            # Never cancel or interrupt a turn.
+            moment = self._scheduled_safe_moment(self._clock())
+            if not moment.safe:
                 await self._report_scheduled_update(
-                    "staged", target_version=target_version, message=busy,
+                    "staged", target_version=target_version,
+                    message=moment.reason,
                 )
                 return "staged"
             # Committed. Hold new inbound work from here, with no await since

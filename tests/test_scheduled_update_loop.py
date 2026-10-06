@@ -662,6 +662,22 @@ async def test_intake_is_held_from_the_last_busy_check_on(sched, monkeypatch):
     assert seen == [("record", True), ("spawn", True)]
 
 
+async def test_a_message_still_on_its_way_in_keeps_the_install_staged(sched):
+    """A message that arrived during the restart report and is still on its
+    way to a session (stamped, not yet busy) is not cut off: the last look
+    before the commit is the full safe moment, not only the busy check."""
+    adapter, api, clock, state = sched
+
+    async def heartbeat_while_a_message_arrives(**kwargs):
+        api.heartbeats.append(kwargs)
+        adapter._note_inbound_message()
+
+    api.post_heartbeat = heartbeat_while_a_message_arrives  # type: ignore[method-assign]
+    assert await _idle_through_quiet_window(adapter, clock) == "staged"
+    assert state.restarts == []
+    assert adapter._intake_held() is False
+
+
 async def test_the_poll_does_not_consume_while_held(sched):
     adapter, api, clock, _state = sched
     adapter._save_last_id(500)
