@@ -43,6 +43,10 @@ class FakeApi:
     # cursors it was asked with.
     inbound: list[dict[str, Any]] = field(default_factory=list)
     fetches: list[int] = field(default_factory=list)
+    # The adapter's clock at each heartbeat, to model the backend's write
+    # debounce (see _written).
+    clock: list[float] | None = None
+    beat_at: list[float] = field(default_factory=list)
 
     async def fetch_inbound_since(self, last_id: int) -> dict[str, Any]:
         self.fetches.append(last_id)
@@ -50,6 +54,7 @@ class FakeApi:
 
     async def post_heartbeat(self, **kwargs: Any) -> None:
         self.heartbeats.append(kwargs)
+        self.beat_at.append(self.clock[0] if self.clock is not None else 0.0)
 
     async def post_update_rpc_ack(self, rpc_id: str) -> None:
         self.acks.append(rpc_id)
@@ -65,10 +70,17 @@ def _new_adapter(clock: list[float]) -> tuple[BGOSAdapter, FakeApi]:
     adapter = BGOSAdapter(
         BgosConfig(base_url="https://bgos.test", pairing_token="pair_xyz"),
     )
-    api = FakeApi()
+    api = FakeApi(clock=clock)
     adapter._real_api = adapter._api  # type: ignore[attr-defined]
     adapter._api = api  # type: ignore[assignment]
     adapter._clock = lambda: clock[0]
+
+    async def sleep(seconds: float) -> None:
+        # The heartbeat spacing waits on the injected clock, not real time.
+        clock[0] += seconds
+        await asyncio.sleep(0)
+
+    adapter._sleep = sleep  # type: ignore[assignment]
     # Wall clock for lastError `at` and the soak: the monotonic clock plus a
     # fixed epoch, so both move together.
     adapter._wall_clock = lambda: WALL_EPOCH + clock[0]
@@ -505,6 +517,88 @@ def _errors(api: FakeApi) -> list[Any]:
     """The lastError each heartbeat carried; heartbeats without the key
     (leave the stored error untouched) are skipped."""
     return [hb["last_error"] for hb in api.heartbeats if "last_error" in hb]
+
+
+# Finding M2: the backend writes at most one heartbeat per pairing per 10 s
+# (integrations.controller.ts: `if (!shouldWriteHeartbeat) return`, with
+# LAST_SEEN_DEBOUNCE_MS = 10_000) and still answers 204. A beat that carries
+# a new outcome right behind another beat was answered and never stored.
+
+BACKEND_WRITE_DEBOUNCE = 10.0
+
+
+def _written(api: FakeApi) -> list[dict[str, Any]]:
+    """The heartbeats the backend stored: one at least 10 s after the
+    previous STORED one (a skipped beat does not restart the window)."""
+    stored: list[dict[str, Any]] = []
+    last: float | None = None
+    for at, beat in zip(api.beat_at, api.heartbeats):
+        if last is None or at - last >= BACKEND_WRITE_DEBOUNCE:
+            stored.append(beat)
+            last = at
+    return stored
+
+
+def _stored_errors(api: FakeApi) -> list[Any]:
+    return [hb["last_error"] for hb in _written(api) if "last_error" in hb]
+
+
+async def test_a_spawn_failure_right_after_the_restarting_beat_is_stored(sched):
+    """The restarting beat goes out, the spawn fails at once: the failure
+    beat waits out the backend's window instead of being dropped."""
+    adapter, api, clock, state = sched
+    state.spawn_ok = False
+    assert await _idle_through_quiet_window(adapter, clock) == "error"
+    assert [e["code"] for e in _stored_errors(api)] == ["scheduled_update_failed"]
+
+
+async def test_exhausted_right_after_the_boot_beat_is_stored(sched):
+    adapter, api, clock, state = sched
+    state.latest = None
+    state.pending = NEWER
+    for _ in range(scheduled_update.MAX_ATTEMPTS_PER_TARGET):
+        scheduled_update.record_attempt(scheduled_update.attempts_path(), NEWER)
+    await adapter._post_heartbeat_once()  # the boot beat
+    assert await _tick(adapter) == "attempts_exhausted"
+    assert [e["code"] for e in _stored_errors(api)] == ["scheduled_update_exhausted"]
+
+
+async def test_a_landed_restart_is_stored_after_the_boot_beat(sched):
+    """The clear after a landed restart carries the new daemonVersion and
+    the cleared pendingRestartVersion: dropped, the app would show the old
+    version and a pending restart for up to 6 hours."""
+    adapter, api, _clock, state = sched
+    state.latest = __version__
+    scheduled_update.record_attempt(scheduled_update.attempts_path(), __version__)
+    await adapter._post_heartbeat_once()  # the boot beat
+    assert await _tick(adapter) == "up_to_date"
+    assert _stored_errors(api) == [None]
+    assert _written(api)[-1]["daemon_version"] == __version__
+
+
+async def test_the_first_outcome_beat_waits_out_the_previous_process(sched):
+    """The process that restarted onto this one beat moments before it
+    ended; connect() starts this adapter's window there, so even the first
+    beat of the new process that carries an outcome is stored."""
+    adapter, api, clock, state = sched
+    state.latest = __version__
+    scheduled_update.record_attempt(scheduled_update.attempts_path(), __version__)
+    # The old process's restarting beat, then this process connecting.
+    await api.post_heartbeat(daemon_version="0.0.1")
+    adapter._heartbeat_sent_at = clock[0]
+    assert await _tick(adapter) == "up_to_date"
+    assert _stored_errors(api) == [None]
+
+
+async def test_a_plain_beat_is_never_held_back(sched):
+    """Only a beat that carries a new outcome waits; the 6 hour beat and
+    the staged and restarting announcements go out at once."""
+    adapter, api, clock, _state = sched
+    await adapter._post_heartbeat_once()
+    before = clock[0]
+    await adapter._post_heartbeat_once()
+    assert clock[0] == before
+    assert len(api.heartbeats) == 2
 
 
 async def test_a_failed_pull_reaches_the_app_as_last_error(sched):

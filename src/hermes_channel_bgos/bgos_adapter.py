@@ -268,6 +268,15 @@ _INLINE_OPTION_LIMIT = 6
 # POSTs a day).
 _HEARTBEAT_INTERVAL_SECONDS = 6 * 60 * 60
 
+# The backend stores at most one heartbeat per pairing per 10 s
+# (integrations.controller.ts shouldWriteHeartbeat, LAST_SEEN_DEBOUNCE_MS)
+# and answers a skipped one 204 all the same, so a beat that carries a new
+# scheduled outcome (lastError, or its clear) right behind another beat was
+# acknowledged and never stored (finding M2). Such a beat waits until this
+# long after the adapter's previous beat (or its connect, which may follow
+# the previous process's last beat by moments); a second of margin.
+_HEARTBEAT_WRITE_SPACING_SECONDS = 11.0
+
 # Threshold below which we inline base64 into POST /messages; at or above,
 # we upload via a presigned S3 PUT and reference by s3_key. Mirrors
 # openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
@@ -1478,6 +1487,13 @@ class BGOSAdapter(BasePlatformAdapter):
         self._wall_clock: Callable[[], float] = time.time
         # The scheduled outcome generation this adapter's heartbeat delivered.
         self._scheduled_outcome_delivered: int = 0
+        # Heartbeats one at a time, and when the last one went out (or the
+        # adapter connected), so a beat carrying an outcome can wait out the
+        # backend's write window (_HEARTBEAT_WRITE_SPACING_SECONDS). The
+        # sleep is injectable with the clock.
+        self._heartbeat_lock = asyncio.Lock()
+        self._heartbeat_sent_at: float | None = None
+        self._sleep: Callable[[float], Any] = asyncio.sleep
         # The cursor this adapter's intake was held at (a committed restart),
         # so held messages are fetched again if the restart never comes.
         self._intake_resume_cursor: int | None = None
@@ -1893,6 +1909,10 @@ class BGOSAdapter(BasePlatformAdapter):
         # Version heartbeat: fire once now (boot) and then every 6h so the
         # backend's pairing row always knows what plugin version this daemon
         # runs — the app's update prompt cannot cover Hermes otherwise.
+        # The previous process may have beaten moments ago (the restart that
+        # started this one): a beat carrying a scheduled outcome waits out
+        # the backend's write window from here (finding M2).
+        self._heartbeat_sent_at = self._clock()
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
@@ -1933,33 +1953,55 @@ class BGOSAdapter(BasePlatformAdapter):
         also calls it so a staged or restarting update is visible at once
         (pendingRestartVersion), not up to 6 hours later. A scheduled
         outcome this adapter has not delivered yet rides along as lastError
-        (an object sets the app's error, None clears it)."""
-        try:
-            latest = await asyncio.to_thread(
-                self_update.latest_known_version,
-            )
-            readiness = await asyncio.to_thread(
-                self_update.update_readiness,
-            )
-            outcome = _scheduled_update_outcome
-            extra: dict[str, Any] = {}
-            if outcome is not None and outcome[0] != self._scheduled_outcome_delivered:
-                extra["last_error"] = outcome[1]
-            await self._api.post_heartbeat(
-                daemon_version=__version__, env=_daemon_env(),
-                latest_known_version=latest,
-                update_readiness=readiness,
-                **extra,
-            )
-            if outcome is not None:
-                self._scheduled_outcome_delivered = outcome[0]
-            log.info(
-                "BGOS heartbeat sent (daemonVersion=%s)", __version__,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.debug("BGOS heartbeat failed (ignored)", exc_info=True)
+        (an object sets the app's error, None clears it). Such a beat waits
+        out the backend's write window first (finding M2), so it is stored,
+        not only acknowledged; one beat at a time per adapter."""
+        async with self._heartbeat_lock:
+            try:
+                latest = await asyncio.to_thread(
+                    self_update.latest_known_version,
+                )
+                readiness = await asyncio.to_thread(
+                    self_update.update_readiness,
+                )
+                outcome = _scheduled_update_outcome
+                if outcome is not None and outcome[0] != self._scheduled_outcome_delivered:
+                    await self._wait_heartbeat_write_window()
+                    # Still undelivered (only this adapter delivers its own),
+                    # and possibly newer by now.
+                    outcome = _scheduled_update_outcome
+                extra: dict[str, Any] = {}
+                if outcome is not None and outcome[0] != self._scheduled_outcome_delivered:
+                    extra["last_error"] = outcome[1]
+                try:
+                    await self._api.post_heartbeat(
+                        daemon_version=__version__, env=_daemon_env(),
+                        latest_known_version=latest,
+                        update_readiness=readiness,
+                        **extra,
+                    )
+                finally:
+                    # Even a failed POST may have reached the backend.
+                    self._heartbeat_sent_at = self._clock()
+                if outcome is not None:
+                    self._scheduled_outcome_delivered = outcome[0]
+                log.info(
+                    "BGOS heartbeat sent (daemonVersion=%s)", __version__,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.debug("BGOS heartbeat failed (ignored)", exc_info=True)
+
+    async def _wait_heartbeat_write_window(self) -> None:
+        """Until _HEARTBEAT_WRITE_SPACING_SECONDS after this adapter's
+        previous beat (or its connect); at once when there was none."""
+        last = self._heartbeat_sent_at
+        if last is None:
+            return
+        wait = last + _HEARTBEAT_WRITE_SPACING_SECONDS - self._clock()
+        if wait > 0:
+            await self._sleep(wait)
 
     async def _refresh_pairing_scope(self) -> bool:
         """Re-fetch the pairing scope from `GET /api/v1/integrations/me` and
@@ -6887,8 +6929,8 @@ class BGOSAdapter(BasePlatformAdapter):
         for adapter in (self, *_live_adapters()):
             if not any(adapter is seen for seen in adapters):
                 adapters.append(adapter)
-        for adapter in adapters:
-            await adapter._post_heartbeat_once()
+        # Together: each may wait out its own backend write window.
+        await asyncio.gather(*(adapter._post_heartbeat_once() for adapter in adapters))
 
     async def _report_scheduled_error(
         self, code: str, target: str | None, message: str,
