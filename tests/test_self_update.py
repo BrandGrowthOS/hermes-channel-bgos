@@ -541,3 +541,267 @@ def test_schedule_unit_restart_spawn_failure_is_false(
 def test_schedule_unit_restart_rejected_timer_is_false(monkeypatch):
     monkeypatch.setattr(self_update.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
     assert self_update.schedule_unit_restart("hermes-gateway.service") is False
+
+
+# -----------------------------------------------------------------------------
+# launchd relaunch-authority probe (design 2.3: on macOS the systemd probe
+# always answers none, so without this every update stages forever)
+# -----------------------------------------------------------------------------
+
+
+def _launchctl_print(pid: int, label: str = "ai.hermes.gateway") -> str:
+    """Shape of a real `launchctl print gui/<uid>/<label>` body (tabs)."""
+    return (
+        f"gui/501/{label} = {{\n"
+        "\tactive count = 1\n"
+        f"\tpath = /Users/kc/Library/LaunchAgents/{label}.plist\n"
+        "\ttype = LaunchAgent\n"
+        "\tstate = running\n"
+        "\n"
+        "\tprogram = /Users/kc/.hermes/hermes-agent/venv/bin/python\n"
+        f"\tpid = {pid}\n"
+        "\timmediate reason = inefficient\n"
+        "}\n"
+    )
+
+
+class _FakeLaunchctl:
+    """Recording stand-in for subprocess.run: answers `launchctl print` per
+    service target from a table, everything else is 'Could not find
+    service' (exit 113, what launchctl prints for an unknown label)."""
+
+    def __init__(self, bodies: dict[str, str]) -> None:
+        self.bodies = bodies
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        assert kwargs.get("timeout"), "a probe must never hang the heartbeat"
+        body = self.bodies.get(argv[-1])
+        if argv[:2] != ["launchctl", "print"] or body is None:
+            return SimpleNamespace(returncode=113, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=body, stderr="")
+
+
+def test_launchd_probe_finds_the_job_that_owns_this_pid() -> None:
+    fake = _FakeLaunchctl({"gui/501/ai.hermes.gateway": _launchctl_print(4242)})
+    target = self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    )
+    assert target == "gui/501/ai.hermes.gateway"
+    assert fake.calls[0] == ["launchctl", "print", "gui/501/ai.hermes.gateway"]
+
+
+def test_launchd_probe_refuses_a_job_running_another_pid() -> None:
+    """A loaded ai.hermes.gateway that is NOT this process (a second Hermes,
+    a wrapper script) is no relaunch authority: kickstart -k would kill the
+    wrong process and leave this one running."""
+    fake = _FakeLaunchctl({"gui/501/ai.hermes.gateway": _launchctl_print(999)})
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    ) is None
+
+
+def test_launchd_probe_tries_the_profile_label() -> None:
+    """Hermes names a named profile's agent ai.hermes.gateway-<profile>;
+    the profile is the HERMES_HOME leaf under profiles/ (topology.profile_dir
+    mirrors hermes_cli.profiles.get_profile_dir)."""
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway-ava": _launchctl_print(77, "ai.hermes.gateway-ava"),
+    })
+    target = self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=77,
+        hermes_home="/Users/kc/.hermes/profiles/ava", run=fake,
+    )
+    assert target == "gui/501/ai.hermes.gateway-ava"
+    assert [c[-1] for c in fake.calls] == [
+        "gui/501/ai.hermes.gateway", "gui/501/ai.hermes.gateway-ava",
+    ]
+
+
+def test_launchd_probe_skips_an_unsafe_profile_name() -> None:
+    fake = _FakeLaunchctl({})
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=1,
+        hermes_home="/x/profiles/a b;rm -rf", run=fake,
+    ) is None
+    assert [c[-1] for c in fake.calls] == ["gui/501/ai.hermes.gateway"]
+
+
+def test_launchd_probe_is_macos_only() -> None:
+    fake = _FakeLaunchctl({"gui/501/ai.hermes.gateway": _launchctl_print(5)})
+    assert self_update._probe_launchd_job(
+        platform="linux", uid=501, pid=5, hermes_home=None, run=fake,
+    ) is None
+    assert fake.calls == []
+
+
+def test_launchd_probe_spawn_error_is_none() -> None:
+    def boom(argv, **kwargs):
+        raise OSError("no launchctl")
+
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=5, hermes_home=None, run=boom,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("\tstate = running\n\tpid = 4242\n", 4242),
+        ("\tstate = not running\n", None),
+        # The job's own pid line comes first; a later nested pid never wins.
+        ("\tpid = 10\n\t\tpid = 4242\n", 10),
+        ("\tpid = abc\n", None),
+        ("", None),
+    ],
+)
+def test_launchd_print_pid(body, expected) -> None:
+    assert self_update._launchd_print_pid(body) == expected
+
+
+def test_launchd_service_target_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        self_update, "_launchd_result", self_update._UNIT_UNRESOLVED,
+    )
+    calls: list[int] = []
+
+    def probe(**kwargs):
+        calls.append(1)
+        return "gui/501/ai.hermes.gateway"
+
+    monkeypatch.setattr(self_update, "_probe_launchd_job", probe)
+    assert self_update.launchd_service_target() == "gui/501/ai.hermes.gateway"
+    assert self_update.launchd_service_target() == "gui/501/ai.hermes.gateway"
+    assert calls == [1]
+
+
+def test_verified_supervisor_prefers_systemd(monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: "hermes-gateway.service")
+    monkeypatch.setattr(
+        self_update, "launchd_service_target", lambda: "gui/501/ai.hermes.gateway",
+    )
+    assert self_update.verified_supervisor() == self_update.Supervisor(
+        "systemd", "hermes-gateway.service",
+    )
+
+
+def test_verified_supervisor_falls_back_to_launchd(monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: None)
+    monkeypatch.setattr(
+        self_update, "launchd_service_target", lambda: "gui/501/ai.hermes.gateway",
+    )
+    assert self_update.verified_supervisor() == self_update.Supervisor(
+        "launchd", "gui/501/ai.hermes.gateway",
+    )
+
+
+def test_verified_supervisor_none(monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: None)
+    monkeypatch.setattr(self_update, "launchd_service_target", lambda: None)
+    assert self_update.verified_supervisor() is None
+
+
+def test_update_readiness_reports_launchd(monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: None)
+    monkeypatch.setattr(
+        self_update, "launchd_service_target", lambda: "gui/501/ai.hermes.gateway",
+    )
+    monkeypatch.setattr(
+        self_update, "pending_restart_version", lambda clone_dir=None: None,
+    )
+    monkeypatch.delenv("BGOS_AUTO_UPDATE", raising=False)
+    assert self_update.update_readiness()["supervised"] == "launchd"
+
+
+# -----------------------------------------------------------------------------
+# Detached launchd restart (fact: this Mac's gateway plist has KeepAlive
+# {SuccessfulExit:false}, so a clean exit is NOT relaunched; the restart must
+# be `launchctl kickstart -k`, never a plain exit)
+# -----------------------------------------------------------------------------
+
+
+def test_schedule_launchd_restart_spawns_a_detached_delayed_kickstart() -> None:
+    spawned: list[tuple[list[str], dict]] = []
+
+    def fake_popen(argv, **kwargs):
+        spawned.append((list(argv), kwargs))
+        return SimpleNamespace(pid=1)
+
+    assert self_update.schedule_launchd_restart(
+        "gui/501/ai.hermes.gateway", popen=fake_popen,
+    ) is True
+    [(argv, kwargs)] = spawned
+    assert argv == [
+        "/bin/sh", "-c", 'sleep 2; exec launchctl kickstart -k "$1"',
+        "bgos-gateway-restart", "gui/501/ai.hermes.gateway",
+    ]
+    # Its own session: launchd's teardown of OUR process group must not
+    # take the pending kickstart down with it.
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_schedule_launchd_restart_refuses_a_foreign_target() -> None:
+    spawned: list[list[str]] = []
+    for target in (
+        "gui/501/com.apple.Finder",
+        "system/ai.hermes.gateway",
+        "gui/501/ai.hermes.gateway; rm -rf ~",
+    ):
+        assert self_update.schedule_launchd_restart(
+            target, popen=lambda argv, **kw: spawned.append(argv),
+        ) is False
+    assert spawned == []
+
+
+def test_schedule_launchd_restart_spawn_failure_is_false() -> None:
+    def boom(argv, **kwargs):
+        raise OSError("no /bin/sh")
+
+    assert self_update.schedule_launchd_restart(
+        "gui/501/ai.hermes.gateway", popen=boom,
+    ) is False
+
+
+def test_schedule_supervisor_restart_dispatches_by_kind(monkeypatch) -> None:
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        self_update, "schedule_unit_restart",
+        lambda unit: seen.append(("systemd", unit)) or True,
+    )
+    monkeypatch.setattr(
+        self_update, "schedule_launchd_restart",
+        lambda target: seen.append(("launchd", target)) or True,
+    )
+    assert self_update.schedule_supervisor_restart(
+        self_update.Supervisor("systemd", "hermes-gateway.service"),
+    )
+    assert self_update.schedule_supervisor_restart(
+        self_update.Supervisor("launchd", "gui/501/ai.hermes.gateway"),
+    )
+    assert self_update.schedule_supervisor_restart(
+        self_update.Supervisor("pm2", "x"),
+    ) is False
+    assert seen == [
+        ("systemd", "hermes-gateway.service"),
+        ("launchd", "gui/501/ai.hermes.gateway"),
+    ]
+
+
+def test_schedule_launchd_restart_refuses_a_trailing_newline() -> None:
+    spawned: list[list[str]] = []
+    assert self_update.schedule_launchd_restart(
+        "gui/501/ai.hermes.gateway\n", popen=lambda argv, **kw: spawned.append(argv),
+    ) is False
+    assert spawned == []
+
+
+def test_launchd_probe_reads_the_process_hermes_home(monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", "/Users/kc/.hermes/profiles/ava")
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway-ava": _launchctl_print(77, "ai.hermes.gateway-ava"),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=77, run=fake,
+    ) == "gui/501/ai.hermes.gateway-ava"

@@ -51,6 +51,17 @@ def _no_network_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_supervisor_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto-used: pre-seed both relaunch-authority probe caches as "no
+    supervisor" so no test ever runs a real `systemctl` or `launchctl` (this
+    Mac hosts a live gateway under launchd; a probe that matched it would
+    hand a test real restart authority). Probe tests reset the cache and
+    inject a fake runner."""
+    monkeypatch.setattr(self_update, "_unit_result", None)
+    monkeypatch.setattr(self_update, "_launchd_result", None)
+
+
 @pytest.fixture
 async def mock_bgos_server():
     """Start a fresh MockBgosServer on an ephemeral port for each test."""

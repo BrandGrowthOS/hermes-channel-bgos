@@ -9,8 +9,8 @@ daemon-side facts the contract needs:
   or a URL, the update_rpc frame is `{rpcId, op}` and nothing else),
 - the same-major-newer-only update decision (ported from the openclaw
   plugin's decideVersionUpdate),
-- the systemd user-unit probe that decides whether this process has
-  relaunch authority,
+- the supervisor probes (a systemd user unit on Linux, the launchd job on
+  macOS) that decide whether this process has relaunch authority,
 - `apply_update`: a fast-forward pull of the editable clone the running
   module was imported from (dirty-tree brake, never a reset).
 
@@ -23,10 +23,12 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 import httpx
 
@@ -253,6 +255,135 @@ def pending_restart_version(clone_dir: Path | None = None) -> str | None:
     return on_disk
 
 
+# -----------------------------------------------------------------------------
+# Relaunch authority (launchd job, macOS)
+# -----------------------------------------------------------------------------
+
+# Hermes upstream's LaunchAgent label (`hermes gateway install`; the label
+# update_cli.detect_restart_command probes and install.sh kickstarts). A named
+# profile's gateway gets `ai.hermes.gateway-<profile>`.
+HERMES_LAUNCHD_LABEL = "ai.hermes.gateway"
+
+# A profile name is spliced into a launchd label and a kickstart argv: only
+# the characters Hermes profile names use. Anything else is not probed.
+_PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+# The only service targets a restart may ever kickstart. `kickstart -k` kills
+# whatever the target names, so a foreign or malformed target is refused even
+# though the probe is the only producer of targets.
+_LAUNCHD_TARGET_RE = re.compile(
+    r"gui/\d+/" + re.escape(HERMES_LAUNCHD_LABEL) + r"(?:-[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?"
+)
+
+_PID_LINE_RE = re.compile(r"^[ \t]*pid = (\S+)[ \t]*$", re.MULTILINE)
+
+_launchd_result: object = _UNIT_UNRESOLVED
+
+# Default for _probe_launchd_job's hermes_home: read the process env.
+_HOME_FROM_ENV: object = object()
+
+
+def launchd_service_target() -> str | None:
+    """`gui/<uid>/<label>` of the launchd job whose running pid IS this
+    process, else None.
+
+    Probed once and cached for the process lifetime (supervision cannot
+    change mid-run), like systemd_user_unit. Design 2.3: on macOS the
+    systemd probe always answers none, so before this every update staged
+    and nothing ever restarted onto it.
+    """
+    global _launchd_result
+    if _launchd_result is not _UNIT_UNRESOLVED:
+        return _launchd_result  # type: ignore[return-value]
+    _launchd_result = _probe_launchd_job()
+    return _launchd_result  # type: ignore[return-value]
+
+
+def _launchd_candidate_labels(hermes_home: str | None) -> list[str]:
+    labels = [HERMES_LAUNCHD_LABEL]
+    if hermes_home:
+        home = Path(hermes_home)
+        # Named profiles live under <root>/profiles/<name>/ (mirrors
+        # hermes_cli.profiles.get_profile_dir, see topology.profile_dir).
+        if home.parent.name == "profiles" and _PROFILE_NAME_RE.fullmatch(home.name):
+            labels.append(f"{HERMES_LAUNCHD_LABEL}-{home.name}")
+    return labels
+
+
+def _launchd_print_pid(body: str | None) -> int | None:
+    """The job's running pid from a `launchctl print` body: the FIRST
+    `pid = N` line (the job's own; nested sections come after it)."""
+    match = _PID_LINE_RE.search(body or "")
+    if match is None or not match.group(1).isdigit():
+        return None
+    return int(match.group(1))
+
+
+def _probe_launchd_job(
+    *,
+    platform: str | None = None,
+    uid: int | None = None,
+    pid: int | None = None,
+    hermes_home: str | None | object = _HOME_FROM_ENV,
+    run: Callable[..., Any] | None = None,
+) -> str | None:
+    """Every argument is injectable so tests never run launchctl."""
+    if (platform if platform is not None else sys.platform) != "darwin":
+        return None
+    try:
+        uid = os.getuid() if uid is None else uid
+    except Exception:
+        return None
+    pid = os.getpid() if pid is None else pid
+    if hermes_home is _HOME_FROM_ENV:
+        # The PROCESS home (what the LaunchAgent started us with), not a
+        # multiplex profile's context-local home.
+        hermes_home = os.environ.get("HERMES_HOME", "").strip() or None
+    run = run if run is not None else subprocess.run
+    for label in _launchd_candidate_labels(hermes_home):  # type: ignore[arg-type]
+        target = f"gui/{uid}/{label}"
+        try:
+            result = run(
+                ["launchctl", "print", target],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            continue
+        if result.returncode != 0:
+            continue
+        # A loaded job running ANOTHER pid (a second Hermes, a wrapper that
+        # did not exec) is not authority: kickstart -k would kill that
+        # process and leave this one running beside the new instance.
+        if _launchd_print_pid(result.stdout) == pid:
+            return target
+    return None
+
+
+@dataclass(frozen=True)
+class Supervisor:
+    """A verified relaunch authority: `kind` is the updateReadiness
+    `supervised` value, `name` the unit (systemd) or service target
+    (launchd) the restart addresses."""
+
+    kind: str
+    name: str
+
+
+def verified_supervisor() -> Supervisor | None:
+    """The supervisor that will bring this process back after a restart,
+    or None (then an update may only stage, never exit; decision D8)."""
+    unit = systemd_user_unit()
+    if unit:
+        return Supervisor("systemd", unit)
+    target = launchd_service_target()
+    if target:
+        return Supervisor("launchd", target)
+    return None
+
+
 def update_readiness() -> dict:
     """The heartbeat's updateReadiness object (contract section 1).
 
@@ -260,8 +391,9 @@ def update_readiness() -> dict:
     rollback latch (rollback is the operator-run command update_cli
     prints), so it can never report one tripped.
     """
+    supervisor = verified_supervisor()
     return {
-        "supervised": "systemd" if systemd_user_unit() else "none",
+        "supervised": supervisor.kind if supervisor else "none",
         "autoUpdateEnabled": auto_update_enabled(),
         "rollbackLatched": False,
         "pendingRestartVersion": pending_restart_version(),
@@ -400,3 +532,47 @@ def schedule_unit_restart(unit: str) -> bool:
         log.exception("self_update restart spawn failed unit=%s", unit)
         return False
     return result.returncode == 0
+
+
+def schedule_launchd_restart(
+    target: str, *, popen: Callable[..., Any] | None = None,
+) -> bool:
+    """Spawn a fully detached, 2s-delayed `launchctl kickstart -k <target>`.
+
+    launchd has no transient timer like `systemd-run --on-active`, so the
+    delay lives in a child shell in its OWN session: launchd tearing down
+    this job's process group does not take the pending kickstart with it,
+    and this process is free to flush its final progress POST first. It
+    must be kickstart -k, never a plain exit: a KeepAlive {SuccessfulExit:
+    false} plist (this Mac's own gateway) does not relaunch a clean exit.
+    Returns False on a refused target or any spawn failure (never raises).
+    """
+    if not _LAUNCHD_TARGET_RE.fullmatch(target or ""):
+        log.warning("self_update refused launchd restart target=%r", target)
+        return False
+    popen = popen if popen is not None else subprocess.Popen
+    try:
+        popen(
+            [
+                "/bin/sh", "-c", 'sleep 2; exec launchctl kickstart -k "$1"',
+                "bgos-gateway-restart", target,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        log.exception("self_update restart spawn failed target=%s", target)
+        return False
+    return True
+
+
+def schedule_supervisor_restart(supervisor: Supervisor) -> bool:
+    """Hand the restart to whichever verified supervisor owns this process."""
+    if supervisor.kind == "systemd":
+        return schedule_unit_restart(supervisor.name)
+    if supervisor.kind == "launchd":
+        return schedule_launchd_restart(supervisor.name)
+    return False
