@@ -6306,7 +6306,7 @@ class BGOSAdapter(BasePlatformAdapter):
             log.debug("dropping in-flight update_rpc duplicate rpc=%s", rpc_id)
             return
 
-        if self._update_rpc_in_flight or self._scheduled_update_running:
+        if self._update_rpc_in_flight or self._scheduled_update_running_in_process():
             try:
                 await self._api.post_update_rpc_ack(rpc_id)
             except Exception:
@@ -6500,6 +6500,22 @@ class BGOSAdapter(BasePlatformAdapter):
     def _note_outbound_message(self) -> None:
         self._last_outbound_message_at = self._clock()
 
+    def _update_rpc_in_flight_in_process(self) -> bool:
+        """An update_now runs on ANY BGOS adapter in this process. They all
+        share one clone and one restart, so the scheduled apply stands down."""
+        return any(
+            adapter._update_rpc_in_flight
+            for adapter in (self, *_live_adapters())
+        )
+
+    def _scheduled_update_running_in_process(self) -> bool:
+        """A scheduled run is in progress on ANY BGOS adapter in this
+        process (only the claim owner runs one), so update_now refuses."""
+        return any(
+            adapter._scheduled_update_running
+            for adapter in (self, *_live_adapters())
+        )
+
     def _last_message_at(self) -> float | None:
         """Newest message in or out on ANY BGOS adapter in this process."""
         stamps = [
@@ -6546,7 +6562,7 @@ class BGOSAdapter(BasePlatformAdapter):
         if not _claim_scheduled_update(self):
             return "not_owner"
         now = self._clock()
-        if self._update_rpc_in_flight or self._scheduled_update_running:
+        if self._update_rpc_in_flight_in_process() or self._scheduled_update_running:
             # An update_now owns the clone and the restart right now; its
             # own drain decides. Counts as busy for the idle stretch.
             self._scheduled_update_idle_since = None
@@ -6600,6 +6616,12 @@ class BGOSAdapter(BasePlatformAdapter):
     ) -> str:
         if supervisor is None:  # decide_scheduled_update already refused
             return "unsupervised"
+        # The tick awaited its probes in worker threads, so an update_now
+        # may have been accepted since its first check. Check again with no
+        # await between this check and the claim below.
+        if self._update_rpc_in_flight_in_process():
+            self._scheduled_update_idle_since = None
+            return "update_in_flight"
         self._scheduled_update_running = True
         try:
             target_version = plan.target_version

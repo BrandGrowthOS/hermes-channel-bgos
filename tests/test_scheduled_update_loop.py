@@ -379,6 +379,68 @@ async def test_update_now_is_refused_while_a_scheduled_run_is_in_progress(sched)
     adapter._scheduled_update_running = False
 
 
+async def test_an_update_now_accepted_during_the_probes_wins(sched, monkeypatch):
+    """The tick awaits its probes in worker threads, and an update_now can
+    be accepted meanwhile. The scheduled run must then stand down: never a
+    second pull of the same clone or a second restart beside it."""
+    adapter, _api, clock, state = sched
+    assert await _tick(adapter) == "settling"
+    clock[0] += QUIET
+
+    def pending_while_update_now_starts(clone_dir=None):
+        adapter._update_rpc_in_flight.add("rpc-3")
+        return state.pending
+
+    monkeypatch.setattr(
+        self_update, "pending_restart_version", pending_while_update_now_starts,
+    )
+    assert await _tick(adapter) == "update_in_flight"
+    assert state.applied == [] and state.restarts == []
+    assert adapter._scheduled_update_running is False
+    adapter._update_rpc_in_flight.clear()
+
+
+async def test_an_update_now_on_another_bgos_adapter_blocks(sched):
+    """Multiplexed profiles share one clone and one process: an update_now
+    on any BGOS adapter in it holds the scheduled apply off."""
+    adapter, _api, clock, state = sched
+    other, _other_api = _new_adapter(clock)
+    try:
+        bgos_adapter_module._register_live_adapter(other)
+        other._update_rpc_in_flight.add("rpc-4")
+        assert await _tick(adapter) == "update_in_flight"
+        clock[0] += 10 * QUIET
+        assert await _tick(adapter) == "update_in_flight"
+        assert state.applied == [] and state.restarts == []
+    finally:
+        other._update_rpc_in_flight.clear()
+        bgos_adapter_module._unregister_live_adapter(other)
+        await other._real_api.close()  # type: ignore[attr-defined]
+
+
+async def test_update_now_on_another_bgos_adapter_is_refused_during_a_scheduled_run(
+    sched,
+):
+    adapter, _api, clock, state = sched
+    other, other_api = _new_adapter(clock)
+    try:
+        # Both connected (connect registers each adapter); this one owns
+        # the scheduled run.
+        bgos_adapter_module._register_live_adapter(adapter)
+        bgos_adapter_module._register_live_adapter(other)
+        adapter._scheduled_update_running = True
+        await other._handle_update_rpc({"rpcId": "rpc-5", "op": "update_now"})
+        assert other_api.acks == ["rpc-5"]
+        assert other_api.progresses[-1][1]["message"] == "update_in_flight"
+        assert not other._update_tasks
+    finally:
+        adapter._scheduled_update_running = False
+        await asyncio.gather(*other._update_tasks, return_exceptions=True)
+        bgos_adapter_module._unregister_live_adapter(other)
+        await other._real_api.close()  # type: ignore[attr-defined]
+    assert state.applied == [] and state.restarts == []
+
+
 async def test_another_bgos_adapter_in_the_process_being_busy_blocks(sched):
     """Multiplexed profiles each run their own BGOS adapter in the same
     gateway process: a turn on any of them is a turn the restart would
