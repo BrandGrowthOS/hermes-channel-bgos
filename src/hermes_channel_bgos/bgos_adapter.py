@@ -341,6 +341,27 @@ def _release_scheduled_update(adapter: "BGOSAdapter") -> None:
 # its heartbeat delivered, so a failed POST is retried by its next beat.
 _scheduled_update_outcome: tuple[int, dict | None] | None = None
 
+# Once a restart is committed (the last busy check passed and the delayed
+# restart is next), new inbound work is HELD for the seconds the process has
+# left: not consumed, and the persisted cursor not advanced, so the poll of
+# the next process is handed it again. Process wide, because the restart ends
+# every adapter in it. Bounded: if the restart never comes (a kickstart that
+# failed after its spawn), intake reopens and what was held is fetched again.
+# Work already in flight is never touched.
+_INTAKE_HOLD_SECONDS = 120.0
+_intake_held_until: float | None = None
+
+
+def _hold_intake(until: float) -> None:
+    global _intake_held_until
+    _intake_held_until = until
+
+
+def _release_intake() -> None:
+    global _intake_held_until
+    _intake_held_until = None
+
+
 # The first look of a process checks the persisted record once: did the
 # restart that ended the previous process land (clear), or is a reported
 # failure still standing (say it again)?
@@ -1397,6 +1418,9 @@ class BGOSAdapter(BasePlatformAdapter):
         self._wall_clock: Callable[[], float] = time.time
         # The scheduled outcome generation this adapter's heartbeat delivered.
         self._scheduled_outcome_delivered: int = 0
+        # The cursor this adapter's intake was held at (a committed restart),
+        # so held messages are fetched again if the restart never comes.
+        self._intake_resume_cursor: int | None = None
         self._last_inbound_message_at: float | None = None
         self._last_outbound_message_at: float | None = None
         self._scheduled_update_task: asyncio.Task | None = None
@@ -5208,7 +5232,24 @@ class BGOSAdapter(BasePlatformAdapter):
         `batchable=False` disables the adaptive text-batching path — used by
         backfill replay (history isn't "user typing fast", it's historical)
         and `/retry` replay (already merged into a single canonical text).
+
+        While a committed restart holds intake, the message is left
+        unconsumed (no cursor advance, no dedup mark): the next process's
+        poll is handed it again.
         """
+        if self._intake_held():
+            log.info(
+                "inbound message_id=%s held: a restart is committed, it is "
+                "delivered again after it",
+                data.get("message_id") or data.get("messageId"),
+            )
+            return
+        resume = self._take_intake_resume_cursor()
+        if resume is not None:
+            # The restart never came: fetch what was held FIRST, before this
+            # newer message can move the cursor past it (dedup drops this
+            # one below when the fetch already delivered it).
+            await self._run_backfill(resume)
         self._note_inbound_message()
         data = _normalize_inbound_payload(data)
         assistant_id = data.get("assistant_id")
@@ -5951,6 +5992,11 @@ class BGOSAdapter(BasePlatformAdapter):
         if handler is None:
             log.debug("no handle_button_press; dropping callback_data=%s", cb)
             return
+        if self._intake_held():
+            # New work for the agent; approvals above resolve work in flight
+            # and are never held.
+            log.warning("callback held: a restart is committed (%s)", cb)
+            return
         result = handler(data)
         if asyncio.iscoroutine(result):
             await result
@@ -6014,6 +6060,16 @@ class BGOSAdapter(BasePlatformAdapter):
                 "userId": user_id,
                 "buttonText": button_text,
             })
+            return
+
+        # A committed restart holds new work. A click is push only (the
+        # backend does not deliver it again), but a turn started now would
+        # be cut off by the restart moments later.
+        if self._intake_held():
+            log.warning(
+                "inbound_click chat=%s message=%s held: a restart is committed",
+                chat_id, message_id,
+            )
             return
 
         # The agent's natural view: the user's reply is the button's visible
@@ -6109,7 +6165,16 @@ class BGOSAdapter(BasePlatformAdapter):
         Field-name adaptation: backend REST responses use the primary-key
         name `id` for message rows, while the WS event uses `message_id`.
         MessageEvent.from_ws reads `message_id`, so we normalize here.
+
+        Nothing is fetched while a committed restart holds intake; once a
+        hold ends without the restart, the fetch starts no later than the
+        cursor it was held at.
         """
+        if self._intake_held():
+            return
+        resume = self._take_intake_resume_cursor()
+        if resume is not None:
+            last_message_id = min(last_message_id, resume)
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -6565,6 +6630,9 @@ class BGOSAdapter(BasePlatformAdapter):
             if await self._drain_for_update(_UPDATE_DRAIN_SECONDS) is not None:
                 await self._post_update_progress(rpc_id, "staged", target_version=target_version)
                 return
+            # Committed: hold new inbound work (no await since the drain's
+            # last busy check), so nothing starts that the restart would cut.
+            _hold_intake(self._clock() + _INTAKE_HOLD_SECONDS)
 
             # 'restarting' arms the backend's completion detection, then
             # the detached 2s restart (a systemd-run timer, or a delayed
@@ -6577,6 +6645,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 self_update.schedule_supervisor_restart, supervisor,
             )
             if not spawned:
+                _release_intake()
                 # Without the error the app would wait out the backend's
                 # full 5 minute no-comeback window for nothing.
                 await self._post_update_progress(
@@ -6591,6 +6660,28 @@ class BGOSAdapter(BasePlatformAdapter):
 
     def _note_inbound_message(self) -> None:
         self._last_inbound_message_at = self._clock()
+
+    def _intake_held(self) -> bool:
+        """True while a committed restart holds new inbound work (see
+        _INTAKE_HOLD_SECONDS). Remembers the cursor intake was held at, so
+        a restart that never comes loses nothing."""
+        until = _intake_held_until
+        if until is None or self._clock() >= until:
+            return False
+        if self._intake_resume_cursor is None:
+            self._intake_resume_cursor = self._load_last_id()
+        return True
+
+    def _take_intake_resume_cursor(self) -> int | None:
+        """The cursor a hold that has ended was taken at, once; None when
+        nothing was held."""
+        cursor, self._intake_resume_cursor = self._intake_resume_cursor, None
+        if cursor is not None:
+            log.warning(
+                "inbound intake reopened without the committed restart; "
+                "fetching what was held since message_id=%d", cursor,
+            )
+        return cursor
 
     def _note_outbound_message(self) -> None:
         self._last_outbound_message_at = self._clock()
@@ -6844,6 +6935,9 @@ class BGOSAdapter(BasePlatformAdapter):
                     "staged", target_version=target_version, message=busy,
                 )
                 return "staged"
+            # Committed. Hold new inbound work from here, with no await since
+            # the busy check, so nothing starts that the restart would cut.
+            _hold_intake(self._clock() + _INTAKE_HOLD_SECONDS)
             # Count the attempt BEFORE the restart (the count must survive
             # the very restart it records, so a restart that keeps landing
             # on the old code stops at the cap instead of looping), but only
@@ -6860,6 +6954,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 self_update.schedule_supervisor_restart, supervisor,
             )
             if not spawned:
+                _release_intake()
                 return await self._scheduled_update_failed(
                     "restart_spawn_failed", target_version,
                 )

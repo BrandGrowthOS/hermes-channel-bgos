@@ -39,6 +39,14 @@ class FakeApi:
     heartbeats: list[dict[str, Any]] = field(default_factory=list)
     acks: list[str] = field(default_factory=list)
     progresses: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    # REST inbound poll: what `inbound?since_message_id=` returns, and the
+    # cursors it was asked with.
+    inbound: list[dict[str, Any]] = field(default_factory=list)
+    fetches: list[int] = field(default_factory=list)
+
+    async def fetch_inbound_since(self, last_id: int) -> dict[str, Any]:
+        self.fetches.append(last_id)
+        return {"messages": [m for m in self.inbound if m["message_id"] > last_id]}
 
     async def post_heartbeat(self, **kwargs: Any) -> None:
         self.heartbeats.append(kwargs)
@@ -522,6 +530,194 @@ async def test_a_staged_run_is_not_an_error(sched):
     state.apply_result = apply_then_message_arrives
     assert await _idle_through_quiet_window(adapter, clock) == "staged"
     assert _errors(api) == []
+
+
+# -----------------------------------------------------------------------------
+# Intake hold: once the restart is committed, new inbound work is not taken.
+# The persisted cursor stays put, so the next process is handed it again;
+# work already in flight is never touched.
+# -----------------------------------------------------------------------------
+
+
+def _message(message_id: int, text: str = "hello") -> dict[str, Any]:
+    return {
+        "assistant_id": 77, "chat_id": 42, "message_id": message_id,
+        "user_id": "u", "text": text, "files": [], "message_type": "standard",
+    }
+
+
+def _capture(adapter: BGOSAdapter) -> list[str]:
+    adapter._state.set_route(77, "default")
+    adapter._text_batch_window = 0.01
+    received: list[str] = []
+
+    async def capture(event) -> None:
+        received.append(event.text)
+
+    adapter.handle_message = capture  # type: ignore[method-assign]
+    return received
+
+
+async def test_a_committed_restart_holds_new_inbound_messages(sched):
+    adapter, _api, clock, _state = sched
+    received = _capture(adapter)
+    adapter._save_last_id(500)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+
+    await adapter._handle_inbound(_message(501))
+    await asyncio.sleep(0.05)
+    assert received == []
+    # Not consumed: the cursor the next process polls from is unchanged,
+    # and the id is not marked as dispatched.
+    assert adapter._load_last_id() == 500
+    assert 501 not in adapter._dispatched_inbound_ids
+    assert not adapter._pending_text_tasks
+
+
+async def test_intake_is_held_from_the_last_busy_check_on(sched, monkeypatch):
+    """No await between the last busy check and the hold: a message that
+    arrives while the attempt is recorded or the restart is spawned (both
+    in worker threads) is already held."""
+    adapter, _api, clock, state = sched
+    seen: list[tuple[str, bool]] = []
+    real_record = scheduled_update.record_attempt
+
+    def record(path, target):
+        seen.append(("record", adapter._intake_held()))
+        return real_record(path, target)
+
+    def spawn(supervisor):
+        seen.append(("spawn", adapter._intake_held()))
+        return True
+
+    monkeypatch.setattr(scheduled_update, "record_attempt", record)
+    monkeypatch.setattr(self_update, "schedule_supervisor_restart", spawn)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    assert seen == [("record", True), ("spawn", True)]
+
+
+async def test_the_poll_does_not_consume_while_held(sched):
+    adapter, api, clock, _state = sched
+    adapter._save_last_id(500)
+    api.inbound = [_message(501)]
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._run_backfill(adapter._load_last_id())
+    assert api.fetches == []
+    assert adapter._load_last_id() == 500
+
+
+async def test_a_run_that_stays_staged_holds_nothing(sched):
+    adapter, _api, clock, state = sched
+    received = _capture(adapter)
+
+    def apply_then_a_turn_starts():
+        adapter._active_sessions = {"bgos:1": object()}
+        return AppliedUpdate(__version__, NEWER)
+
+    state.apply_result = apply_then_a_turn_starts
+    assert await _idle_through_quiet_window(adapter, clock) == "staged"
+    adapter._active_sessions = {}
+    await adapter._handle_inbound(_message(601), batchable=False)
+    assert received == ["hello"]
+
+
+async def test_a_failed_restart_spawn_reopens_intake(sched):
+    adapter, _api, clock, state = sched
+    received = _capture(adapter)
+    state.spawn_ok = False
+    assert await _idle_through_quiet_window(adapter, clock) == "error"
+    assert adapter._intake_held() is False
+    await adapter._handle_inbound(_message(701), batchable=False)
+    assert received == ["hello"]
+
+
+async def test_intake_reopens_when_the_restart_never_comes(sched):
+    """Bounded: a kickstart that failed after its spawn leaves the process
+    running. Intake reopens, and what was held is fetched again from the
+    cursor it was held at, before a newer push can move the cursor past
+    it."""
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+    adapter._save_last_id(500)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_inbound(_message(501, "first"))
+    assert received == []
+
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    api.inbound = [_message(501, "first"), _message(502, "second")]
+    await adapter._handle_inbound(_message(502, "second"))
+    await asyncio.sleep(0.05)
+    assert api.fetches == [500]
+    assert received == ["first", "second"]
+    assert adapter._load_last_id() == 502
+
+
+async def test_held_intake_still_resolves_work_in_flight(sched, monkeypatch):
+    """An approval answer resumes a turn that is already running; holding
+    it would be cancelling work in flight."""
+    adapter, _api, clock, _state = sched
+    resolved: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        bgos_adapter_module, "resolve_gateway_approval",
+        lambda session_key, choice: resolved.append((session_key, choice)),
+    )
+    monkeypatch.setattr(adapter, "_is_callback_user_authorized", lambda uid: True)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    adapter._approval_state[5] = "bgos:42"
+    await adapter._handle_callback({"callbackData": "ea:once:5", "userId": "u"})
+    assert resolved == [("bgos:42", "once")]
+
+
+async def test_a_click_starts_no_new_turn_while_held(sched):
+    adapter, _api, clock, _state = sched
+    received = _capture(adapter)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_inbound_click({
+        "assistantId": 77, "chatId": 42, "messageId": 9, "userId": "u",
+        "buttonText": "Yes", "callbackData": "opt_yes",
+    })
+    await asyncio.sleep(0.05)
+    assert received == []
+
+
+async def test_every_bgos_adapter_in_the_process_holds(sched):
+    """One restart ends every multiplexed profile's adapter."""
+    adapter, _api, clock, _state = sched
+    other, _other_api = _new_adapter(clock)
+    try:
+        received = _capture(other)
+        assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+        await other._handle_inbound(_message(801), batchable=False)
+        assert received == []
+    finally:
+        await other._real_api.close()  # type: ignore[attr-defined]
+
+
+async def test_update_now_holds_intake_once_its_restart_is_committed(sched):
+    adapter, api, _clock, state = sched
+    real_progress = api.post_update_rpc_progress
+    held_at_restarting: list[bool] = []
+
+    async def progress(rpc_id, **kwargs):
+        if kwargs.get("stage") == "restarting":
+            held_at_restarting.append(adapter._intake_held())
+        await real_progress(rpc_id, **kwargs)
+
+    api.post_update_rpc_progress = progress  # type: ignore[method-assign]
+    await adapter._handle_update_rpc({"rpcId": "rpc-hold", "op": "update_now"})
+    await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
+    assert state.restarts == [LAUNCHD]
+    assert held_at_restarting == [True]
+    assert adapter._intake_held() is True
+
+
+async def test_update_now_spawn_failure_reopens_intake(sched):
+    adapter, api, _clock, state = sched
+    state.spawn_ok = False
+    await adapter._handle_update_rpc({"rpcId": "rpc-fail", "op": "update_now"})
+    await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
+    assert api.progresses[-1][1]["message"] == "restart_spawn_failed"
+    assert adapter._intake_held() is False
 
 
 # -----------------------------------------------------------------------------

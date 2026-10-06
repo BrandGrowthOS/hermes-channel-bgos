@@ -62,6 +62,16 @@ def _no_real_supervisor_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(self_update, "_launchd_result", None)
 
 
+@pytest.fixture(autouse=True)
+def _no_leftover_intake_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto-used: a test whose update reached the committed restart leaves
+    the process-wide inbound hold set (in production the process ends right
+    after). Start every test with intake open, and restore it afterwards."""
+    from hermes_channel_bgos import bgos_adapter
+
+    monkeypatch.setattr(bgos_adapter, "_intake_held_until", None)
+
+
 @pytest.fixture
 async def mock_bgos_server():
     """Start a fresh MockBgosServer on an ephemeral port for each test."""
