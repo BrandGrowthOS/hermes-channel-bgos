@@ -479,7 +479,7 @@ def _gateway_runner_turns(runner: Any, cron_jobs: int, own: Any) -> int:
     caller reads that as busy."""
     work_count = getattr(runner, "_active_work_count", None)
     if callable(work_count):
-        count = int(work_count()) - cron_jobs
+        count = max(0, int(work_count()) - cron_jobs)
     else:
         count = len(getattr(runner, "_running_agents", None) or ())
     adapters: list[Any] = []
@@ -7000,10 +7000,11 @@ class BGOSAdapter(BasePlatformAdapter):
         await self._announce_scheduled_outcome()
 
     async def _withdraw_scheduled_error(self) -> None:
-        """The scheduled apply does not run here (a pinned clone, the kill
-        switch, no supervisor), so a failure it reported is no longer this
-        host's state: forget the report and clear the app's error, once.
-        Nothing to clear when nothing was reported."""
+        """The scheduled apply does not run on a pinned clone, so a failure
+        it reported is no longer this host's state: forget the report and
+        clear the app's error, once (the boot check does the same when the
+        apply is switched off or unsupervised). Nothing to clear when
+        nothing was reported."""
         path = scheduled_update.report_path()
         report = await asyncio.to_thread(scheduled_update.load_report, path)
         current = _scheduled_update_outcome
