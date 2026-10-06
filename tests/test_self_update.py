@@ -491,16 +491,19 @@ DAY = 24 * 60 * 60
 COMMITTED_AT = 1_790_000_000
 
 
-def _commit_all_at(repo: Path, message: str, epoch: int) -> None:
+def _commit_all_at(
+    repo: Path, message: str, epoch: int, *, authored_at: int | None = None,
+) -> None:
     _run_git(repo, "add", "-A")
     stamp = f"@{epoch} +0000"
+    authored = f"@{authored_at} +0000" if authored_at is not None else stamp
     subprocess.run(
         [
             "git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
             "commit", "-m", message,
         ],
         capture_output=True, text=True, check=True,
-        env={**os.environ, "GIT_COMMITTER_DATE": stamp, "GIT_AUTHOR_DATE": stamp},
+        env={**os.environ, "GIT_COMMITTER_DATE": stamp, "GIT_AUTHOR_DATE": authored},
     )
 
 
@@ -539,6 +542,22 @@ def test_apply_update_soak_reads_the_fetched_target_commit(cloned_repos) -> None
     _commit_all_at(origin, "v0.28.1", COMMITTED_AT - 2 * DAY)
     (origin / "fix.txt").write_text("late change", encoding="utf-8")
     _commit_all_at(origin, "late change", COMMITTED_AT)
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + 60,
+        )
+    assert excinfo.value.reason == "soak"
+
+
+def test_apply_update_soak_reads_the_committer_time_not_the_author_time(
+    cloned_repos,
+) -> None:
+    """A change written days ago but landed on main (rebased, cherry-picked)
+    just now has only just been published: the age is its committer time."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT, authored_at=COMMITTED_AT - 2 * DAY)
 
     with pytest.raises(SelfUpdateError) as excinfo:
         self_update.apply_update(
