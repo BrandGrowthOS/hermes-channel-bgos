@@ -8,6 +8,7 @@ layouts, fetch failures, major jumps).
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -479,6 +480,95 @@ def test_apply_update_fetch_failure(
     with pytest.raises(SelfUpdateError) as excinfo:
         self_update.apply_update(clone)
     assert excinfo.value.reason == "fetch_failed"
+
+
+# Soak (scheduled apply only): the fetched origin/main commit must have been
+# there for 24 hours, so a bad release can be pulled before every supervised
+# host takes it unattended. The clock is injected; the age is the git
+# committer time of the fetched target commit.
+
+DAY = 24 * 60 * 60
+COMMITTED_AT = 1_790_000_000
+
+
+def _commit_all_at(repo: Path, message: str, epoch: int) -> None:
+    _run_git(repo, "add", "-A")
+    stamp = f"@{epoch} +0000"
+    subprocess.run(
+        [
+            "git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-m", message,
+        ],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "GIT_COMMITTER_DATE": stamp, "GIT_AUTHOR_DATE": stamp},
+    )
+
+
+def test_apply_update_soak_refuses_a_target_younger_than_a_day(cloned_repos) -> None:
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT)
+    before = _run_git(clone, "rev-parse", "HEAD")
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + 3600,
+        )
+    assert excinfo.value.reason == "soak"
+    assert excinfo.value.retry_after == DAY - 3600
+    # Nothing merged: the clone still runs (and stages) nothing new.
+    assert _run_git(clone, "rev-parse", "HEAD") == before
+
+
+def test_apply_update_soak_passes_once_the_target_is_a_day_old(cloned_repos) -> None:
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT)
+
+    applied = self_update.apply_update(
+        clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + DAY,
+    )
+    assert applied == AppliedUpdate("0.28.0", "0.28.1")
+
+
+def test_apply_update_soak_reads_the_fetched_target_commit(cloned_repos) -> None:
+    """The age is the NEWEST commit fetched (what the merge would take), not
+    the commit that bumped the version: a later change restarts the soak."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT - 2 * DAY)
+    (origin / "fix.txt").write_text("late change", encoding="utf-8")
+    _commit_all_at(origin, "late change", COMMITTED_AT)
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + 60,
+        )
+    assert excinfo.value.reason == "soak"
+
+
+def test_apply_update_without_a_soak_takes_a_fresh_commit(cloned_repos) -> None:
+    """update_now passes no soak: a person asked for it now."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT)
+    applied = self_update.apply_update(clone, now=lambda: COMMITTED_AT)
+    assert applied.after_version == "0.28.1"
+
+
+@pytest.mark.parametrize(
+    ("committed_at", "now", "expected"),
+    [
+        (1_000, 1_000, DAY),
+        (1_000, 1_000 + DAY - 1, 1),
+        (1_000, 1_000 + DAY, 0),
+        (1_000, 1_000 + 2 * DAY, 0),
+        # A committer clock ahead of ours waits until a day past its stamp.
+        (1_000 + 600, 1_000, DAY + 600),
+    ],
+)
+def test_soak_remaining(committed_at, now, expected) -> None:
+    assert self_update.soak_remaining(committed_at, now, DAY) == expected
 
 
 def test_apply_update_rejects_non_checkout(tmp_path: Path) -> None:

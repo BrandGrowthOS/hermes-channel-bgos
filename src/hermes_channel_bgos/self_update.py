@@ -56,12 +56,16 @@ class SelfUpdateError(RuntimeError):
 
     `reason` is what rides the update_rpc progress `message` field
     (e.g. dirty_tree, fetch_failed, not_a_git_checkout,
-    no_update_available); `detail` stays local in logs.
+    no_update_available); `detail` stays local in logs. `retry_after` is
+    the seconds until a `soak` refusal would pass.
     """
 
-    def __init__(self, reason: str, detail: str = "") -> None:
+    def __init__(
+        self, reason: str, detail: str = "", *, retry_after: float | None = None,
+    ) -> None:
         super().__init__(detail or reason)
         self.reason = reason
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -453,7 +457,18 @@ def _local_pyproject_version(clone_dir: Path) -> str:
     return version
 
 
-def apply_update(clone_dir: Path | None = None) -> AppliedUpdate:
+def soak_remaining(committed_at: float, now: float, soak_seconds: float) -> float:
+    """Pure: seconds until a commit made at `committed_at` (epoch) has been
+    published for `soak_seconds`; 0 once it has."""
+    return max(0.0, committed_at + soak_seconds - now)
+
+
+def apply_update(
+    clone_dir: Path | None = None,
+    *,
+    soak_seconds: float | None = None,
+    now: Callable[[], float] | None = None,
+) -> AppliedUpdate:
     """Fast-forward the editable clone to origin/main and report versions.
 
     Raises SelfUpdateError with a short reason on every refusal path:
@@ -463,6 +478,12 @@ def apply_update(clone_dir: Path | None = None) -> AppliedUpdate:
     plumbing reasons git_unavailable and pyproject_unreadable. The running
     process still serves the OLD code afterwards; the caller owns the
     restart (or reports 'staged' when it has no relaunch authority).
+
+    `soak_seconds` (the unattended scheduled apply only; update_now is a
+    person asking now) also refuses with `soak` while the fetched
+    origin/main commit is younger than that by its git committer time, so a
+    bad release can be pulled before every supervised host takes it. `now`
+    is the epoch clock, injectable for tests.
     """
     root = clone_dir if clone_dir is not None else clone_root()
     if root is None or not (root / ".git").exists():
@@ -510,6 +531,23 @@ def apply_update(clone_dir: Path | None = None) -> AppliedUpdate:
         ):
             raise SelfUpdateError("major_jump")
         raise SelfUpdateError("no_update_available")
+
+    if soak_seconds is not None:
+        # The commit the merge would take, as fetched: a later change on
+        # main restarts the soak even when the version did not move.
+        shown = _git(root, "show", "-s", "--format=%ct", f"origin/{MAIN_BRANCH}")
+        stamp = shown.stdout.strip() if shown.returncode == 0 else ""
+        if not stamp.isdigit():
+            raise SelfUpdateError("fetch_failed", shown.stderr or "no committer time")
+        remaining = soak_remaining(
+            int(stamp), (now or time.time)(), soak_seconds,
+        )
+        if remaining > 0:
+            raise SelfUpdateError(
+                "soak",
+                f"origin/{MAIN_BRANCH} {target_version} needs {int(remaining)}s more",
+                retry_after=remaining,
+            )
 
     merge = _git(root, "merge", "--ff-only", f"origin/{MAIN_BRANCH}")
     if merge.returncode != 0:

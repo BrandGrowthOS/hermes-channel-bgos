@@ -6889,9 +6889,17 @@ class BGOSAdapter(BasePlatformAdapter):
                     "installing", target_version=target_version,
                 )
                 try:
-                    applied = await asyncio.to_thread(self_update.apply_update)
+                    applied = await asyncio.to_thread(
+                        self_update.apply_update,
+                        soak_seconds=scheduled_update.SOAK_SECONDS,
+                        now=self._wall_clock,
+                    )
                     target_version = applied.after_version
                 except self_update.SelfUpdateError as exc:
+                    if exc.reason == "soak":
+                        return self._scheduled_update_wait(
+                            "soak", target_version, exc.retry_after,
+                        )
                     # Same fallback as update_now: a clone already holding
                     # the newer install only needs the restart.
                     pending = None
@@ -6899,6 +6907,13 @@ class BGOSAdapter(BasePlatformAdapter):
                         pending = await asyncio.to_thread(
                             self_update.pending_restart_version,
                         )
+                        if pending is None:
+                            # The daily check saw a version origin/main no
+                            # longer has (pulled during its soak): nothing
+                            # failed, there is just nothing to take yet.
+                            return self._scheduled_update_wait(
+                                exc.reason, target_version, None,
+                            )
                     if pending is None:
                         return await self._scheduled_update_failed(
                             exc.reason, target_version,
@@ -6961,6 +6976,19 @@ class BGOSAdapter(BasePlatformAdapter):
             return "restarting"
         finally:
             self._scheduled_update_running = False
+
+    def _scheduled_update_wait(
+        self, reason: str, target: str | None, wait: float | None,
+    ) -> str:
+        """Not a failure, so nothing reaches the app: wait `wait` seconds
+        (the retry window when unknown) before the next fetch."""
+        wait = wait if wait is not None and wait > 0 else scheduled_update.RETRY_SECONDS
+        self._scheduled_update_not_before = self._clock() + wait
+        log.info(
+            "scheduled update waiting reason=%s target=%s for=%ds",
+            reason, target or "-", int(wait),
+        )
+        return reason
 
     async def _scheduled_update_failed(self, reason: str, target: str | None) -> str:
         self._scheduled_update_not_before = (

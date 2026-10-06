@@ -57,6 +57,12 @@ RETRY_SECONDS = 30 * 60
 # (design section 5: at most 3 attempts per target version).
 MAX_ATTEMPTS_PER_TARGET = 3
 
+# Soak: the unattended apply takes a target only once it has been on
+# origin/main this long (git committer time of the fetched commit), so a bad
+# release can be pulled before every supervised host takes it on its own.
+# update_now does not wait: a person asked for it.
+SOAK_SECONDS = 24 * 60 * 60
+
 ATTEMPTS_FILENAME = "bgos_scheduled_update.json"
 REPORT_FILENAME = "bgos_scheduled_update_error.json"
 

@@ -90,12 +90,14 @@ async def sched(monkeypatch: pytest.MonkeyPatch):
         pending=None,
         apply_result=AppliedUpdate(__version__, NEWER),
         applied=[],
+        apply_kwargs=[],
         restarts=[],
         spawn_ok=True,
     )
 
-    def apply(clone_dir=None):
+    def apply(clone_dir=None, **kwargs):
         state.applied.append(True)
+        state.apply_kwargs.append(kwargs)
         if callable(state.apply_result):
             return state.apply_result()
         return state.apply_result
@@ -368,6 +370,70 @@ async def test_restarts_are_spaced_by_the_retry_window(sched):
     clock[0] += QUIET
     assert await _tick(adapter) == "backoff"
     assert len(state.restarts) == 1
+
+
+# -----------------------------------------------------------------------------
+# Soak: the scheduled apply (never update_now) takes a target only once it
+# has been on origin/main for 24 hours
+# -----------------------------------------------------------------------------
+
+
+async def test_the_scheduled_apply_asks_for_a_day_of_soak(sched):
+    adapter, _api, clock, state = sched
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    [kwargs] = state.apply_kwargs
+    assert kwargs["soak_seconds"] == 24 * 60 * 60
+    # The injected wall clock, the one git committer times compare with.
+    assert kwargs["now"]() == WALL_EPOCH + clock[0]
+
+
+async def test_a_soaking_target_waits_quietly(sched, caplog):
+    adapter, api, clock, state = sched
+    caplog.set_level("INFO", logger=bgos_adapter_module.log.name)
+
+    def too_fresh():
+        raise SelfUpdateError("soak", retry_after=3600.0)
+
+    state.apply_result = too_fresh
+    assert await _idle_through_quiet_window(adapter, clock) == "soak"
+    assert state.restarts == []
+    # A wait, not a failure: nothing reaches the app as an error, and no
+    # attempt is used.
+    assert _errors(api) == []
+    assert scheduled_update.load_attempts(scheduled_update.attempts_path()) == {}
+    assert any("reason=soak" in r.getMessage() for r in caplog.records)
+    # No new fetch until the soak is due.
+    clock[0] += 3599
+    assert await _tick(adapter) == "backoff"
+    assert len(state.applied) == 1
+    clock[0] += 1
+    state.apply_result = AppliedUpdate(__version__, NEWER)
+    assert await _tick(adapter) == "restarting"
+    assert state.restarts == [LAUNCHD]
+
+
+async def test_a_pulled_release_is_not_an_error(sched):
+    """The daily check saw a version that origin/main no longer has (pulled
+    during its soak) and nothing is staged: nothing to do, nothing failed."""
+    adapter, api, clock, state = sched
+
+    def gone():
+        raise SelfUpdateError("no_update_available")
+
+    state.apply_result = gone
+    assert await _idle_through_quiet_window(adapter, clock) == "no_update_available"
+    assert _errors(api) == []
+    assert state.restarts == []
+    clock[0] += 60
+    assert await _tick(adapter) == "backoff"
+
+
+async def test_update_now_never_soaks(sched):
+    adapter, _api, _clock, state = sched
+    await adapter._handle_update_rpc({"rpcId": "rpc-now", "op": "update_now"})
+    await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
+    assert state.apply_kwargs == [{}]
+    assert state.restarts == [LAUNCHD]
 
 
 # -----------------------------------------------------------------------------
