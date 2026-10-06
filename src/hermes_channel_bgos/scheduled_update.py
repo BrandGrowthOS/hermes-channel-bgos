@@ -225,11 +225,16 @@ def clear_record(path: Path) -> None:
 
 
 def landed(target: str | None, current: str | None) -> bool:
-    """Pure: the running version is `target` or past it (same major), so a
-    restart onto it took. Unparsable versions never count as landed."""
-    if parse_version_tuple(target) is None or parse_version_tuple(current) is None:
+    """Pure: the running version is `target` or past it, so a restart onto
+    it took or a later version superseded it. A later major counts too: the
+    scheduled apply never takes one, so a person did, and a report about the
+    older target must not be said again on every boot. Unparsable versions
+    never count as landed."""
+    wanted = parse_version_tuple(target)
+    running = parse_version_tuple(current)
+    if wanted is None or running is None:
         return False
-    return target == current or decide_version_update(target, current)
+    return target == current or running > wanted
 
 
 def last_error(code: str, message: str, *, at: float) -> dict:

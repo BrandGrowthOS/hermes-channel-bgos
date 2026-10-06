@@ -249,6 +249,12 @@ def test_attempts_path_is_in_the_process_hermes_home(monkeypatch, tmp_path) -> N
         ("0.30.1", "0.30.1", True),
         # Already past it (a later version, or Update now went further).
         ("0.30.1", "0.31.0", True),
+        # A person took a major upgrade past it: the old report is stale and
+        # must not be said again on every boot.
+        ("0.30.1", "1.0.0", True),
+        ("0.30.1", "1.0.1", True),
+        # Behind it, across a major too.
+        ("1.0.0", "0.31.0", False),
         # Still on the old code: the restart did not take.
         ("0.30.1", "0.30.0", False),
         (None, "0.30.1", False),
