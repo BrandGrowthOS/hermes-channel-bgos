@@ -575,6 +575,62 @@ def test_apply_update_without_a_soak_takes_a_fresh_commit(cloned_repos) -> None:
     assert applied.after_version == "0.28.1"
 
 
+# A pin or a rollback (update_cli: `git checkout --detach <commit>`) is an
+# operator holding this clone where it is. apply_update only ever moves the
+# main branch: a detached HEAD, or any other branch, is refused as `pinned`
+# and left exactly where it is, on every path (finding H1).
+
+
+def _head_is_detached(repo: Path) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "-q", "HEAD"],
+        capture_output=True, text=True, check=False,
+    )
+    return result.returncode == 1
+
+
+@pytest.mark.parametrize("soak", [DAY, None], ids=["scheduled", "update_now"])
+def test_apply_update_refuses_a_pinned_detached_head(cloned_repos, soak) -> None:
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT)
+    _run_git(clone, "checkout", "--detach", "HEAD")
+    before = _run_git(clone, "rev-parse", "HEAD")
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=soak, now=lambda: COMMITTED_AT + 2 * DAY,
+        )
+    assert excinfo.value.reason == "pinned"
+    assert _run_git(clone, "rev-parse", "HEAD") == before
+    assert _head_is_detached(clone)
+
+
+def test_apply_update_refuses_a_branch_other_than_main(cloned_repos) -> None:
+    """A developer's branch is not ours to fast-forward onto main."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all(origin, "v0.28.1")
+    _run_git(clone, "checkout", "-b", "local-work")
+    before = _run_git(clone, "rev-parse", "HEAD")
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(clone)
+    assert excinfo.value.reason == "pinned"
+    assert _run_git(clone, "rev-parse", "HEAD") == before
+
+
+def test_apply_update_takes_updates_again_once_back_on_main(cloned_repos) -> None:
+    """Undoing the pin is `git checkout main` (or re-running install.sh)."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all(origin, "v0.28.1")
+    _run_git(clone, "checkout", "--detach", "HEAD")
+    _run_git(clone, "checkout", "main")
+
+    assert self_update.apply_update(clone) == AppliedUpdate("0.28.0", "0.28.1")
+
+
 @pytest.mark.parametrize(
     ("committed_at", "now", "expected"),
     [

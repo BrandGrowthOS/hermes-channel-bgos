@@ -38,3 +38,12 @@ def test_the_documented_off_value_really_turns_updates_off(
     assert "off" in values
     monkeypatch.setenv("BGOS_AUTO_UPDATE", "off")
     assert self_update.auto_update_enabled() is False
+
+
+def test_readme_says_a_pin_holds_and_how_to_take_updates_again() -> None:
+    """A pin or rollback is never moved by the plugin's own updates (finding
+    H1); the operator must learn that, and the one command that undoes it."""
+    section = _updates_at_idle_section()
+    assert "Pins hold" in section
+    assert "reason=pinned" in section
+    assert "checkout main" in section

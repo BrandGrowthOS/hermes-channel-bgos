@@ -472,7 +472,9 @@ def apply_update(
     """Fast-forward the editable clone to origin/main and report versions.
 
     Raises SelfUpdateError with a short reason on every refusal path:
-    not_a_git_checkout, dirty_tree (brake: local edits are never touched),
+    not_a_git_checkout, pinned (HEAD is not the main branch: a pin or a
+    rollback left it detached, or a developer has another branch out; it is
+    never moved), dirty_tree (brake: local edits are never touched),
     fetch_failed, no_update_available, major_jump (same-major gate),
     merge_failed (diverged history; ff-only never rewrites), plus the
     plumbing reasons git_unavailable and pyproject_unreadable. The running
@@ -490,6 +492,16 @@ def apply_update(
         raise SelfUpdateError("not_a_git_checkout")
 
     before = _local_pyproject_version(root)
+
+    # Only ever move the main branch. A pin or a rollback (update_cli runs
+    # `git checkout --detach <commit>`) is an operator holding this clone
+    # where it is, and a fast-forward would carry a detached HEAD onto main
+    # just the same: an unattended run would take back a release someone
+    # rolled away from. Another branch is a developer's, not ours to move.
+    # Checked first, so a held clone is a quiet `pinned`, never an error.
+    branch = _git(root, "symbolic-ref", "-q", "HEAD")
+    if branch.returncode != 0 or branch.stdout.strip() != f"refs/heads/{MAIN_BRANCH}":
+        raise SelfUpdateError("pinned", branch.stdout.strip() or "detached HEAD")
 
     status = _git(root, "status", "--porcelain", "--untracked-files=normal")
     if status.returncode != 0:

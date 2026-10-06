@@ -428,6 +428,65 @@ async def test_a_pulled_release_is_not_an_error(sched):
     assert await _tick(adapter) == "backoff"
 
 
+async def test_a_pinned_clone_waits_quietly(sched, caplog):
+    """A pin or a rollback holds the clone (apply_update refuses `pinned`,
+    finding H1): a wait, not a failure. Nothing restarts, no attempt is
+    used, nothing reaches the app as an error."""
+    adapter, api, clock, state = sched
+    caplog.set_level("INFO", logger=bgos_adapter_module.log.name)
+
+    def pinned():
+        raise SelfUpdateError("pinned")
+
+    state.apply_result = pinned
+    assert await _idle_through_quiet_window(adapter, clock) == "pinned"
+    assert state.restarts == []
+    assert _errors(api) == []
+    assert scheduled_update.load_attempts(scheduled_update.attempts_path()) == {}
+    assert any("reason=pinned" in r.getMessage() for r in caplog.records)
+    clock[0] += 60
+    assert await _tick(adapter) == "backoff"
+    assert len(state.applied) == 1
+
+
+async def test_a_pin_withdraws_a_failure_reported_before_it(sched):
+    """An error the scheduled apply reported before the operator pinned is
+    no longer this host's state: the apply is off for a held clone, so the
+    report is forgotten and the app's error cleared, once."""
+    adapter, api, clock, state = sched
+    error = scheduled_update.last_error(
+        scheduled_update.FAILED_CODE,
+        f"Scheduled update to {NEWER} failed: dirty_tree", at=0.0,
+    )
+    scheduled_update.save_report(scheduled_update.report_path(), NEWER, error)
+
+    def pinned():
+        raise SelfUpdateError("pinned")
+
+    state.apply_result = pinned
+    assert await _idle_through_quiet_window(adapter, clock) == "pinned"
+    assert _errors(api) == [error, None]
+    assert scheduled_update.load_report(scheduled_update.report_path()) is None
+    clock[0] += scheduled_update.RETRY_SECONDS
+    assert await _tick(adapter) == "pinned"
+    assert _errors(api) == [error, None]
+
+
+async def test_update_now_reports_a_pinned_clone(sched):
+    adapter, api, _clock, state = sched
+
+    def pinned():
+        raise SelfUpdateError("pinned")
+
+    state.apply_result = pinned
+    await adapter._handle_update_rpc({"rpcId": "rpc-pin", "op": "update_now"})
+    await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
+    assert api.progresses[-1][1] == {
+        "stage": "error", "target_version": None, "message": "pinned",
+    }
+    assert state.restarts == []
+
+
 async def test_update_now_never_soaks(sched):
     adapter, _api, _clock, state = sched
     await adapter._handle_update_rpc({"rpcId": "rpc-now", "op": "update_now"})

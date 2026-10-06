@@ -6839,6 +6839,20 @@ class BGOSAdapter(BasePlatformAdapter):
         )
         await self._announce_scheduled_outcome()
 
+    async def _withdraw_scheduled_error(self) -> None:
+        """The scheduled apply does not run here (a pinned clone, the kill
+        switch, no supervisor), so a failure it reported is no longer this
+        host's state: forget the report and clear the app's error, once.
+        Nothing to clear when nothing was reported."""
+        path = scheduled_update.report_path()
+        report = await asyncio.to_thread(scheduled_update.load_report, path)
+        current = _scheduled_update_outcome
+        if report is None and (current is None or current[1] is None):
+            return
+        await asyncio.to_thread(scheduled_update.clear_record, path)
+        if _publish_scheduled_update_outcome(None):
+            await self._announce_scheduled_outcome()
+
     async def _scheduled_update_exhausted(self, target: str | None) -> None:
         await self._report_scheduled_error(
             scheduled_update.EXHAUSTED_CODE,
@@ -6899,6 +6913,15 @@ class BGOSAdapter(BasePlatformAdapter):
                     if exc.reason == "soak":
                         return self._scheduled_update_wait(
                             "soak", target_version, exc.retry_after,
+                        )
+                    if exc.reason == "pinned":
+                        # An operator holds this clone (a pin or a rollback
+                        # left HEAD off main, finding H1). Not a failure, and
+                        # one reported before the pin no longer describes
+                        # this host: the scheduled apply is off for it.
+                        await self._withdraw_scheduled_error()
+                        return self._scheduled_update_wait(
+                            "pinned", target_version, None,
                         )
                     # Same fallback as update_now: a clone already holding
                     # the newer install only needs the restart.
