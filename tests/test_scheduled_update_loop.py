@@ -938,6 +938,66 @@ async def test_a_click_starts_no_new_turn_while_held(sched):
     assert received == []
 
 
+_CLICK = {
+    "assistantId": 77, "chatId": 42, "messageId": 9, "userId": "u",
+    "buttonText": "Yes", "callbackData": "opt_yes",
+}
+
+
+async def test_a_click_held_by_a_restart_that_never_came_is_delivered(sched):
+    """Finding L2: a click is push only (the backend never sends it again,
+    and marks the card answered so a second tap is ignored). Held while a
+    restart is committed, it is kept, and delivered once when intake
+    reopens without the restart (the next poll)."""
+    adapter, _api, clock, _state = sched
+    received = _capture(adapter)
+    adapter._save_last_id(500)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_inbound_click(dict(_CLICK))
+    await asyncio.sleep(0.05)
+    assert received == []
+
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    await adapter._run_backfill(adapter._load_last_id())
+    await asyncio.sleep(0.05)
+    assert received == ["Yes"]
+    await adapter._run_backfill(adapter._load_last_id())
+    await asyncio.sleep(0.05)
+    assert received == ["Yes"]
+
+
+async def test_a_held_click_is_delivered_when_a_push_reopens_intake(sched):
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+    adapter._save_last_id(500)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_inbound_click(dict(_CLICK))
+
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    api.inbound = [_message(501, "later")]
+    await adapter._handle_inbound(_message(501, "later"))
+    await asyncio.sleep(0.05)
+    assert received == ["Yes", "later"]
+
+
+async def test_a_held_callback_is_delivered_when_intake_reopens(sched, monkeypatch):
+    adapter, _api, clock, _state = sched
+    pressed: list[str] = []
+
+    async def handle_button_press(data) -> None:
+        pressed.append(data["callbackData"])
+
+    adapter.handle_button_press = handle_button_press  # type: ignore[attr-defined]
+    monkeypatch.setattr(adapter, "_is_callback_user_authorized", lambda uid: True)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_callback({"callbackData": "menu:next", "userId": "u"})
+    assert pressed == []
+
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    await adapter._run_backfill(adapter._load_last_id())
+    assert pressed == ["menu:next"]
+
+
 async def test_every_bgos_adapter_in_the_process_holds(sched):
     """One restart ends every multiplexed profile's adapter."""
     adapter, _api, clock, _state = sched

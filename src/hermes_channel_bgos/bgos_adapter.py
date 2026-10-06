@@ -361,6 +361,13 @@ _scheduled_update_outcome: tuple[int, dict | None] | None = None
 _INTAKE_HOLD_SECONDS = 120.0
 _intake_held_until: float | None = None
 
+# A held click or button callback is push only: the backend never delivers
+# it again, and it marks the card answered, so a second tap is ignored. Each
+# adapter keeps what it held (bounded) and delivers it once when intake
+# reopens without the restart (finding L2). A restart that does come ends
+# them with the process, as it would have cut off the turn they started.
+_HELD_INTERACTIONS_MAX = 100
+
 
 def _hold_intake(until: float) -> None:
     global _intake_held_until
@@ -1497,6 +1504,9 @@ class BGOSAdapter(BasePlatformAdapter):
         # The cursor this adapter's intake was held at (a committed restart),
         # so held messages are fetched again if the restart never comes.
         self._intake_resume_cursor: int | None = None
+        # Clicks and button callbacks held by a committed restart, in order:
+        # (kind, payload), delivered if the restart never comes (L2).
+        self._held_interactions: list[tuple[str, dict]] = []
         self._last_inbound_message_at: float | None = None
         self._last_outbound_message_at: float | None = None
         self._scheduled_update_task: asyncio.Task | None = None
@@ -6098,6 +6108,7 @@ class BGOSAdapter(BasePlatformAdapter):
             # New work for the agent; approvals above resolve work in flight
             # and are never held.
             log.warning("callback held: a restart is committed (%s)", cb)
+            self._hold_interaction("callback", data)
             return
         result = handler(data)
         if asyncio.iscoroutine(result):
@@ -6164,14 +6175,16 @@ class BGOSAdapter(BasePlatformAdapter):
             })
             return
 
-        # A committed restart holds new work. A click is push only (the
-        # backend does not deliver it again), but a turn started now would
-        # be cut off by the restart moments later.
+        # A committed restart holds new work: a turn started now would be
+        # cut off by the restart moments later. A click is push only (the
+        # backend does not deliver it again), so it is kept, and delivered
+        # if the restart never comes.
         if self._intake_held():
             log.warning(
                 "inbound_click chat=%s message=%s held: a restart is committed",
                 chat_id, message_id,
             )
+            self._hold_interaction("click", data)
             return
 
         # The agent's natural view: the user's reply is the button's visible
@@ -6277,6 +6290,9 @@ class BGOSAdapter(BasePlatformAdapter):
         resume = self._take_intake_resume_cursor()
         if resume is not None:
             last_message_id = min(last_message_id, resume)
+        # Clicks and callbacks a hold kept are not in this fetch (it returns
+        # user message rows only): they are delivered from memory.
+        await self._deliver_held_interactions()
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -6789,6 +6805,32 @@ class BGOSAdapter(BasePlatformAdapter):
                 "fetching what was held since message_id=%d", cursor,
             )
         return cursor
+
+    def _hold_interaction(self, kind: str, data: dict) -> None:
+        """Keep a click or callback a committed restart held (L2)."""
+        if len(self._held_interactions) >= _HELD_INTERACTIONS_MAX:
+            log.warning("held %s dropped: %d already held", kind, _HELD_INTERACTIONS_MAX)
+            return
+        self._held_interactions.append((kind, data))
+
+    async def _deliver_held_interactions(self) -> None:
+        """Once intake reopens without the restart: deliver every held
+        click and callback, in order, once. Nothing while still held."""
+        if not self._held_interactions or self._intake_held():
+            return
+        held, self._held_interactions = self._held_interactions, []
+        log.warning(
+            "inbound intake reopened without the committed restart; "
+            "delivering %d held click(s) and callback(s)", len(held),
+        )
+        for kind, data in held:
+            try:
+                if kind == "click":
+                    await self._handle_inbound_click(data)
+                else:
+                    await self._handle_callback(data)
+            except Exception:
+                log.exception("held %s delivery failed", kind)
 
     def _note_outbound_message(self) -> None:
         self._last_outbound_message_at = self._clock()
