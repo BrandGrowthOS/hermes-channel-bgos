@@ -1001,6 +1001,49 @@ class FakeProcessRegistry:
         return self.running
 
 
+class FakeRefreshingRegistry(FakeProcessRegistry):
+    """Upstream's has_any_active() refreshes recovered (detached) sessions
+    before it answers. count_running() is a bare len(_running): a recovered
+    process that has since exited stays in it until something polls it."""
+
+    def __init__(self, running: int, active: bool) -> None:
+        super().__init__(running)
+        self.active = active
+
+    def has_any_active(self) -> bool:
+        return self.active
+
+
+async def test_a_finished_recovered_process_does_not_hold_updates(sched, monkeypatch):
+    """Finding L1: after a crash the registry adopts a still running
+    background process as detached; once it exits, count_running() keeps
+    counting it, and every scheduled tick would wait on it forever."""
+    adapter, _api, clock, state = sched
+    _inject_process_registry(monkeypatch, FakeRefreshingRegistry(running=1, active=False))
+    assert await _tick(adapter) == "settling"
+    clock[0] += QUIET
+    assert await _tick(adapter) == "restarting"
+
+
+async def test_an_active_process_by_the_refreshing_check_is_busy(sched, monkeypatch):
+    adapter, _api, _clock, state = sched
+    _inject_process_registry(monkeypatch, FakeRefreshingRegistry(running=0, active=True))
+    assert await _tick(adapter) == "background_job"
+    assert state.restarts == []
+
+
+async def test_a_refreshing_check_that_cannot_answer_is_busy(sched, monkeypatch):
+    adapter, _api, _clock, state = sched
+
+    class Broken(FakeProcessRegistry):
+        def has_any_active(self) -> bool:
+            raise RuntimeError("registry lock poisoned")
+
+    _inject_process_registry(monkeypatch, Broken(running=0))
+    assert await _tick(adapter) == "background_job"
+    assert state.restarts == []
+
+
 async def test_a_running_background_process_is_busy(sched, monkeypatch):
     """Finding 9: a process the terminal tool started with background=true
     dies with the gateway, so it holds the scheduled apply off for as long

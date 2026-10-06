@@ -399,15 +399,23 @@ _background_registry_absent_logged = False
 
 def _running_background_processes() -> int:
     """Running Hermes background processes, from the upstream registry's
-    O(1) `count_running()`. An older Hermes without the registry (module or
-    method absent) has no such processes to protect: 0, logged once. A
-    registry that is present but cannot answer reads as running (1): a guard
-    that fails open would kill a live job."""
+    `has_any_active()`, else (an older registry) its `count_running()`.
+    has_any_active refreshes recovered sessions first: after a crash the
+    registry adopts a still running process as detached, and only such a
+    refresh notices it exit, so `count_running()` alone (a bare
+    len(_running)) can count a finished one forever (finding L1). An older
+    Hermes without the registry (module or both methods absent) has no such
+    processes to protect: 0, logged once. A registry that is present but
+    cannot answer reads as running (1): a guard that fails open would kill a
+    live job."""
     global _background_registry_absent_logged
     try:
         from tools.process_registry import process_registry  # type: ignore
-        count_running = process_registry.count_running
     except Exception:
+        process_registry = None
+    has_any_active = getattr(process_registry, "has_any_active", None)
+    count_running = getattr(process_registry, "count_running", None)
+    if not callable(has_any_active) and not callable(count_running):
         if not _background_registry_absent_logged:
             _background_registry_absent_logged = True
             log.info(
@@ -416,6 +424,8 @@ def _running_background_processes() -> int:
             )
         return 0
     try:
+        if callable(has_any_active):
+            return 1 if has_any_active() else 0
         return int(count_running())
     except Exception:
         log.debug("Hermes process registry count failed", exc_info=True)
