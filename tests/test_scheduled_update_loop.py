@@ -695,6 +695,29 @@ async def test_an_unresolved_report_is_sent_again_after_a_restart(sched):
     assert _errors(api) == [error]
 
 
+@pytest.mark.parametrize("why", ["updates_disabled", "unsupervised"])
+async def test_a_stored_failure_is_withdrawn_when_the_scheduled_apply_is_off(
+    sched, monkeypatch, why,
+):
+    """Finding L3: the owner turned the feature off (BGOS_AUTO_UPDATE=off,
+    the README's off switch) or the host lost its supervisor. A failure of
+    a feature that no longer runs here is not this host's state: the boot
+    clears it once instead of saying it again on every boot."""
+    adapter, api, _clock, state = sched
+    if why == "updates_disabled":
+        monkeypatch.setenv("BGOS_AUTO_UPDATE", "off")
+    else:
+        state.supervisor = None
+    error = scheduled_update.last_error(
+        scheduled_update.FAILED_CODE,
+        f"Scheduled update to {NEWER} failed: dirty_tree", at=0.0,
+    )
+    scheduled_update.save_report(scheduled_update.report_path(), NEWER, error)
+    assert await _tick(adapter) == why
+    assert _errors(api) == [None]
+    assert scheduled_update.load_report(scheduled_update.report_path()) is None
+
+
 async def test_no_record_means_nothing_to_say(sched):
     adapter, api, _clock, state = sched
     state.latest = __version__

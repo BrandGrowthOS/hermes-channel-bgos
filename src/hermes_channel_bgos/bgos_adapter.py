@@ -6895,7 +6895,8 @@ class BGOSAdapter(BasePlatformAdapter):
         land? Then the update took: clear the app's error (lastError: null)
         and forget the record. A reported failure whose target has not
         landed is said again (a restart can cut off the heartbeat that
-        carried it)."""
+        carried it), unless the scheduled apply no longer runs here: then it
+        is withdrawn the same way as a landed one (finding L3)."""
         attempts_path = scheduled_update.attempts_path()
         report_path = scheduled_update.report_path()
         attempts = await asyncio.to_thread(
@@ -6913,7 +6914,17 @@ class BGOSAdapter(BasePlatformAdapter):
         if report_landed:
             await asyncio.to_thread(scheduled_update.clear_record, report_path)
         if report is not None and not report_landed:
-            error: dict | None = report["lastError"]
+            supervisor = await asyncio.to_thread(self_update.verified_supervisor)
+            if self_update.auto_update_enabled() and supervisor is not None:
+                error: dict | None = report["lastError"]
+            else:
+                # Switched off (BGOS_AUTO_UPDATE) or no supervisor: nothing
+                # here retries or lands that target, so its failure is no
+                # longer this host's state. Clear it once, do not re-say it
+                # on every boot.
+                await asyncio.to_thread(scheduled_update.clear_record, report_path)
+                log.info("scheduled update off here: withdrawing the stored failure")
+                error = None
         elif attempt_landed or report_landed:
             log.info("scheduled update landed: running %s", __version__)
             error = None
