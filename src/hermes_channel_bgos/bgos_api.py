@@ -11,7 +11,7 @@ for one-shot a2a smoke tests.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -63,6 +63,20 @@ class BgosApi:
         # full payload once (the backend still returns 200 + body for a missing
         # / non-matching ETag), so losing this is harmless and backward-safe.
         self._etag_by_path: dict[str, str] = {}
+        # Called before every outbound message request (post, patch,
+        # send-message, peer send). The adapter stamps its last-message time
+        # from it: the scheduled update waits for 10 quiet minutes
+        # (design 2.3, decision D8). Never allowed to break a send.
+        self.on_message_activity: Callable[[], None] | None = None
+
+    def _note_message_activity(self) -> None:
+        hook = self.on_message_activity
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception:
+            log.debug("message activity hook failed (ignored)", exc_info=True)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -424,6 +438,7 @@ class BgosApi:
             body["replyToId"] = reply_to_id
         if turn_state is not None:
             body["turnState"] = turn_state
+        self._note_message_activity()
         return await self._request("POST", "/api/v1/send-message", json=body)
 
     async def peer_status(self, *, caller_assistant_id: int, peer_assistant_id: int) -> dict:
@@ -481,6 +496,7 @@ class BgosApi:
                 "targetAssistantId": target_assistant_id,
                 "parentMessageId": parent_message_id,
             })
+        self._note_message_activity()
         resp = await self._request(
             "POST", f"/api/v1/peers/{target_assistant_id}/send",
             json=body, assistant_id=caller_assistant_id,
@@ -571,6 +587,7 @@ class BgosApi:
             body["replyToId"] = reply_to_id
         if tool_progress is not None:
             body["toolProgress"] = tool_progress
+        self._note_message_activity()
         return await self._request("POST", "/api/v1/messages", json=body)
 
     async def patch_message(
@@ -619,6 +636,7 @@ class BgosApi:
             body["userId"] = user_id
         if tool_progress is not None:
             body["toolProgress"] = tool_progress
+        self._note_message_activity()
         return await self._request("PATCH", f"/api/v1/messages/{message_id}", json=body)
 
     async def delete_message(self, message_id: int) -> None:

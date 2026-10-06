@@ -23,15 +23,17 @@ import platform
 import re
 import struct
 import time
+import weakref
 from dataclasses import asdict, dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 import httpx
 
 from . import __version__
+from . import scheduled_update
 from . import self_update
 from .bgos_api import BgosApi, BgosApiError, NOT_MODIFIED
 from .bgos_ws import BgosWs
@@ -282,6 +284,53 @@ _DOCTOR_RPC_TIMEOUT_SECONDS = 45.0
 # long enough for a typical in-flight dispatch to finish writing its reply,
 # short enough that the app's live progress card never looks stuck.
 _UPDATE_DRAIN_SECONDS = 5.0
+
+# Scheduled apply (design 2.3, decision D8; decisions in scheduled_update.py):
+# how often the loop samples busy and quiet. Idle must hold across every
+# sample of the 10 minute quiet window, and the message stamps catch a turn
+# that starts and ends between two samples.
+_SCHEDULED_UPDATE_TICK_SECONDS = 60.0
+
+# Every BGOS adapter live in this gateway process. Multiplexed Hermes
+# profiles each run their own adapter in ONE process, and a restart ends all
+# of them: the busy and quiet checks must see every one, and only one
+# scheduled loop may act (two would race the same pull and restart). Weak
+# references so a dropped adapter never pins memory or a stale busy state.
+_LIVE_ADAPTERS: list[weakref.ref] = []
+_scheduled_update_owner: weakref.ref | None = None
+
+
+def _live_adapters() -> list["BGOSAdapter"]:
+    alive = [ref() for ref in _LIVE_ADAPTERS]
+    _LIVE_ADAPTERS[:] = [ref for ref, a in zip(list(_LIVE_ADAPTERS), alive) if a is not None]
+    return [a for a in alive if a is not None]
+
+
+def _register_live_adapter(adapter: "BGOSAdapter") -> None:
+    if not any(a is adapter for a in _live_adapters()):
+        _LIVE_ADAPTERS.append(weakref.ref(adapter))
+
+
+def _unregister_live_adapter(adapter: "BGOSAdapter") -> None:
+    _LIVE_ADAPTERS[:] = [ref for ref in _LIVE_ADAPTERS if ref() is not adapter]
+
+
+def _claim_scheduled_update(adapter: "BGOSAdapter") -> bool:
+    """First live adapter to ask owns the process's scheduled apply; the
+    claim passes on when the owner is gone or disconnected."""
+    global _scheduled_update_owner
+    owner = _scheduled_update_owner() if _scheduled_update_owner else None
+    if owner is None or owner is adapter:
+        _scheduled_update_owner = weakref.ref(adapter)
+        return True
+    return False
+
+
+def _release_scheduled_update(adapter: "BGOSAdapter") -> None:
+    global _scheduled_update_owner
+    owner = _scheduled_update_owner() if _scheduled_update_owner else None
+    if owner is None or owner is adapter:
+        _scheduled_update_owner = None
 
 # System locations that always hold secrets or credentials. SECURITY: outbound
 # MEDIA:/path markers and send_image/file local sources are agent-emitted, and
@@ -1268,6 +1317,21 @@ class BGOSAdapter(BasePlatformAdapter):
         # dedupe set + fire-and-forget task tracking.
         self._update_rpc_in_flight: set[str] = set()
         self._update_tasks: set[asyncio.Task] = set()
+        # Scheduled apply at a safe moment (design 2.3, decision D8; see
+        # scheduled_update.py). The clock is injectable so tests drive the
+        # quiet window without sleeping. The message stamps feed "quiet for
+        # 10 minutes since the last inbound or outbound message": inbound in
+        # _handle_inbound, _handle_inbound_click and _handle_callback,
+        # outbound through the BgosApi hook (every post, patch, send-message
+        # and peer send, whichever adapter path made it).
+        self._clock: Callable[[], float] = time.monotonic
+        self._last_inbound_message_at: float | None = None
+        self._last_outbound_message_at: float | None = None
+        self._scheduled_update_task: asyncio.Task | None = None
+        self._scheduled_update_idle_since: float | None = None
+        self._scheduled_update_not_before: float | None = None
+        self._scheduled_update_running: bool = False
+        self._api.on_message_activity = self._note_outbound_message
         # Agent Boards round trip ([[BGOS_BOARDS]] marker). Executor tasks
         # are fire-and-forget like _voice_tasks (tracked so exceptions are
         # retrieved and disconnect can drain them). The per-chat counter is
@@ -1675,6 +1739,18 @@ class BGOSAdapter(BasePlatformAdapter):
         # runs — the app's update prompt cannot cover Hermes otherwise.
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+        # Scheduled apply (decision D8): applies a newer version, or finishes
+        # a staged one, at a safe moment under a verified supervisor only.
+        # Every adapter runs the loop; the first to claim it acts.
+        _register_live_adapter(self)
+        if (
+            self._scheduled_update_task is None
+            or self._scheduled_update_task.done()
+        ):
+            self._scheduled_update_task = asyncio.create_task(
+                self._scheduled_update_loop(),
+            )
         return True
 
     async def _heartbeat_loop(self) -> None:
@@ -1693,26 +1769,32 @@ class BGOSAdapter(BasePlatformAdapter):
         raise, so they run in a worker thread off the event loop.
         """
         while True:
-            try:
-                latest = await asyncio.to_thread(
-                    self_update.latest_known_version,
-                )
-                readiness = await asyncio.to_thread(
-                    self_update.update_readiness,
-                )
-                await self._api.post_heartbeat(
-                    daemon_version=__version__, env=_daemon_env(),
-                    latest_known_version=latest,
-                    update_readiness=readiness,
-                )
-                log.info(
-                    "BGOS heartbeat sent (daemonVersion=%s)", __version__,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.debug("BGOS heartbeat failed (ignored)", exc_info=True)
+            await self._post_heartbeat_once()
             await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+
+    async def _post_heartbeat_once(self) -> None:
+        """One best-effort heartbeat (the loop's body). The scheduled apply
+        also calls it so a staged or restarting update is visible at once
+        (pendingRestartVersion), not up to 6 hours later."""
+        try:
+            latest = await asyncio.to_thread(
+                self_update.latest_known_version,
+            )
+            readiness = await asyncio.to_thread(
+                self_update.update_readiness,
+            )
+            await self._api.post_heartbeat(
+                daemon_version=__version__, env=_daemon_env(),
+                latest_known_version=latest,
+                update_readiness=readiness,
+            )
+            log.info(
+                "BGOS heartbeat sent (daemonVersion=%s)", __version__,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.debug("BGOS heartbeat failed (ignored)", exc_info=True)
 
     async def _refresh_pairing_scope(self) -> bool:
         """Re-fetch the pairing scope from `GET /api/v1/integrations/me` and
@@ -2203,6 +2285,15 @@ class BGOSAdapter(BasePlatformAdapter):
             await asyncio.gather(*update_tasks, return_exceptions=True)
         self._update_tasks.clear()
         self._update_rpc_in_flight.clear()
+        # The scheduled-update loop goes with its adapter, and the process
+        # claim passes to the next live adapter.
+        scheduled_task = self._scheduled_update_task
+        self._scheduled_update_task = None
+        if scheduled_task is not None and not scheduled_task.done():
+            scheduled_task.cancel()
+            await asyncio.gather(scheduled_task, return_exceptions=True)
+        _unregister_live_adapter(self)
+        _release_scheduled_update(self)
         setup_tasks = [
             task for task in self._stt_setup_tasks if not task.done()
         ]
@@ -5037,6 +5128,7 @@ class BGOSAdapter(BasePlatformAdapter):
         backfill replay (history isn't "user typing fast", it's historical)
         and `/retry` replay (already merged into a single canonical text).
         """
+        self._note_inbound_message()
         data = _normalize_inbound_payload(data)
         assistant_id = data.get("assistant_id")
         if assistant_id is None:
@@ -5657,6 +5749,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # (`callbackData`, live WS / inbound_click shape). Approval buttons
         # must honor both; otherwise the tap falls through as a normal
         # "Always allow" chat message and the blocking approval times out.
+        self._note_inbound_message()
         cb = data.get("callback_data") or data.get("callbackData") or ""
         user_id_for_authz = data.get("user_id") or data.get("userId")
         if not self._is_callback_user_authorized(user_id_for_authz):
@@ -5800,6 +5893,7 @@ class BGOSAdapter(BasePlatformAdapter):
           { assistantId, userId, chatId, messageId, optionId, callbackData,
             buttonText, customText? }
         """
+        self._note_inbound_message()
         assistant_id = data.get("assistantId")
         if assistant_id is None:
             log.debug("inbound_click missing assistantId: %s", data)
@@ -6212,7 +6306,7 @@ class BGOSAdapter(BasePlatformAdapter):
             log.debug("dropping in-flight update_rpc duplicate rpc=%s", rpc_id)
             return
 
-        if self._update_rpc_in_flight:
+        if self._update_rpc_in_flight or self._scheduled_update_running:
             try:
                 await self._api.post_update_rpc_ack(rpc_id)
             except Exception:
@@ -6248,18 +6342,43 @@ class BGOSAdapter(BasePlatformAdapter):
                 rpc_id, stage, exc_info=True,
             )
 
+    def _local_update_busy(self) -> bool:
+        """This adapter has a live session or pending plugin work."""
+        tasks = (
+            *self._voice_tasks, *self._boards_tasks, *self._peer_tasks,
+            *self._doctor_tasks, *self._profile_tasks,
+            *self._pending_text_tasks.values(),
+        )
+        return any(not t.done() for t in tasks) or bool(
+            getattr(self, "_active_sessions", {}),
+        )
+
+    def _update_busy(self) -> bool:
+        """The ONE busy definition every update path uses (update_now's
+        drain and the scheduled apply): a restart ends the whole gateway
+        process, so a session or pending plugin task on ANY BGOS adapter in
+        it (multiplexed profiles) is busy, and, best effort, a live session
+        on any other platform adapter the gateway runner holds."""
+        if any(
+            adapter._local_update_busy()
+            for adapter in (self, *_live_adapters())
+        ):
+            return True
+        runner = getattr(self, "gateway_runner", None)
+        others = getattr(runner, "adapters", None)
+        if isinstance(others, dict):
+            for adapter in others.values():
+                if adapter is not self and getattr(adapter, "_active_sessions", None):
+                    return True
+        return False
+
     async def _drain_for_update(self, timeout: float) -> bool:
         """Let in-flight fire-and-forget work settle before the restart.
 
         A timeout refuses the update, never cancels a live turn."""
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
-            tasks = (
-                *self._voice_tasks, *self._boards_tasks, *self._peer_tasks,
-                *self._doctor_tasks, *self._profile_tasks,
-                *self._pending_text_tasks.values(),
-            )
-            if not any(not t.done() for t in tasks) and not getattr(self, "_active_sessions", {}):
+            if not self._update_busy():
                 return True
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -6370,6 +6489,198 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
         finally:
             self._update_rpc_in_flight.discard(rpc_id)
+
+    # -------------------------------------------------------------------------
+    # Scheduled apply at a safe moment (design 2.3, decision D8)
+    # -------------------------------------------------------------------------
+
+    def _note_inbound_message(self) -> None:
+        self._last_inbound_message_at = self._clock()
+
+    def _note_outbound_message(self) -> None:
+        self._last_outbound_message_at = self._clock()
+
+    def _last_message_at(self) -> float | None:
+        """Newest message in or out on ANY BGOS adapter in this process."""
+        stamps = [
+            stamp
+            for adapter in (self, *_live_adapters())
+            for stamp in (
+                adapter._last_inbound_message_at,
+                adapter._last_outbound_message_at,
+            )
+            if stamp is not None
+        ]
+        return max(stamps) if stamps else None
+
+    def _scheduled_safe_moment(self, now: float) -> scheduled_update.SafeMoment:
+        busy = self._update_busy()
+        self._scheduled_update_idle_since = scheduled_update.next_idle_since(
+            busy=busy, idle_since=self._scheduled_update_idle_since, now=now,
+        )
+        return scheduled_update.decide_safe_moment(
+            now=now,
+            busy=busy,
+            idle_since=self._scheduled_update_idle_since,
+            last_message_at=self._last_message_at(),
+            not_before=self._scheduled_update_not_before,
+        )
+
+    async def _scheduled_update_loop(self) -> None:
+        """Sample once a minute for the life of the adapter. Best effort: a
+        failing tick is logged and the next one runs; nothing here may take
+        the gateway down."""
+        while True:
+            try:
+                status = await self._scheduled_update_tick()
+                log.debug("scheduled update tick: %s", status)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.debug("scheduled update tick failed (ignored)", exc_info=True)
+            await asyncio.sleep(_SCHEDULED_UPDATE_TICK_SECONDS)
+
+    async def _scheduled_update_tick(self) -> str:
+        """One look: returns a short status token (the plan or safe-moment
+        reason, or the run's outcome)."""
+        if not _claim_scheduled_update(self):
+            return "not_owner"
+        now = self._clock()
+        if self._update_rpc_in_flight or self._scheduled_update_running:
+            # An update_now owns the clone and the restart right now; its
+            # own drain decides. Counts as busy for the idle stretch.
+            self._scheduled_update_idle_since = None
+            return "update_in_flight"
+        moment = self._scheduled_safe_moment(now)
+
+        supervisor = await asyncio.to_thread(self_update.verified_supervisor)
+        latest = await asyncio.to_thread(self_update.latest_known_version)
+        pending = await asyncio.to_thread(self_update.pending_restart_version)
+        attempts = await asyncio.to_thread(
+            scheduled_update.load_attempts, scheduled_update.attempts_path(),
+        )
+        plan = scheduled_update.decide_scheduled_update(
+            current=__version__,
+            latest=latest,
+            pending=pending,
+            auto_update_enabled=self_update.auto_update_enabled(),
+            supervised=supervisor is not None,
+            attempts=attempts,
+        )
+        if plan.action == "none":
+            return plan.reason
+        if not moment.safe:
+            return moment.reason
+        return await self._run_scheduled_update(plan, supervisor)
+
+    async def _report_scheduled_update(
+        self,
+        stage: str,
+        *,
+        target_version: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Progress for a run nobody requested: there is no rpcId to POST
+        update_rpc progress to, so the stages (the update_now vocabulary)
+        go to the log, and a staged or restarting install is announced by
+        an immediate heartbeat (its updateReadiness carries
+        pendingRestartVersion; the next boot heartbeat carries the new
+        daemonVersion)."""
+        log.info(
+            "scheduled update stage=%s target=%s message=%s",
+            stage, target_version or "-", message or "-",
+        )
+        if stage in ("staged", "restarting"):
+            await self._post_heartbeat_once()
+
+    async def _run_scheduled_update(
+        self,
+        plan: scheduled_update.ScheduledPlan,
+        supervisor: self_update.Supervisor | None,
+    ) -> str:
+        if supervisor is None:  # decide_scheduled_update already refused
+            return "unsupervised"
+        self._scheduled_update_running = True
+        try:
+            target_version = plan.target_version
+            if plan.action == "apply":
+                await self._report_scheduled_update(
+                    "installing", target_version=target_version,
+                )
+                try:
+                    applied = await asyncio.to_thread(self_update.apply_update)
+                    target_version = applied.after_version
+                except self_update.SelfUpdateError as exc:
+                    # Same fallback as update_now: a clone already holding
+                    # the newer install only needs the restart.
+                    pending = None
+                    if exc.reason == "no_update_available":
+                        pending = await asyncio.to_thread(
+                            self_update.pending_restart_version,
+                        )
+                    if pending is None:
+                        return await self._scheduled_update_failed(exc.reason)
+                    target_version = pending
+                except Exception as exc:
+                    log.exception("scheduled update apply crashed")
+                    return await self._scheduled_update_failed(
+                        (str(exc) or exc.__class__.__name__)[:300],
+                    )
+
+            # Work can arrive while git runs in its worker thread: judge the
+            # moment again on fresh state, and keep the install staged (the
+            # next safe moment restarts onto it) rather than cut it off.
+            now = self._clock()
+            moment = self._scheduled_safe_moment(now)
+            if not moment.safe:
+                await self._report_scheduled_update(
+                    "staged", target_version=target_version,
+                    message=moment.reason,
+                )
+                return "staged"
+
+            await self._report_scheduled_update(
+                "restarting", target_version=target_version,
+            )
+            # The heartbeat POST took real time: one last look before the
+            # point of no return. Never cancel or interrupt a turn.
+            if self._update_busy():
+                self._scheduled_update_idle_since = None
+                await self._report_scheduled_update(
+                    "staged", target_version=target_version, message="busy",
+                )
+                return "staged"
+            # Count the attempt BEFORE the restart (the count must survive
+            # the very restart it records, so a restart that keeps landing
+            # on the old code stops at the cap instead of looping), but only
+            # once committed: a run that stayed staged used none.
+            await asyncio.to_thread(
+                scheduled_update.record_attempt,
+                scheduled_update.attempts_path(),
+                target_version or "unknown",
+            )
+            self._scheduled_update_not_before = (
+                self._clock() + scheduled_update.RETRY_SECONDS
+            )
+            spawned = await asyncio.to_thread(
+                self_update.schedule_supervisor_restart, supervisor,
+            )
+            if not spawned:
+                await self._report_scheduled_update(
+                    "error", target_version=target_version,
+                    message="restart_spawn_failed",
+                )
+                return "error"
+            return "restarting"
+        finally:
+            self._scheduled_update_running = False
+
+    async def _scheduled_update_failed(self, reason: str) -> str:
+        self._scheduled_update_not_before = (
+            self._clock() + scheduled_update.RETRY_SECONDS
+        )
+        await self._report_scheduled_update("error", message=reason)
+        return "error"
 
     # -------------------------------------------------------------------------
     # Native in-app voice (voice_rpc, spec section 6.2, the Hermes broker)
