@@ -6284,12 +6284,15 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
             # Relaunch authority BEFORE any work: it decides whether this
-            # run may exit for relaunch or must stage to disk. Attachment
-            # mode is log-only (both modes update the same editable clone).
-            unit = await asyncio.to_thread(self_update.systemd_user_unit)
+            # run may exit for relaunch or must stage to disk. A verified
+            # systemd unit or (macOS, design 2.3) a launchd job whose pid
+            # is this process. Attachment mode is log-only (both modes
+            # update the same editable clone).
+            supervisor = await asyncio.to_thread(self_update.verified_supervisor)
             log.info(
-                "update_rpc rpc=%s unit=%s attachment=%s",
-                rpc_id, unit or "none",
+                "update_rpc rpc=%s supervisor=%s attachment=%s",
+                rpc_id,
+                f"{supervisor.kind}:{supervisor.name}" if supervisor else "none",
                 self_update.detect_attachment_mode(self._hermes_home),
             )
 
@@ -6334,7 +6337,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
                 return
 
-            if unit is None:
+            if supervisor is None:
                 # No verified supervisor: NEVER exit. The install is on
                 # disk; 'staged' is daemon-terminal and the next heartbeat
                 # carries pendingRestartVersion.
@@ -6350,13 +6353,14 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
             # 'restarting' arms the backend's completion detection, then
-            # the detached 2s systemd-run timer restarts our own unit so
-            # this POST has flushed before the process dies.
+            # the detached 2s restart (a systemd-run timer, or a delayed
+            # `launchctl kickstart -k` in its own session) restarts our own
+            # service so this POST has flushed before the process dies.
             await self._post_update_progress(
                 rpc_id, "restarting", target_version=target_version,
             )
             spawned = await asyncio.to_thread(
-                self_update.schedule_unit_restart, unit,
+                self_update.schedule_supervisor_restart, supervisor,
             )
             if not spawned:
                 # Without the error the app would wait out the backend's
