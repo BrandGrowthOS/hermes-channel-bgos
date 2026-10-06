@@ -268,11 +268,17 @@ HERMES_LAUNCHD_LABEL = "ai.hermes.gateway"
 # the characters Hermes profile names use. Anything else is not probed.
 _PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
+# The launchd domains a Hermes gateway job is loaded in, in the order Hermes
+# upstream probes them (hermes_cli/gateway.py _launchd_domain): gui/<uid> for
+# an Aqua login session, user/<uid> for a Background or SSH session.
+_LAUNCHD_DOMAINS = ("gui", "user")
+
 # The only service targets a restart may ever kickstart. `kickstart -k` kills
 # whatever the target names, so a foreign or malformed target is refused even
 # though the probe is the only producer of targets.
 _LAUNCHD_TARGET_RE = re.compile(
-    r"gui/\d+/" + re.escape(HERMES_LAUNCHD_LABEL) + r"(?:-[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?"
+    r"(?:gui|user)/\d+/" + re.escape(HERMES_LAUNCHD_LABEL)
+    + r"(?:-[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?"
 )
 
 _PID_LINE_RE = re.compile(r"^[ \t]*pid = (\S+)[ \t]*$", re.MULTILINE)
@@ -284,8 +290,8 @@ _HOME_FROM_ENV: object = object()
 
 
 def launchd_service_target() -> str | None:
-    """`gui/<uid>/<label>` of the launchd job whose running pid IS this
-    process, else None.
+    """`<domain>/<uid>/<label>` (domain gui or user) of the launchd job
+    whose running pid IS this process, else None.
 
     Probed once and cached for the process lifetime (supervision cannot
     change mid-run), like systemd_user_unit. Design 2.3: on macOS the
@@ -341,24 +347,29 @@ def _probe_launchd_job(
         hermes_home = os.environ.get("HERMES_HOME", "").strip() or None
     run = run if run is not None else subprocess.run
     for label in _launchd_candidate_labels(hermes_home):  # type: ignore[arg-type]
-        target = f"gui/{uid}/{label}"
-        try:
-            result = run(
-                ["launchctl", "print", target],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            )
-        except Exception:
-            continue
-        if result.returncode != 0:
-            continue
-        # A loaded job running ANOTHER pid (a second Hermes, a wrapper that
-        # did not exec) is not authority: kickstart -k would kill that
-        # process and leave this one running beside the new instance.
-        if _launchd_print_pid(result.stdout) == pid:
-            return target
+        # Both domains, gui first: a gateway installed from an SSH or
+        # Background session lives in user/<uid>, where a gui-only probe
+        # never finds it (every update would stage forever).
+        for domain in _LAUNCHD_DOMAINS:
+            target = f"{domain}/{uid}/{label}"
+            try:
+                result = run(
+                    ["launchctl", "print", target],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+            except Exception:
+                continue
+            if result.returncode != 0:
+                continue
+            # A loaded job running ANOTHER pid (a second Hermes, a wrapper
+            # that did not exec, the same label in the other domain) is not
+            # authority: kickstart -k would kill that process and leave
+            # this one running beside the new instance.
+            if _launchd_print_pid(result.stdout) == pid:
+                return target
     return None
 
 

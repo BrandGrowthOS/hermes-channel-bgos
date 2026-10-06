@@ -615,7 +615,8 @@ def test_launchd_probe_tries_the_profile_label() -> None:
     )
     assert target == "gui/501/ai.hermes.gateway-ava"
     assert [c[-1] for c in fake.calls] == [
-        "gui/501/ai.hermes.gateway", "gui/501/ai.hermes.gateway-ava",
+        "gui/501/ai.hermes.gateway", "user/501/ai.hermes.gateway",
+        "gui/501/ai.hermes.gateway-ava",
     ]
 
 
@@ -625,7 +626,83 @@ def test_launchd_probe_skips_an_unsafe_profile_name() -> None:
         platform="darwin", uid=501, pid=1,
         hermes_home="/x/profiles/a b;rm -rf", run=fake,
     ) is None
+    assert [c[-1] for c in fake.calls] == [
+        "gui/501/ai.hermes.gateway", "user/501/ai.hermes.gateway",
+    ]
+
+
+# Hermes upstream (hermes_cli/gateway.py _launchd_domain) loads the gateway
+# in gui/<uid> for an Aqua login and in user/<uid> for a Background or SSH
+# session. The probe asks both, gui first, and keeps the one whose job IS
+# this process; the restart then kickstarts exactly that target.
+
+
+def test_launchd_probe_finds_the_job_in_the_user_domain() -> None:
+    fake = _FakeLaunchctl({"user/501/ai.hermes.gateway": _launchctl_print(4242)})
+    target = self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    )
+    assert target == "user/501/ai.hermes.gateway"
+    assert [c[-1] for c in fake.calls] == [
+        "gui/501/ai.hermes.gateway", "user/501/ai.hermes.gateway",
+    ]
+
+
+def test_launchd_probe_keeps_the_domain_whose_job_is_this_pid() -> None:
+    """The same label loaded in both domains: the gui job runs ANOTHER
+    gateway, the user job runs this one. Kickstarting the gui target would
+    kill the wrong process."""
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway": _launchctl_print(999),
+        "user/501/ai.hermes.gateway": _launchctl_print(4242),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    ) == "user/501/ai.hermes.gateway"
+
+
+def test_launchd_probe_asks_gui_first_and_stops_there() -> None:
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway": _launchctl_print(4242),
+        "user/501/ai.hermes.gateway": _launchctl_print(4242),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    ) == "gui/501/ai.hermes.gateway"
     assert [c[-1] for c in fake.calls] == ["gui/501/ai.hermes.gateway"]
+
+
+def test_launchd_probe_finds_a_profile_job_in_the_user_domain() -> None:
+    fake = _FakeLaunchctl({
+        "user/501/ai.hermes.gateway-ava": _launchctl_print(77, "ai.hermes.gateway-ava"),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=77,
+        hermes_home="/Users/kc/.hermes/profiles/ava", run=fake,
+    ) == "user/501/ai.hermes.gateway-ava"
+
+
+def test_launchd_probe_refuses_when_neither_domain_runs_this_pid() -> None:
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway": _launchctl_print(1),
+        "user/501/ai.hermes.gateway": _launchctl_print(2),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    ) is None
+
+
+def test_schedule_launchd_restart_kickstarts_a_user_domain_target() -> None:
+    spawned: list[list[str]] = []
+
+    def fake_popen(argv, **kwargs):
+        spawned.append(list(argv))
+        return SimpleNamespace(pid=1)
+
+    assert self_update.schedule_launchd_restart(
+        "user/501/ai.hermes.gateway-ava", popen=fake_popen,
+    ) is True
+    assert spawned[0][-1] == "user/501/ai.hermes.gateway-ava"
 
 
 def test_launchd_probe_is_macos_only() -> None:
@@ -746,7 +823,9 @@ def test_schedule_launchd_restart_refuses_a_foreign_target() -> None:
     spawned: list[list[str]] = []
     for target in (
         "gui/501/com.apple.Finder",
+        "user/501/com.apple.Finder",
         "system/ai.hermes.gateway",
+        "pid/4242/ai.hermes.gateway",
         "gui/501/ai.hermes.gateway; rm -rf ~",
     ):
         assert self_update.schedule_launchd_restart(
