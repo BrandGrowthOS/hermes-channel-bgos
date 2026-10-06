@@ -314,7 +314,12 @@ restart_hermes() {
     launchctl kickstart -k "gui/$(id -u)/ai.hermes.gateway"
     return
   fi
+  # Hermes keeps itself alive through its own service (`hermes gateway
+  # install`: a systemd user unit with Restart=always and linger, a launchd
+  # agent with KeepAlive, or a Windows task). This plugin installs none, so
+  # say plainly that this is the step that brings the agent back.
   warn "Could not detect a managed Hermes gateway service. Restart Hermes manually."
+  warn "RECOMMENDED: run \`hermes gateway install\` so the gateway restarts after a crash or a reboot."
 }
 
 main() {
