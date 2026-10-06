@@ -12,7 +12,8 @@ decisions the adapter's scheduled-update loop runs every minute:
   gateway back), only while BGOS_AUTO_UPDATE allows it, and never a fourth
   time onto a target that already failed to come up three times.
 - `decide_safe_moment`: WHEN. The update_now drain's busy definition (no
-  active session, no pending plugin task) HELD for the whole quiet window,
+  active session, no pending plugin task, no running Hermes background
+  process) HELD for the whole quiet window,
   plus 10 minutes with no inbound or outbound message, plus any backoff
   after an attempt. It never cancels or interrupts a turn: an unsafe moment
   is simply not yet.
@@ -126,10 +127,13 @@ def decide_safe_moment(
     last_message_at: float | None,
     not_before: float | None,
     quiet_seconds: float = QUIET_SECONDS,
+    busy_reason: str = "busy",
 ) -> SafeMoment:
-    """Pure: is this a moment an unattended restart interrupts nothing?"""
+    """Pure: is this a moment an unattended restart interrupts nothing?
+    `busy_reason` names what is busy (busy, or background_job for a Hermes
+    background process; finding 9)."""
     if busy:
-        return SafeMoment(False, "busy")
+        return SafeMoment(False, busy_reason)
     if not_before is not None and now < not_before:
         return SafeMoment(False, "backoff")
     if idle_since is None or now - idle_since < quiet_seconds:

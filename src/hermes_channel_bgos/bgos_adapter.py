@@ -332,6 +332,38 @@ def _release_scheduled_update(adapter: "BGOSAdapter") -> None:
     if owner is None or owner is adapter:
         _scheduled_update_owner = None
 
+
+# Finding 9 (design section 6): never restart under a running background job.
+# Hermes upstream tracks the processes its terminal tool starts with
+# background=true in tools/process_registry.py, and they die with the gateway
+# process a restart ends. Logged once when an older Hermes has no registry.
+_background_registry_absent_logged = False
+
+
+def _running_background_processes() -> int:
+    """Running Hermes background processes, from the upstream registry's
+    O(1) `count_running()`. An older Hermes without the registry (module or
+    method absent) has no such processes to protect: 0, logged once. A
+    registry that is present but cannot answer reads as running (1): a guard
+    that fails open would kill a live job."""
+    global _background_registry_absent_logged
+    try:
+        from tools.process_registry import process_registry  # type: ignore
+        count_running = process_registry.count_running
+    except Exception:
+        if not _background_registry_absent_logged:
+            _background_registry_absent_logged = True
+            log.info(
+                "Hermes process registry unavailable (older Hermes): "
+                "background processes are not counted as busy for updates",
+            )
+        return 0
+    try:
+        return int(count_running())
+    except Exception:
+        log.debug("Hermes process registry count failed", exc_info=True)
+        return 1
+
 # System locations that always hold secrets or credentials. SECURITY: outbound
 # MEDIA:/path markers and send_image/file local sources are agent-emitted, and
 # the agent is steered by inbound user messages plus the backend-served canon
@@ -6353,36 +6385,45 @@ class BGOSAdapter(BasePlatformAdapter):
             getattr(self, "_active_sessions", {}),
         )
 
-    def _update_busy(self) -> bool:
+    def _update_busy_reason(self) -> str | None:
         """The ONE busy definition every update path uses (update_now's
-        drain and the scheduled apply): a restart ends the whole gateway
-        process, so a session or pending plugin task on ANY BGOS adapter in
-        it (multiplexed profiles) is busy, and, best effort, a live session
-        on any other platform adapter the gateway runner holds."""
+        drain and the scheduled apply), None when idle. A restart ends the
+        whole gateway process, so a session or pending plugin task on ANY
+        BGOS adapter in it (multiplexed profiles) is `busy`, and, best
+        effort, so is a live session on any other platform adapter the
+        gateway runner holds. A running Hermes background process (terminal
+        tool, background=true) is `background_job` (finding 9)."""
         if any(
             adapter._local_update_busy()
             for adapter in (self, *_live_adapters())
         ):
-            return True
+            return "busy"
         runner = getattr(self, "gateway_runner", None)
         others = getattr(runner, "adapters", None)
         if isinstance(others, dict):
             for adapter in others.values():
                 if adapter is not self and getattr(adapter, "_active_sessions", None):
-                    return True
-        return False
+                    return "busy"
+        if _running_background_processes() > 0:
+            return "background_job"
+        return None
 
-    async def _drain_for_update(self, timeout: float) -> bool:
+    def _update_busy(self) -> bool:
+        return self._update_busy_reason() is not None
+
+    async def _drain_for_update(self, timeout: float) -> str | None:
         """Let in-flight fire-and-forget work settle before the restart.
+        None once idle, else the busy reason still holding at the deadline.
 
         A timeout refuses the update, never cancels a live turn."""
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
-            if not self._update_busy():
-                return True
+            reason = self._update_busy_reason()
+            if reason is None:
+                return None
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                return False
+                return reason
             await asyncio.sleep(min(0.1, remaining))
 
     async def _run_update_rpc(self, rpc_id: str) -> None:
@@ -6416,8 +6457,13 @@ class BGOSAdapter(BasePlatformAdapter):
             )
 
             await self._post_update_progress(rpc_id, "draining")
-            if not await self._drain_for_update(_UPDATE_DRAIN_SECONDS):
-                await self._post_update_progress(rpc_id, "error", message="agent_busy")
+            busy = await self._drain_for_update(_UPDATE_DRAIN_SECONDS)
+            if busy is not None:
+                # A background job is named as such, so the app can say why.
+                await self._post_update_progress(
+                    rpc_id, "error",
+                    message="background_job" if busy == "background_job" else "agent_busy",
+                )
                 return
 
             await self._post_update_progress(rpc_id, "installing")
@@ -6467,7 +6513,7 @@ class BGOSAdapter(BasePlatformAdapter):
 
             # Work can arrive while git runs in its worker thread. Keep the
             # install staged instead of cutting off a turn that arrived then.
-            if not await self._drain_for_update(_UPDATE_DRAIN_SECONDS):
+            if await self._drain_for_update(_UPDATE_DRAIN_SECONDS) is not None:
                 await self._post_update_progress(rpc_id, "staged", target_version=target_version)
                 return
 
@@ -6530,13 +6576,15 @@ class BGOSAdapter(BasePlatformAdapter):
         return max(stamps) if stamps else None
 
     def _scheduled_safe_moment(self, now: float) -> scheduled_update.SafeMoment:
-        busy = self._update_busy()
+        busy_reason = self._update_busy_reason()
+        busy = busy_reason is not None
         self._scheduled_update_idle_since = scheduled_update.next_idle_since(
             busy=busy, idle_since=self._scheduled_update_idle_since, now=now,
         )
         return scheduled_update.decide_safe_moment(
             now=now,
             busy=busy,
+            busy_reason=busy_reason or "busy",
             idle_since=self._scheduled_update_idle_since,
             last_message_at=self._last_message_at(),
             not_before=self._scheduled_update_not_before,
@@ -6666,10 +6714,11 @@ class BGOSAdapter(BasePlatformAdapter):
             )
             # The heartbeat POST took real time: one last look before the
             # point of no return. Never cancel or interrupt a turn.
-            if self._update_busy():
+            busy = self._update_busy_reason()
+            if busy is not None:
                 self._scheduled_update_idle_since = None
                 await self._report_scheduled_update(
-                    "staged", target_version=target_version, message="busy",
+                    "staged", target_version=target_version, message=busy,
                 )
                 return "staged"
             # Count the attempt BEFORE the restart (the count must survive

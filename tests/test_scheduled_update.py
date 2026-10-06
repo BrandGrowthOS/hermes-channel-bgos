@@ -160,6 +160,11 @@ def _moment(**overrides) -> SafeMoment:
         # Same busy definition as the update_now drain: a live session or
         # pending plugin task is never interrupted.
         ({"busy": True}, SafeMoment(False, "busy")),
+        # The caller names why (finding 9: a Hermes background process).
+        (
+            {"busy": True, "busy_reason": "background_job"},
+            SafeMoment(False, "background_job"),
+        ),
         # Idle not yet held for the whole quiet window.
         ({"idle_since": None}, SafeMoment(False, "settling")),
         ({"idle_since": 10_000.0 - QUIET_SECONDS + 1}, SafeMoment(False, "settling")),

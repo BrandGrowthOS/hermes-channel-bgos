@@ -10,6 +10,8 @@ No subprocess, no network: the restart is a recording fake.
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -472,6 +474,111 @@ async def test_a_message_on_another_bgos_adapter_defers(sched):
     finally:
         bgos_adapter_module._unregister_live_adapter(other)
         await other._real_api.close()  # type: ignore[attr-defined]
+
+
+def _inject_process_registry(monkeypatch, registry: Any) -> None:
+    """Stand in for Hermes upstream's tools/process_registry.py (the module
+    singleton the terminal tool registers background=true processes in)."""
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = []  # a package, so the submodule import resolves
+    module = types.ModuleType("tools.process_registry")
+    module.process_registry = registry
+    tools_pkg.process_registry = module
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.process_registry", module)
+
+
+class FakeProcessRegistry:
+    def __init__(self, running: int) -> None:
+        self.running = running
+
+    def count_running(self) -> int:
+        return self.running
+
+
+async def test_a_running_background_process_is_busy(sched, monkeypatch):
+    """Finding 9: a process the terminal tool started with background=true
+    dies with the gateway, so it holds the scheduled apply off for as long
+    as it runs, and the idle window starts over when it ends."""
+    adapter, _api, clock, state = sched
+    registry = FakeProcessRegistry(running=1)
+    _inject_process_registry(monkeypatch, registry)
+    assert await _tick(adapter) == "background_job"
+    clock[0] += 10 * QUIET
+    assert await _tick(adapter) == "background_job"
+    assert state.applied == [] and state.restarts == []
+    registry.running = 0
+    assert await _tick(adapter) == "settling"
+    clock[0] += QUIET
+    assert await _tick(adapter) == "restarting"
+
+
+async def test_a_background_process_starting_during_the_pull_keeps_it_staged(
+    sched, monkeypatch,
+):
+    adapter, _api, clock, state = sched
+    registry = FakeProcessRegistry(running=0)
+    _inject_process_registry(monkeypatch, registry)
+
+    def apply_then_a_job_starts():
+        registry.running = 1
+        return AppliedUpdate(__version__, NEWER)
+
+    state.apply_result = apply_then_a_job_starts
+    assert await _idle_through_quiet_window(adapter, clock) == "staged"
+    assert state.restarts == []
+
+
+async def test_a_registry_that_cannot_answer_is_busy(sched, monkeypatch):
+    """Present but failing: unknown is unsafe (a guard that fails open would
+    kill a live job), unlike an older Hermes that has no registry at all."""
+    adapter, _api, _clock, state = sched
+
+    class Broken:
+        def count_running(self) -> int:
+            raise RuntimeError("registry lock poisoned")
+
+    _inject_process_registry(monkeypatch, Broken())
+    assert await _tick(adapter) == "background_job"
+    assert state.restarts == []
+
+
+@pytest.mark.parametrize("missing", ["module", "method"])
+async def test_an_older_hermes_without_the_registry_counts_zero_and_logs_once(
+    sched, monkeypatch, caplog, missing,
+):
+    adapter, _api, clock, state = sched
+    monkeypatch.setattr(
+        bgos_adapter_module, "_background_registry_absent_logged", False,
+    )
+    if missing == "module":
+        # A None entry makes the import raise ImportError, as on a Hermes
+        # that predates tools/process_registry.py.
+        monkeypatch.setitem(sys.modules, "tools.process_registry", None)
+    else:
+        _inject_process_registry(monkeypatch, object())
+    caplog.set_level("INFO", logger=bgos_adapter_module.log.name)
+    assert await _tick(adapter) == "settling"
+    clock[0] += QUIET
+    assert await _tick(adapter) == "restarting"
+    absent = [
+        r for r in caplog.records if "process registry" in r.getMessage()
+    ]
+    assert len(absent) == 1
+
+
+async def test_update_now_refuses_while_a_background_process_runs(
+    sched, monkeypatch,
+):
+    adapter, api, _clock, state = sched
+    monkeypatch.setattr(bgos_adapter_module, "_UPDATE_DRAIN_SECONDS", 0.2)
+    _inject_process_registry(monkeypatch, FakeProcessRegistry(running=2))
+    await adapter._handle_update_rpc({"rpcId": "rpc-bg", "op": "update_now"})
+    await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
+    stages = [body["stage"] for _rpc, body in api.progresses]
+    assert stages == ["draining", "error"]
+    assert api.progresses[-1][1]["message"] == "background_job"
+    assert state.applied == [] and state.restarts == []
 
 
 async def test_another_platform_adapter_with_a_live_session_blocks(sched):
