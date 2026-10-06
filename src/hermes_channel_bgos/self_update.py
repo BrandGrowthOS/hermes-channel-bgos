@@ -287,6 +287,16 @@ _LAUNCHD_TARGET_RE = re.compile(
 
 _PID_LINE_RE = re.compile(r"^[ \t]*pid = (\S+)[ \t]*$", re.MULTILINE)
 
+# Hermes upstream's launchd ProgramArguments since 2026-08-15 (1db9273584,
+# hermes_cli/gateway.py _timestamped_stderr_gateway_command): `python -m
+# hermes_cli.stderr_timestamp --error-log <path> -- <gateway run>`. The
+# wrapper Popen()s the gateway as its child and never execs, so the job's
+# pid is the wrapper's. It forwards SIGTERM to its child, and launchd ends
+# the job's process group, so a kickstart -k of that job restarts this
+# gateway exactly as it does a direct one (upstream's own launchd_restart
+# kickstarts the wrapped job).
+_STDERR_WRAPPER_RE = re.compile(r"(?:^|\s)-m\s+hermes_cli\.stderr_timestamp(?:\s|$)")
+
 _launchd_result: object = _UNIT_UNRESOLVED
 
 # Default for _probe_launchd_job's hermes_home: read the process env.
@@ -295,7 +305,8 @@ _HOME_FROM_ENV: object = object()
 
 def launchd_service_target() -> str | None:
     """`<domain>/<uid>/<label>` (domain gui or user) of the launchd job
-    whose running pid IS this process, else None.
+    whose running pid IS this process, or is Hermes's stderr timestamp
+    wrapper whose child this process is, else None.
 
     Probed once and cached for the process lifetime (supervision cannot
     change mid-run), like systemd_user_unit. Design 2.3: on macOS the
@@ -329,15 +340,39 @@ def _launchd_print_pid(body: str | None) -> int | None:
     return int(match.group(1))
 
 
+def _is_hermes_stderr_wrapper(command: str | None) -> bool:
+    """Pure: is this command line Hermes's launchd stderr timestamp wrapper?"""
+    return bool(_STDERR_WRAPPER_RE.search(command or ""))
+
+
+def _process_command(pid: int, run: Callable[..., Any]) -> str | None:
+    """The full command line of `pid` (`ps -ww`: never cut to a terminal
+    width), else None. Never raises."""
+    try:
+        result = run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "").strip() or None
+
+
 def _probe_launchd_job(
     *,
     platform: str | None = None,
     uid: int | None = None,
     pid: int | None = None,
+    ppid: int | None = None,
     hermes_home: str | None | object = _HOME_FROM_ENV,
     run: Callable[..., Any] | None = None,
 ) -> str | None:
-    """Every argument is injectable so tests never run launchctl."""
+    """Every argument is injectable so tests never run launchctl or ps."""
     if (platform if platform is not None else sys.platform) != "darwin":
         return None
     try:
@@ -345,6 +380,7 @@ def _probe_launchd_job(
     except Exception:
         return None
     pid = os.getpid() if pid is None else pid
+    ppid = os.getppid() if ppid is None else ppid
     if hermes_home is _HOME_FROM_ENV:
         # The PROCESS home (what the LaunchAgent started us with), not a
         # multiplex profile's context-local home.
@@ -368,11 +404,20 @@ def _probe_launchd_job(
                 continue
             if result.returncode != 0:
                 continue
-            # A loaded job running ANOTHER pid (a second Hermes, a wrapper
+            # A loaded job running ANOTHER pid (a second Hermes, a script
             # that did not exec, the same label in the other domain) is not
             # authority: kickstart -k would kill that process and leave
-            # this one running beside the new instance.
-            if _launchd_print_pid(result.stdout) == pid:
+            # this one running beside the new instance. The one exception
+            # is Hermes's own stderr wrapper as our direct parent (what
+            # `hermes gateway install` writes today): it forwards the stop.
+            job_pid = _launchd_print_pid(result.stdout)
+            if job_pid == pid:
+                return target
+            if (
+                job_pid is not None
+                and job_pid == ppid
+                and _is_hermes_stderr_wrapper(_process_command(ppid, run))
+            ):
                 return target
     return None
 

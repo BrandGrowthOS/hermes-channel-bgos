@@ -758,13 +758,111 @@ def test_launchd_probe_finds_the_job_that_owns_this_pid() -> None:
 
 
 def test_launchd_probe_refuses_a_job_running_another_pid() -> None:
-    """A loaded ai.hermes.gateway that is NOT this process (a second Hermes,
-    a wrapper script) is no relaunch authority: kickstart -k would kill the
-    wrong process and leave this one running."""
+    """A loaded ai.hermes.gateway that is NOT this process (a second Hermes)
+    is no relaunch authority: kickstart -k would kill the wrong process and
+    leave this one running."""
     fake = _FakeLaunchctl({"gui/501/ai.hermes.gateway": _launchctl_print(999)})
     assert self_update._probe_launchd_job(
-        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+        platform="darwin", uid=501, pid=4242, ppid=1, hermes_home=None, run=fake,
     ) is None
+
+
+# Hermes upstream since 2026-08-15 (1db9273584) writes ProgramArguments
+# `python -m hermes_cli.stderr_timestamp --error-log ... -- <gateway run>`:
+# the wrapper Popen()s the gateway as its child and never execs, so launchd's
+# job pid is the WRAPPER's, this process's parent (finding H2). That wrapper
+# forwards SIGTERM to its child and launchd ends the job's process group, so
+# kickstart -k on the job restarts this gateway like a direct one.
+
+WRAPPER_ARGV = (
+    "/Users/kc/.hermes/hermes-agent/venv/bin/python -m hermes_cli.stderr_timestamp"
+    " --error-log /Users/kc/.hermes/logs/gateway.error.log --"
+    " /Users/kc/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main"
+    " gateway run --external-supervisor"
+)
+
+
+class _FakeLaunchctlAndPs(_FakeLaunchctl):
+    """Also answers `ps -o command= -p <pid>` from a pid -> argv table."""
+
+    def __init__(self, bodies: dict[str, str], commands: dict[int, str]) -> None:
+        super().__init__(bodies)
+        self.commands = commands
+
+    def __call__(self, argv, **kwargs):
+        if argv[0] == "ps":
+            self.calls.append(list(argv))
+            assert kwargs.get("timeout"), "a probe must never hang the heartbeat"
+            command = self.commands.get(int(argv[-1]))
+            if command is None:
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout=command + "\n", stderr="")
+        return super().__call__(argv, **kwargs)
+
+
+def test_launchd_probe_accepts_hermes_stderr_wrapper_as_the_job() -> None:
+    fake = _FakeLaunchctlAndPs(
+        {"gui/501/ai.hermes.gateway": _launchctl_print(4200)},
+        {4200: WRAPPER_ARGV},
+    )
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
+        run=fake,
+    ) == "gui/501/ai.hermes.gateway"
+    assert ["ps", "-ww", "-o", "command=", "-p", "4200"] in fake.calls
+
+
+def test_launchd_probe_refuses_a_parent_that_is_not_the_hermes_wrapper() -> None:
+    """A job whose pid is our parent but runs something else (a shell
+    script that did not exec) is no authority: nothing says it forwards
+    the stop to this process."""
+    fake = _FakeLaunchctlAndPs(
+        {"gui/501/ai.hermes.gateway": _launchctl_print(4200)},
+        {4200: "/bin/bash /Users/kc/bin/run-hermes.sh"},
+    )
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
+        run=fake,
+    ) is None
+
+
+def test_launchd_probe_refuses_the_wrapper_when_ps_cannot_answer() -> None:
+    fake = _FakeLaunchctlAndPs(
+        {"gui/501/ai.hermes.gateway": _launchctl_print(4200)}, {},
+    )
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
+        run=fake,
+    ) is None
+
+
+def test_launchd_probe_refuses_a_wrapper_that_is_not_our_parent() -> None:
+    """The wrapper of ANOTHER gateway (same label, a second Hermes) is not
+    this process's job, whatever its argv says."""
+    fake = _FakeLaunchctlAndPs(
+        {"gui/501/ai.hermes.gateway": _launchctl_print(5000)},
+        {5000: WRAPPER_ARGV},
+    )
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
+        run=fake,
+    ) is None
+    assert not any(call[0] == "ps" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (WRAPPER_ARGV, True),
+        ("python3.11 -m hermes_cli.stderr_timestamp --error-log x -- y", True),
+        ("python -m hermes_cli.main gateway run", False),
+        ("python -m hermes_cli.stderr_timestamp_evil --error-log x", False),
+        ("/bin/sh -c echo -m hermes_cli.stderr_timestampx", False),
+        ("", False),
+    ],
+)
+def test_is_hermes_stderr_wrapper(command, expected) -> None:
+    assert self_update._is_hermes_stderr_wrapper(command) is expected
 
 
 def test_launchd_probe_tries_the_profile_label() -> None:
