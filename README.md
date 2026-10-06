@@ -18,6 +18,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/BrandGrowthOS/hermes-channel
 
 The installer detects the Hermes checkout and Python environment, clones/updates this plugin, installs it into the exact Hermes interpreter, registers BGOS through the modern plugin registry when available, falls back to the legacy fork patch when needed, writes the BGOS env defaults, optionally pairs with a BGOS code, restarts the gateway when it can detect the service, and finishes with `hermes-bgos-doctor`.
 
+**Recommended: run `hermes gateway install` once.** It is what keeps the agent running: Hermes installs its own service (a systemd user unit with `Restart=always` and linger on Linux, a launchd agent with `KeepAlive` on macOS, a task on Windows), so the gateway comes back after a crash or a reboot. This plugin installs no service of its own. When the installer finds no managed gateway it says so and recommends this step. The same service is what lets plugin updates finish on their own (see [Updates at idle](#updates-at-idle-0300)).
+
 For non-interactive installs:
 
 ```bash
@@ -52,6 +54,8 @@ Pin a release tag or commit with `--pin v0.26.0 --yes` or
 `--pin <commit-sha> --yes`. After an applied update, the command verifies the
 version in a fresh Python process and prints the detected launchd or systemd
 restart command. It never executes the restart.
+
+On a gateway run as a service (`hermes gateway install`), you usually do not need this command: since 0.30.0 the plugin updates itself at an idle moment and restarts through that service. See [Updates at idle](#updates-at-idle-0300).
 
 **v0.23.0 (2026-08-04) - Install-time topology guard.** The 0.22.0 route-to-profile fix shipped and the two-agent bug still survived on a live host, because the topology around the code was broken and only a connect-time log line said so. Now `hermes-pair-bgos` refuses to pair a multi-route catalog until the host topology is real (profile per route, `gateway.multiplex_profiles` on, no stray per-profile `secrets/bgos.json`), and after the exchange it reports any other ACTIVE pairing serving the same routes (the double-answer re-pair leftover). `hermes-bgos-doctor` re-checks all of it any time, plus two deeper layers: a `SOUL.md` that Hermes's prompt-injection scanner silently replaces with a `[BLOCKED: ...]` placeholder, and sessions in `state.db` whose stored system prompt still carries that placeholder (they replay it forever). Upgrade note for existing installs: nothing changes at runtime; run `hermes-bgos-doctor` once after upgrading, and fix what it prints. If you intentionally run an exotic layout, `--skip-topology-check` preserves the old pair behavior.
 
@@ -750,3 +754,13 @@ Expected on v0.5.0: **153 passed, 1 skipped**. The reconnect test needs a real B
 BGOS can request a plugin update from its existing update control. The daemon reports progress and fetches only the official plugin repository, preserving dirty local checkouts and refusing cross-major updates. An active chat, voice, board or peer operation defers the update instead of being interrupted.
 
 Only a verified systemd user service owning this process can restart automatically. Other hosts keep running and report the downloaded update as staged until the operator restarts the gateway. Restart scheduling failures are reported immediately. This updates the channel plugin; it does not upgrade the Hermes host itself. The recent custom call context and opening sentence support remain available.
+
+## Updates at idle (0.30.0)
+
+Plugin updates now finish without anyone pressing Update now, and macOS hosts can restart onto them too.
+
+- **macOS restarts.** Besides a verified systemd user unit, a launchd job counts as relaunch authority when `launchctl print gui/<uid>/ai.hermes.gateway` (or `ai.hermes.gateway-<profile>` for a named profile home) reports this very process as its `pid`. The restart is a detached, 2 second delayed `launchctl kickstart -k`, never a plain exit: a LaunchAgent with `KeepAlive {SuccessfulExit: false}` does not relaunch a clean exit. The heartbeat reports `supervised: launchd`. Update now uses the same rule.
+- **Scheduled apply.** When the daily check finds a newer version with the same major (or a downloaded update is already staged), `BGOS_AUTO_UPDATE` is not off, and a verified supervisor exists, the gateway waits for a safe moment, then downloads the update (or skips straight to the restart when it is already staged) and restarts through that supervisor.
+- **Safe moment.** No active session and no pending voice, board, peer, doctor, profile or batched text work, held for 10 minutes without a break, and no message in or out for 10 minutes. This covers every BGOS agent in the gateway process (multiplexed profiles) and, where the gateway exposes them, live sessions on its other platforms. It is checked again after the download and right before the restart; work that arrives keeps the update staged for the next safe moment. A turn is never cancelled or interrupted.
+- **Progress.** A run nobody asked for has no update request to report to, so it logs `scheduled update stage=...` (the Update now stage names) and sends a heartbeat at once when the update is staged or about to restart, so the app sees the pending version straight away. Failures wait 30 minutes before the next try, and a version that fails to come up after 3 restarts is left for a person (the count lives in `$HERMES_HOME/bgos_scheduled_update.json`).
+- **Unsupervised hosts are unchanged.** Without a verified supervisor nothing is downloaded and nothing exits on its own; Update now still stages the update for the operator's next restart. Set `BGOS_AUTO_UPDATE=0` to turn off both the scheduled apply and Update now.
