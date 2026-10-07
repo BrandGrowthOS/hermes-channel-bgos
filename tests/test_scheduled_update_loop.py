@@ -21,6 +21,7 @@ import pytest
 import hermes_channel_bgos.bgos_adapter as bgos_adapter_module
 from hermes_channel_bgos import __version__, scheduled_update, self_update
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter
+from hermes_channel_bgos.bgos_api import NOT_MODIFIED
 from hermes_channel_bgos.config import BgosConfig
 from hermes_channel_bgos.self_update import AppliedUpdate, SelfUpdateError
 
@@ -1351,6 +1352,31 @@ async def test_a_fresh_tap_after_a_failed_reopen_fetch_still_comes_after_what_wa
     await asyncio.sleep(0.05)
     assert received == ["wait, change of plan", "Yes", "No"]
     assert api.fetches == [500]
+
+
+@pytest.mark.parametrize("answer", ["empty", "not_modified"])
+async def test_a_reopen_fetch_that_returns_nothing_delivers_every_held_tap(
+    sched, answer,
+):
+    """Only a failed fetch keeps a tap waiting. When the fetch answers with
+    nothing (the held message was deleted, or a 304), no held message is
+    still to come, so the tap held after it goes now and the reopen ends."""
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+    await _hold_a_message_then_a_tap(adapter, clock)
+    if answer == "not_modified":
+
+        async def unchanged(last_id: int):
+            api.fetches.append(last_id)
+            return NOT_MODIFIED
+
+        api.fetch_inbound_since = unchanged  # type: ignore[method-assign]
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    await adapter._run_backfill(adapter._load_last_id())
+    await asyncio.sleep(0.05)
+    assert received == ["Yes"]
+    assert api.fetches == [500]
+    assert adapter._intake_resume_cursor is None
 
 
 async def test_every_bgos_adapter_in_the_process_holds(sched):
