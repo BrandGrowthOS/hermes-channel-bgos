@@ -505,6 +505,9 @@ async def test_boot_heartbeat_reports_readiness_and_latest_version(
     monkeypatch.setattr(
         self_update, "pending_restart_version", lambda clone_dir=None: None,
     )
+    # The scheduled tick connect() starts probes the pin under a supervisor:
+    # never run git against the checkout the suite runs from.
+    monkeypatch.setattr(self_update, "clone_pinned", lambda clone_dir=None: False)
     monkeypatch.delenv("BGOS_AUTO_UPDATE", raising=False)
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
         200, {"pairing_id": 42, "assistants": []},
