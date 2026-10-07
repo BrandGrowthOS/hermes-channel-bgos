@@ -1234,6 +1234,67 @@ async def test_a_held_callback_is_delivered_when_intake_reopens(sched, monkeypat
     assert pressed == ["menu:next"]
 
 
+_FRESH_CLICK = {
+    **_CLICK, "messageId": 10, "buttonText": "No", "callbackData": "opt_no",
+}
+
+
+async def _hold_a_message_then_a_tap(adapter, clock) -> None:
+    """Cursor 500, the restart is committed, then the user types 501 and
+    taps 'Yes': both held, the tap marked as coming after 501."""
+    adapter._save_last_id(500)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_inbound(_message(501, "wait, change of plan"))
+    await adapter._handle_inbound_click(dict(_CLICK))
+
+
+async def test_a_fresh_tap_after_the_hold_lapses_comes_after_what_was_held(sched):
+    """Review 3, F3-fresh-tap-jumps-held: the hold lapses and the user taps
+    again before the next poll. The fresh tap must not reach the agent
+    ahead of the message and the tap held before it: it fetches what was
+    held first, as a fresh typed message does."""
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+    await _hold_a_message_then_a_tap(adapter, clock)
+
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    api.inbound = [_message(501, "wait, change of plan")]
+    await adapter._handle_inbound_click(dict(_FRESH_CLICK))
+    await asyncio.sleep(0.05)
+    assert received == ["wait, change of plan", "Yes", "No"]
+    assert api.fetches == [500]
+    # Each once: the next poll delivers nothing again.
+    await adapter._run_backfill(adapter._load_last_id())
+    await asyncio.sleep(0.05)
+    assert received == ["wait, change of plan", "Yes", "No"]
+
+
+async def test_a_fresh_callback_after_the_hold_lapses_comes_after_what_was_held(
+    sched, monkeypatch,
+):
+    """The same for a button callback (handle_button_press)."""
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+
+    async def handle_button_press(data) -> None:
+        received.append("cb:" + data["callbackData"])
+
+    adapter.handle_button_press = handle_button_press  # type: ignore[attr-defined]
+    monkeypatch.setattr(adapter, "_is_callback_user_authorized", lambda uid: True)
+    adapter._save_last_id(500)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_inbound(_message(501, "wait"))
+    await adapter._handle_callback({"callbackData": "menu:held", "userId": "u"})
+    assert received == []
+
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    api.inbound = [_message(501, "wait")]
+    await adapter._handle_callback({"callbackData": "menu:fresh", "userId": "u"})
+    await asyncio.sleep(0.05)
+    assert received == ["wait", "cb:menu:held", "cb:menu:fresh"]
+    assert api.fetches == [500]
+
+
 async def test_every_bgos_adapter_in_the_process_holds(sched):
     """One restart ends every multiplexed profile's adapter."""
     adapter, _api, clock, _state = sched

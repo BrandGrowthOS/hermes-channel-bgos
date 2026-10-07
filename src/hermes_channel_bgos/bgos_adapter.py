@@ -6122,6 +6122,11 @@ class BGOSAdapter(BasePlatformAdapter):
             log.warning("callback held: a restart is committed (%s)", cb)
             self._hold_interaction("callback", data)
             return
+        # The restart never came: what was held goes first (as in
+        # _handle_inbound), or this newer press jumps ahead of it.
+        resume = self._take_intake_resume_cursor()
+        if resume is not None:
+            await self._run_backfill(resume)
         result = handler(data)
         if asyncio.iscoroutine(result):
             await result
@@ -6198,6 +6203,12 @@ class BGOSAdapter(BasePlatformAdapter):
             )
             self._hold_interaction("click", data)
             return
+        # The restart never came: what was held goes first (as in
+        # _handle_inbound), or this newer tap jumps ahead of it. A held tap
+        # delivered by that replay finds the cursor already taken.
+        resume = self._take_intake_resume_cursor()
+        if resume is not None:
+            await self._run_backfill(resume)
 
         # The agent's natural view: the user's reply is the button's visible
         # label. `__custom__` sentinels carry the user's typed text — prefer
