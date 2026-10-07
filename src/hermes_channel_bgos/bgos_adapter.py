@@ -1505,8 +1505,12 @@ class BGOSAdapter(BasePlatformAdapter):
         # so held messages are fetched again if the restart never comes.
         self._intake_resume_cursor: int | None = None
         # Clicks and button callbacks held by a committed restart, in order:
-        # (kind, payload), delivered if the restart never comes (L2).
-        self._held_interactions: list[tuple[str, dict]] = []
+        # (kind, payload, newest message id held before it), delivered if
+        # the restart never comes (L2), each just ahead of the first held
+        # message that came after it (F3). The newest held message id only
+        # grows, so one from an earlier hold still orders a later one right.
+        self._held_interactions: list[tuple[str, dict, int]] = []
+        self._held_message_high: int = 0
         self._last_inbound_message_at: float | None = None
         self._last_outbound_message_at: float | None = None
         self._scheduled_update_task: asyncio.Task | None = None
@@ -5353,11 +5357,16 @@ class BGOSAdapter(BasePlatformAdapter):
         poll is handed it again.
         """
         if self._intake_held():
+            held_id = data.get("message_id") or data.get("messageId")
             log.info(
                 "inbound message_id=%s held: a restart is committed, it is "
                 "delivered again after it",
-                data.get("message_id") or data.get("messageId"),
+                held_id,
             )
+            held_id = self._int_or_none(held_id)
+            if held_id is not None:
+                # A click held from here on came after this message (F3).
+                self._held_message_high = max(self._held_message_high, held_id)
             return
         resume = self._take_intake_resume_cursor()
         if resume is not None:
@@ -6293,9 +6302,16 @@ class BGOSAdapter(BasePlatformAdapter):
         resume = self._take_intake_resume_cursor()
         if resume is not None:
             last_message_id = min(last_message_id, resume)
+        await self._replay_inbound_since(last_message_id)
         # Clicks and callbacks a hold kept are not in this fetch (it returns
-        # user message rows only): they are delivered from memory.
+        # user message rows only): they are delivered from memory. Those
+        # held before a replayed message went just ahead of it (F3); the
+        # rest go now, also when the fetch failed or returned nothing.
         await self._deliver_held_interactions()
+
+    async def _replay_inbound_since(self, last_message_id: int) -> None:
+        """The fetch and replay _run_backfill describes, from
+        `last_message_id`, with the held clicks in their place."""
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -6349,6 +6365,11 @@ class BGOSAdapter(BasePlatformAdapter):
             return
 
         for msg in normalized:
+            replayed_id = self._int_or_none(msg.get("message_id"))
+            if replayed_id is not None:
+                # A click held before this message arrived goes first: the
+                # agent sees what the user did in the order they did it.
+                await self._deliver_held_interactions(before_message_id=replayed_id)
             try:
                 # Backfill is historical replay, not "user typing fast" —
                 # bypass batching so each missed message lands as its own
@@ -6818,23 +6839,40 @@ class BGOSAdapter(BasePlatformAdapter):
         return cursor
 
     def _hold_interaction(self, kind: str, data: dict) -> None:
-        """Keep a click or callback a committed restart held (L2)."""
+        """Keep a click or callback a committed restart held (L2), with
+        the newest message held before it, its place in the replay (F3)."""
         if len(self._held_interactions) >= _HELD_INTERACTIONS_MAX:
             log.warning("held %s dropped: %d already held", kind, _HELD_INTERACTIONS_MAX)
             return
-        self._held_interactions.append((kind, data))
+        self._held_interactions.append((kind, data, self._held_message_high))
 
-    async def _deliver_held_interactions(self) -> None:
-        """Once intake reopens without the restart: deliver every held
-        click and callback, in order, once. Nothing while still held."""
+    async def _deliver_held_interactions(
+        self, *, before_message_id: int | None = None,
+    ) -> None:
+        """Once intake reopens without the restart: deliver held clicks and
+        callbacks, in order, once. With `before_message_id`, only those held
+        before that message arrived (the replay delivers them just ahead of
+        it); otherwise every one. Nothing while still held."""
         if not self._held_interactions or self._intake_held():
             return
-        held, self._held_interactions = self._held_interactions, []
+        cut = len(self._held_interactions)
+        if before_message_id is not None:
+            # Held in arrival order, so their message marks never go down.
+            cut = 0
+            while (
+                cut < len(self._held_interactions)
+                and self._held_interactions[cut][2] < before_message_id
+            ):
+                cut += 1
+            if cut == 0:
+                return
+        held = self._held_interactions[:cut]
+        self._held_interactions = self._held_interactions[cut:]
         log.warning(
             "inbound intake reopened without the committed restart; "
             "delivering %d held click(s) and callback(s)", len(held),
         )
-        for kind, data in held:
+        for kind, data, _after in held:
             try:
                 if kind == "click":
                     await self._handle_inbound_click(data)

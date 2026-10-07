@@ -1160,6 +1160,62 @@ async def test_a_held_click_is_delivered_when_a_push_reopens_intake(sched):
     assert received == ["Yes", "later"]
 
 
+@pytest.mark.parametrize("reopened_by", ["poll", "push"])
+async def test_held_messages_and_clicks_are_delivered_in_arrival_order(
+    sched, reopened_by,
+):
+    """Finding F3: during a hold the user types, taps an option, then types
+    again. When intake reopens without the restart, the agent gets them in
+    that order. The tap first would start its turn ahead of the message
+    that came before it."""
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+    adapter._save_last_id(500)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_inbound(_message(501, "wait, change of plan"))
+    await adapter._handle_inbound_click(dict(_CLICK))
+    await adapter._handle_inbound(_message(502, "and one more"))
+    await asyncio.sleep(0.05)
+    assert received == []
+
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    api.inbound = [
+        _message(501, "wait, change of plan"), _message(502, "and one more"),
+    ]
+    expected = ["wait, change of plan", "Yes", "and one more"]
+    if reopened_by == "poll":
+        await adapter._run_backfill(adapter._load_last_id())
+    else:
+        api.inbound.append(_message(503, "later"))
+        await adapter._handle_inbound(_message(503, "later"))
+        expected.append("later")
+    await asyncio.sleep(0.05)
+    assert received == expected
+    # Each once: the next poll delivers nothing again.
+    await adapter._run_backfill(adapter._load_last_id())
+    await asyncio.sleep(0.05)
+    assert received == expected
+
+
+async def test_a_held_click_is_delivered_when_the_fetch_fails(sched):
+    """The click is in memory, not in the fetch: a failed fetch still
+    delivers it (the held messages come with the next poll)."""
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+    adapter._save_last_id(500)
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    await adapter._handle_inbound_click(dict(_CLICK))
+
+    async def down(last_id: int):
+        raise RuntimeError("backend down")
+
+    api.fetch_inbound_since = down  # type: ignore[method-assign]
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    await adapter._run_backfill(adapter._load_last_id())
+    await asyncio.sleep(0.05)
+    assert received == ["Yes"]
+
+
 async def test_a_held_callback_is_delivered_when_intake_reopens(sched, monkeypatch):
     adapter, _api, clock, _state = sched
     pressed: list[str] = []
