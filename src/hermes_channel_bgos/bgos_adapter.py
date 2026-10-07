@@ -6708,14 +6708,22 @@ class BGOSAdapter(BasePlatformAdapter):
                 applied = await asyncio.to_thread(self_update.apply_update)
                 target_version = applied.after_version
             except self_update.SelfUpdateError as exc:
-                if exc.reason == "no_update_available":
+                if exc.reason in ("no_update_available", "pinned"):
                     # The clone may already hold a newer install from an
                     # earlier staged run; a restart is then all that is
                     # missing, so update_now completes it instead of
-                    # erroring on a technicality.
+                    # erroring on a technicality. A pinned clone too
+                    # (finding F1): `--pin` checks out and never restarts,
+                    # and a restart onto what is on disk moves no git ref.
+                    # Never backwards there: restarting onto a rollback is
+                    # the operator's step, not an update.
                     pending_version = await asyncio.to_thread(
                         self_update.pending_restart_version,
                     )
+                    if exc.reason == "pinned" and not self_update.decide_version_update(
+                        __version__, pending_version,
+                    ):
+                        pending_version = None
                     if pending_version is None:
                         await self._post_update_progress(
                             rpc_id, "error", message=exc.reason,

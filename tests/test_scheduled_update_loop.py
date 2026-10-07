@@ -29,6 +29,8 @@ pytestmark = pytest.mark.asyncio
 
 _MAJOR, _MINOR, _PATCH = (int(p) for p in __version__.split(".")[:3])
 NEWER = f"{_MAJOR}.{_MINOR + 1}.0"
+NEWEST = f"{_MAJOR}.{_MINOR + 2}.0"
+OLDER = f"{_MAJOR}.{_MINOR - 1}.0"
 QUIET = scheduled_update.QUIET_SECONDS
 LAUNCHD = self_update.Supervisor("launchd", "gui/501/ai.hermes.gateway")
 WALL_EPOCH = 1_790_000_000.0
@@ -492,6 +494,44 @@ async def test_update_now_reports_a_pinned_clone(sched):
 
     state.apply_result = pinned
     await adapter._handle_update_rpc({"rpcId": "rpc-pin", "op": "update_now"})
+    await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
+    assert api.progresses[-1][1] == {
+        "stage": "error", "target_version": None, "message": "pinned",
+    }
+    assert state.restarts == []
+
+
+async def test_update_now_restarts_a_pinned_clone_onto_its_newer_install(sched):
+    """Finding F1: `--pin v<newer> --yes` checks the newer version out and
+    does not restart. Update now completes that the way it completes any
+    staged install: a restart onto what is on disk moves no git ref, so the
+    pin still holds."""
+    adapter, api, _clock, state = sched
+    state.pending = NEWER
+
+    def pinned():
+        raise SelfUpdateError("pinned")
+
+    state.apply_result = pinned
+    await adapter._handle_update_rpc({"rpcId": "rpc-pin-new", "op": "update_now"})
+    await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
+    assert api.progresses[-1][1] == {
+        "stage": "restarting", "target_version": NEWER, "message": None,
+    }
+    assert state.restarts == [LAUNCHD]
+
+
+async def test_update_now_never_restarts_a_pinned_clone_backwards(sched):
+    """A rollback left an older version on disk: that restart is the
+    operator's (the rollback prints it), never an Update now."""
+    adapter, api, _clock, state = sched
+    state.pending = OLDER
+
+    def pinned():
+        raise SelfUpdateError("pinned")
+
+    state.apply_result = pinned
+    await adapter._handle_update_rpc({"rpcId": "rpc-pin-old", "op": "update_now"})
     await asyncio.gather(*adapter._update_tasks, return_exceptions=True)
     assert api.progresses[-1][1] == {
         "stage": "error", "target_version": None, "message": "pinned",
