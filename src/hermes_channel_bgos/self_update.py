@@ -9,8 +9,8 @@ daemon-side facts the contract needs:
   or a URL, the update_rpc frame is `{rpcId, op}` and nothing else),
 - the same-major-newer-only update decision (ported from the openclaw
   plugin's decideVersionUpdate),
-- the systemd user-unit probe that decides whether this process has
-  relaunch authority,
+- the supervisor probes (a systemd user unit on Linux, the launchd job on
+  macOS) that decide whether this process has relaunch authority,
 - `apply_update`: a fast-forward pull of the editable clone the running
   module was imported from (dirty-tree brake, never a reset).
 
@@ -23,10 +23,12 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 import httpx
 
@@ -54,12 +56,16 @@ class SelfUpdateError(RuntimeError):
 
     `reason` is what rides the update_rpc progress `message` field
     (e.g. dirty_tree, fetch_failed, not_a_git_checkout,
-    no_update_available); `detail` stays local in logs.
+    no_update_available); `detail` stays local in logs. `retry_after` is
+    the seconds until a `soak` refusal would pass.
     """
 
-    def __init__(self, reason: str, detail: str = "") -> None:
+    def __init__(
+        self, reason: str, detail: str = "", *, retry_after: float | None = None,
+    ) -> None:
         super().__init__(detail or reason)
         self.reason = reason
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -253,6 +259,191 @@ def pending_restart_version(clone_dir: Path | None = None) -> str | None:
     return on_disk
 
 
+# -----------------------------------------------------------------------------
+# Relaunch authority (launchd job, macOS)
+# -----------------------------------------------------------------------------
+
+# Hermes upstream's LaunchAgent label (`hermes gateway install`; the label
+# update_cli.detect_restart_command probes and install.sh kickstarts). A named
+# profile's gateway gets `ai.hermes.gateway-<profile>`.
+HERMES_LAUNCHD_LABEL = "ai.hermes.gateway"
+
+# A profile name is spliced into a launchd label and a kickstart argv: only
+# the characters Hermes profile names use. Anything else is not probed.
+_PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+# The launchd domains a Hermes gateway job is loaded in, in the order Hermes
+# upstream probes them (hermes_cli/gateway.py _launchd_domain): gui/<uid> for
+# an Aqua login session, user/<uid> for a Background or SSH session.
+_LAUNCHD_DOMAINS = ("gui", "user")
+
+# The only service targets a restart may ever kickstart. `kickstart -k` kills
+# whatever the target names, so a foreign or malformed target is refused even
+# though the probe is the only producer of targets.
+_LAUNCHD_TARGET_RE = re.compile(
+    r"(?:gui|user)/\d+/" + re.escape(HERMES_LAUNCHD_LABEL)
+    + r"(?:-[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?"
+)
+
+_PID_LINE_RE = re.compile(r"^[ \t]*pid = (\S+)[ \t]*$", re.MULTILINE)
+
+# Hermes upstream's launchd ProgramArguments since 2026-08-15 (1db9273584,
+# hermes_cli/gateway.py _timestamped_stderr_gateway_command): `python -m
+# hermes_cli.stderr_timestamp --error-log <path> -- <gateway run>`. The
+# wrapper Popen()s the gateway as its child and never execs, so the job's
+# pid is the wrapper's. It forwards SIGTERM to its child, and launchd ends
+# the job's process group, so a kickstart -k of that job restarts this
+# gateway exactly as it does a direct one (upstream's own launchd_restart
+# kickstarts the wrapped job).
+_STDERR_WRAPPER_RE = re.compile(r"(?:^|\s)-m\s+hermes_cli\.stderr_timestamp(?:\s|$)")
+
+_launchd_result: object = _UNIT_UNRESOLVED
+
+# Default for _probe_launchd_job's hermes_home: read the process env.
+_HOME_FROM_ENV: object = object()
+
+
+def launchd_service_target() -> str | None:
+    """`<domain>/<uid>/<label>` (domain gui or user) of the launchd job
+    whose running pid IS this process, or is Hermes's stderr timestamp
+    wrapper whose child this process is, else None.
+
+    Probed once and cached for the process lifetime (supervision cannot
+    change mid-run), like systemd_user_unit. Design 2.3: on macOS the
+    systemd probe always answers none, so before this every update staged
+    and nothing ever restarted onto it.
+    """
+    global _launchd_result
+    if _launchd_result is not _UNIT_UNRESOLVED:
+        return _launchd_result  # type: ignore[return-value]
+    _launchd_result = _probe_launchd_job()
+    return _launchd_result  # type: ignore[return-value]
+
+
+def _launchd_candidate_labels(hermes_home: str | None) -> list[str]:
+    labels = [HERMES_LAUNCHD_LABEL]
+    if hermes_home:
+        home = Path(hermes_home)
+        # Named profiles live under <root>/profiles/<name>/ (mirrors
+        # hermes_cli.profiles.get_profile_dir, see topology.profile_dir).
+        if home.parent.name == "profiles" and _PROFILE_NAME_RE.fullmatch(home.name):
+            labels.append(f"{HERMES_LAUNCHD_LABEL}-{home.name}")
+    return labels
+
+
+def _launchd_print_pid(body: str | None) -> int | None:
+    """The job's running pid from a `launchctl print` body: the FIRST
+    `pid = N` line (the job's own; nested sections come after it)."""
+    match = _PID_LINE_RE.search(body or "")
+    if match is None or not match.group(1).isdigit():
+        return None
+    return int(match.group(1))
+
+
+def _is_hermes_stderr_wrapper(command: str | None) -> bool:
+    """Pure: is this command line Hermes's launchd stderr timestamp wrapper?"""
+    return bool(_STDERR_WRAPPER_RE.search(command or ""))
+
+
+def _process_command(pid: int, run: Callable[..., Any]) -> str | None:
+    """The full command line of `pid` (`ps -ww`: never cut to a terminal
+    width), else None. Never raises."""
+    try:
+        result = run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "").strip() or None
+
+
+def _probe_launchd_job(
+    *,
+    platform: str | None = None,
+    uid: int | None = None,
+    pid: int | None = None,
+    ppid: int | None = None,
+    hermes_home: str | None | object = _HOME_FROM_ENV,
+    run: Callable[..., Any] | None = None,
+) -> str | None:
+    """Every argument is injectable so tests never run launchctl or ps."""
+    if (platform if platform is not None else sys.platform) != "darwin":
+        return None
+    try:
+        uid = os.getuid() if uid is None else uid
+    except Exception:
+        return None
+    pid = os.getpid() if pid is None else pid
+    ppid = os.getppid() if ppid is None else ppid
+    if hermes_home is _HOME_FROM_ENV:
+        # The PROCESS home (what the LaunchAgent started us with), not a
+        # multiplex profile's context-local home.
+        hermes_home = os.environ.get("HERMES_HOME", "").strip() or None
+    run = run if run is not None else subprocess.run
+    for label in _launchd_candidate_labels(hermes_home):  # type: ignore[arg-type]
+        # Both domains, gui first: a gateway installed from an SSH or
+        # Background session lives in user/<uid>, where a gui-only probe
+        # never finds it (every update would stage forever).
+        for domain in _LAUNCHD_DOMAINS:
+            target = f"{domain}/{uid}/{label}"
+            try:
+                result = run(
+                    ["launchctl", "print", target],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+            except Exception:
+                continue
+            if result.returncode != 0:
+                continue
+            # A loaded job running ANOTHER pid (a second Hermes, a script
+            # that did not exec, the same label in the other domain) is not
+            # authority: kickstart -k would kill that process and leave
+            # this one running beside the new instance. The one exception
+            # is Hermes's own stderr wrapper as our direct parent (what
+            # `hermes gateway install` writes today): it forwards the stop.
+            job_pid = _launchd_print_pid(result.stdout)
+            if job_pid == pid:
+                return target
+            if (
+                job_pid is not None
+                and job_pid == ppid
+                and _is_hermes_stderr_wrapper(_process_command(ppid, run))
+            ):
+                return target
+    return None
+
+
+@dataclass(frozen=True)
+class Supervisor:
+    """A verified relaunch authority: `kind` is the updateReadiness
+    `supervised` value, `name` the unit (systemd) or service target
+    (launchd) the restart addresses."""
+
+    kind: str
+    name: str
+
+
+def verified_supervisor() -> Supervisor | None:
+    """The supervisor that will bring this process back after a restart,
+    or None (then an update may only stage, never exit; decision D8)."""
+    unit = systemd_user_unit()
+    if unit:
+        return Supervisor("systemd", unit)
+    target = launchd_service_target()
+    if target:
+        return Supervisor("launchd", target)
+    return None
+
+
 def update_readiness() -> dict:
     """The heartbeat's updateReadiness object (contract section 1).
 
@@ -260,8 +451,9 @@ def update_readiness() -> dict:
     rollback latch (rollback is the operator-run command update_cli
     prints), so it can never report one tripped.
     """
+    supervisor = verified_supervisor()
     return {
-        "supervised": "systemd" if systemd_user_unit() else "none",
+        "supervised": supervisor.kind if supervisor else "none",
         "autoUpdateEnabled": auto_update_enabled(),
         "rollbackLatched": False,
         "pendingRestartVersion": pending_restart_version(),
@@ -310,22 +502,83 @@ def _local_pyproject_version(clone_dir: Path) -> str:
     return version
 
 
-def apply_update(clone_dir: Path | None = None) -> AppliedUpdate:
+def _held_off_main(root: Path) -> str | None:
+    """None when HEAD is the main branch; otherwise what holds the clone
+    off it (another branch's ref, or "detached HEAD" for a pin or a
+    rollback). Raises git_status_failed when git cannot read the
+    repository."""
+    branch = _git(root, "symbolic-ref", "-q", "HEAD")
+    if branch.returncode not in (0, 1):
+        # Only exit 1 is git's quiet "not a symbolic ref" (a detached HEAD).
+        # Anything else is a repository git cannot read: a failure the app
+        # must see, as the status read reports it, never a quiet pin
+        # (which would also withdraw a failure reported before).
+        raise SelfUpdateError("git_status_failed", branch.stderr)
+    if branch.returncode != 0 or branch.stdout.strip() != f"refs/heads/{MAIN_BRANCH}":
+        return branch.stdout.strip() or "detached HEAD"
+    return None
+
+
+def clone_pinned(clone_dir: Path | None = None) -> bool:
+    """True when the clone is held off main (a pin, a rollback or another
+    branch), so the scheduled apply pulls nothing there: apply_update's
+    `pinned` test, without the fetch, for the scheduled plan (findings F1
+    and F2). False when there is no clone or git cannot read it: those are
+    failures apply_update reports, never a pin. Never raises."""
+    root = clone_dir if clone_dir is not None else clone_root()
+    if root is None or not (root / ".git").exists():
+        return False
+    try:
+        return _held_off_main(root) is not None
+    except SelfUpdateError:
+        return False
+
+
+def soak_remaining(committed_at: float, now: float, soak_seconds: float) -> float:
+    """Pure: seconds until a commit made at `committed_at` (epoch) has been
+    published for `soak_seconds`; 0 once it has."""
+    return max(0.0, committed_at + soak_seconds - now)
+
+
+def apply_update(
+    clone_dir: Path | None = None,
+    *,
+    soak_seconds: float | None = None,
+    now: Callable[[], float] | None = None,
+) -> AppliedUpdate:
     """Fast-forward the editable clone to origin/main and report versions.
 
     Raises SelfUpdateError with a short reason on every refusal path:
-    not_a_git_checkout, dirty_tree (brake: local edits are never touched),
+    not_a_git_checkout, pinned (HEAD is not the main branch: a pin or a
+    rollback left it detached, or a developer has another branch out; it is
+    never moved), dirty_tree (brake: local edits are never touched),
     fetch_failed, no_update_available, major_jump (same-major gate),
     merge_failed (diverged history; ff-only never rewrites), plus the
     plumbing reasons git_unavailable and pyproject_unreadable. The running
     process still serves the OLD code afterwards; the caller owns the
     restart (or reports 'staged' when it has no relaunch authority).
+
+    `soak_seconds` (the unattended scheduled apply only; update_now is a
+    person asking now) also refuses with `soak` while the fetched
+    origin/main commit is younger than that by its git committer time, so a
+    bad release can be pulled before every supervised host takes it. `now`
+    is the epoch clock, injectable for tests.
     """
     root = clone_dir if clone_dir is not None else clone_root()
     if root is None or not (root / ".git").exists():
         raise SelfUpdateError("not_a_git_checkout")
 
     before = _local_pyproject_version(root)
+
+    # Only ever move the main branch. A pin or a rollback (update_cli runs
+    # `git checkout --detach <commit>`) is an operator holding this clone
+    # where it is, and a fast-forward would carry a detached HEAD onto main
+    # just the same: an unattended run would take back a release someone
+    # rolled away from. Another branch is a developer's, not ours to move.
+    # Checked first, so a held clone is a quiet `pinned`, never an error.
+    held = _held_off_main(root)
+    if held is not None:
+        raise SelfUpdateError("pinned", held)
 
     status = _git(root, "status", "--porcelain", "--untracked-files=normal")
     if status.returncode != 0:
@@ -368,6 +621,23 @@ def apply_update(clone_dir: Path | None = None) -> AppliedUpdate:
             raise SelfUpdateError("major_jump")
         raise SelfUpdateError("no_update_available")
 
+    if soak_seconds is not None:
+        # The commit the merge would take, as fetched: a later change on
+        # main restarts the soak even when the version did not move.
+        shown = _git(root, "show", "-s", "--format=%ct", f"origin/{MAIN_BRANCH}")
+        stamp = shown.stdout.strip() if shown.returncode == 0 else ""
+        if not stamp.isdigit():
+            raise SelfUpdateError("fetch_failed", shown.stderr or "no committer time")
+        remaining = soak_remaining(
+            int(stamp), (now or time.time)(), soak_seconds,
+        )
+        if remaining > 0:
+            raise SelfUpdateError(
+                "soak",
+                f"origin/{MAIN_BRANCH} {target_version} needs {int(remaining)}s more",
+                retry_after=remaining,
+            )
+
     merge = _git(root, "merge", "--ff-only", f"origin/{MAIN_BRANCH}")
     if merge.returncode != 0:
         raise SelfUpdateError("merge_failed", merge.stderr)
@@ -400,3 +670,47 @@ def schedule_unit_restart(unit: str) -> bool:
         log.exception("self_update restart spawn failed unit=%s", unit)
         return False
     return result.returncode == 0
+
+
+def schedule_launchd_restart(
+    target: str, *, popen: Callable[..., Any] | None = None,
+) -> bool:
+    """Spawn a fully detached, 2s-delayed `launchctl kickstart -k <target>`.
+
+    launchd has no transient timer like `systemd-run --on-active`, so the
+    delay lives in a child shell in its OWN session: launchd tearing down
+    this job's process group does not take the pending kickstart with it,
+    and this process is free to flush its final progress POST first. It
+    must be kickstart -k, never a plain exit: a KeepAlive {SuccessfulExit:
+    false} plist (this Mac's own gateway) does not relaunch a clean exit.
+    Returns False on a refused target or any spawn failure (never raises).
+    """
+    if not _LAUNCHD_TARGET_RE.fullmatch(target or ""):
+        log.warning("self_update refused launchd restart target=%r", target)
+        return False
+    popen = popen if popen is not None else subprocess.Popen
+    try:
+        popen(
+            [
+                "/bin/sh", "-c", 'sleep 2; exec launchctl kickstart -k "$1"',
+                "bgos-gateway-restart", target,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        log.exception("self_update restart spawn failed target=%s", target)
+        return False
+    return True
+
+
+def schedule_supervisor_restart(supervisor: Supervisor) -> bool:
+    """Hand the restart to whichever verified supervisor owns this process."""
+    if supervisor.kind == "systemd":
+        return schedule_unit_restart(supervisor.name)
+    if supervisor.kind == "launchd":
+        return schedule_launchd_restart(supervisor.name)
+    return False

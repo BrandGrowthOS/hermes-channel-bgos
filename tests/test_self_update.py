@@ -8,6 +8,7 @@ layouts, fetch failures, major jumps).
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -481,6 +482,218 @@ def test_apply_update_fetch_failure(
     assert excinfo.value.reason == "fetch_failed"
 
 
+# Soak (scheduled apply only): the fetched origin/main commit must have been
+# there for 24 hours, so a bad release can be pulled before every supervised
+# host takes it unattended. The clock is injected; the age is the git
+# committer time of the fetched target commit.
+
+DAY = 24 * 60 * 60
+COMMITTED_AT = 1_790_000_000
+
+
+def _commit_all_at(
+    repo: Path, message: str, epoch: int, *, authored_at: int | None = None,
+) -> None:
+    _run_git(repo, "add", "-A")
+    stamp = f"@{epoch} +0000"
+    authored = f"@{authored_at} +0000" if authored_at is not None else stamp
+    subprocess.run(
+        [
+            "git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-m", message,
+        ],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "GIT_COMMITTER_DATE": stamp, "GIT_AUTHOR_DATE": authored},
+    )
+
+
+def test_apply_update_soak_refuses_a_target_younger_than_a_day(cloned_repos) -> None:
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT)
+    before = _run_git(clone, "rev-parse", "HEAD")
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + 3600,
+        )
+    assert excinfo.value.reason == "soak"
+    assert excinfo.value.retry_after == DAY - 3600
+    # Nothing merged: the clone still runs (and stages) nothing new.
+    assert _run_git(clone, "rev-parse", "HEAD") == before
+
+
+def test_apply_update_soak_passes_once_the_target_is_a_day_old(cloned_repos) -> None:
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT)
+
+    applied = self_update.apply_update(
+        clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + DAY,
+    )
+    assert applied == AppliedUpdate("0.28.0", "0.28.1")
+
+
+def test_apply_update_soak_reads_the_fetched_target_commit(cloned_repos) -> None:
+    """The age is the NEWEST commit fetched (what the merge would take), not
+    the commit that bumped the version: a later change restarts the soak."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT - 2 * DAY)
+    (origin / "fix.txt").write_text("late change", encoding="utf-8")
+    _commit_all_at(origin, "late change", COMMITTED_AT)
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + 60,
+        )
+    assert excinfo.value.reason == "soak"
+
+
+def test_apply_update_soak_reads_the_committer_time_not_the_author_time(
+    cloned_repos,
+) -> None:
+    """A change written days ago but landed on main (rebased, cherry-picked)
+    just now has only just been published: the age is its committer time."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT, authored_at=COMMITTED_AT - 2 * DAY)
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + 60,
+        )
+    assert excinfo.value.reason == "soak"
+
+
+def test_apply_update_without_a_soak_takes_a_fresh_commit(cloned_repos) -> None:
+    """update_now passes no soak: a person asked for it now."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT)
+    applied = self_update.apply_update(clone, now=lambda: COMMITTED_AT)
+    assert applied.after_version == "0.28.1"
+
+
+# A pin or a rollback (update_cli: `git checkout --detach <commit>`) is an
+# operator holding this clone where it is. apply_update only ever moves the
+# main branch: a detached HEAD, or any other branch, is refused as `pinned`
+# and left exactly where it is, on every path (finding H1).
+
+
+def _head_is_detached(repo: Path) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "-q", "HEAD"],
+        capture_output=True, text=True, check=False,
+    )
+    return result.returncode == 1
+
+
+@pytest.mark.parametrize("soak", [DAY, None], ids=["scheduled", "update_now"])
+def test_apply_update_refuses_a_pinned_detached_head(cloned_repos, soak) -> None:
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all_at(origin, "v0.28.1", COMMITTED_AT)
+    _run_git(clone, "checkout", "--detach", "HEAD")
+    before = _run_git(clone, "rev-parse", "HEAD")
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=soak, now=lambda: COMMITTED_AT + 2 * DAY,
+        )
+    assert excinfo.value.reason == "pinned"
+    assert _run_git(clone, "rev-parse", "HEAD") == before
+    assert _head_is_detached(clone)
+
+
+def test_apply_update_refuses_a_branch_other_than_main(cloned_repos) -> None:
+    """A developer's branch is not ours to fast-forward onto main."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all(origin, "v0.28.1")
+    _run_git(clone, "checkout", "-b", "local-work")
+    before = _run_git(clone, "rev-parse", "HEAD")
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(clone)
+    assert excinfo.value.reason == "pinned"
+    assert _run_git(clone, "rev-parse", "HEAD") == before
+
+
+def test_apply_update_reports_an_unreadable_repository_not_a_pin(
+    cloned_repos, monkeypatch,
+) -> None:
+    """Only git's quiet "not a symbolic ref" (exit 1, a detached HEAD) is a
+    pin. A repository git cannot read (exit 128) is a failure the app must
+    see, as the status read reported it before the pin check existed: read
+    as `pinned`, the scheduled apply would wait on it quietly and withdraw
+    a failure it reported before."""
+    _origin, clone = cloned_repos
+    # Git must not climb out of the broken clone to a repository above it.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(clone.parent))
+    (clone / ".git" / "HEAD").write_text("not a ref\n", encoding="utf-8")
+
+    with pytest.raises(SelfUpdateError) as excinfo:
+        self_update.apply_update(
+            clone, soak_seconds=DAY, now=lambda: COMMITTED_AT + 2 * DAY,
+        )
+    assert excinfo.value.reason == "git_status_failed"
+
+
+def test_clone_pinned_reads_the_head_apply_update_refuses(cloned_repos) -> None:
+    """The scheduled plan's cheap probe (findings F1 and F2): the same
+    branch test as apply_update's `pinned`, without a fetch, so a held
+    clone is known before a run is planned."""
+    _origin, clone = cloned_repos
+    assert self_update.clone_pinned(clone) is False
+    _run_git(clone, "checkout", "--detach", "HEAD")
+    assert self_update.clone_pinned(clone) is True
+    _run_git(clone, "checkout", "-b", "local-work")
+    assert self_update.clone_pinned(clone) is True
+    _run_git(clone, "checkout", "main")
+    assert self_update.clone_pinned(clone) is False
+
+
+def test_clone_pinned_is_false_when_git_cannot_say(
+    cloned_repos, monkeypatch, tmp_path: Path,
+) -> None:
+    """No clone, or one git cannot read, is a failure apply_update reports,
+    never a pin that would withdraw it."""
+    _origin, clone = cloned_repos
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert self_update.clone_pinned(plain) is False
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(clone.parent))
+    (clone / ".git" / "HEAD").write_text("not a ref\n", encoding="utf-8")
+    assert self_update.clone_pinned(clone) is False
+
+
+def test_apply_update_takes_updates_again_once_back_on_main(cloned_repos) -> None:
+    """Undoing the pin is `git checkout main` (or re-running install.sh)."""
+    origin, clone = cloned_repos
+    _write_version(origin, "0.28.1")
+    _commit_all(origin, "v0.28.1")
+    _run_git(clone, "checkout", "--detach", "HEAD")
+    _run_git(clone, "checkout", "main")
+
+    assert self_update.apply_update(clone) == AppliedUpdate("0.28.0", "0.28.1")
+
+
+@pytest.mark.parametrize(
+    ("committed_at", "now", "expected"),
+    [
+        (1_000, 1_000, DAY),
+        (1_000, 1_000 + DAY - 1, 1),
+        (1_000, 1_000 + DAY, 0),
+        (1_000, 1_000 + 2 * DAY, 0),
+        # A committer clock ahead of ours waits until a day past its stamp.
+        (1_000 + 600, 1_000, DAY + 600),
+    ],
+)
+def test_soak_remaining(committed_at, now, expected) -> None:
+    assert self_update.soak_remaining(committed_at, now, DAY) == expected
+
+
 def test_apply_update_rejects_non_checkout(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -541,3 +754,444 @@ def test_schedule_unit_restart_spawn_failure_is_false(
 def test_schedule_unit_restart_rejected_timer_is_false(monkeypatch):
     monkeypatch.setattr(self_update.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
     assert self_update.schedule_unit_restart("hermes-gateway.service") is False
+
+
+# -----------------------------------------------------------------------------
+# launchd relaunch-authority probe (design 2.3: on macOS the systemd probe
+# always answers none, so without this every update stages forever)
+# -----------------------------------------------------------------------------
+
+
+def _launchctl_print(pid: int, label: str = "ai.hermes.gateway") -> str:
+    """Shape of a real `launchctl print gui/<uid>/<label>` body (tabs)."""
+    return (
+        f"gui/501/{label} = {{\n"
+        "\tactive count = 1\n"
+        f"\tpath = /Users/kc/Library/LaunchAgents/{label}.plist\n"
+        "\ttype = LaunchAgent\n"
+        "\tstate = running\n"
+        "\n"
+        "\tprogram = /Users/kc/.hermes/hermes-agent/venv/bin/python\n"
+        f"\tpid = {pid}\n"
+        "\timmediate reason = inefficient\n"
+        "}\n"
+    )
+
+
+class _FakeLaunchctl:
+    """Recording stand-in for subprocess.run: answers `launchctl print` per
+    service target from a table, everything else is 'Could not find
+    service' (exit 113, what launchctl prints for an unknown label)."""
+
+    def __init__(self, bodies: dict[str, str]) -> None:
+        self.bodies = bodies
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        assert kwargs.get("timeout"), "a probe must never hang the heartbeat"
+        body = self.bodies.get(argv[-1])
+        if argv[:2] != ["launchctl", "print"] or body is None:
+            return SimpleNamespace(returncode=113, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=body, stderr="")
+
+
+def test_launchd_probe_finds_the_job_that_owns_this_pid() -> None:
+    fake = _FakeLaunchctl({"gui/501/ai.hermes.gateway": _launchctl_print(4242)})
+    target = self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    )
+    assert target == "gui/501/ai.hermes.gateway"
+    assert fake.calls[0] == ["launchctl", "print", "gui/501/ai.hermes.gateway"]
+
+
+def test_launchd_probe_refuses_a_job_running_another_pid() -> None:
+    """A loaded ai.hermes.gateway that is NOT this process (a second Hermes)
+    is no relaunch authority: kickstart -k would kill the wrong process and
+    leave this one running."""
+    fake = _FakeLaunchctl({"gui/501/ai.hermes.gateway": _launchctl_print(999)})
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=1, hermes_home=None, run=fake,
+    ) is None
+
+
+# Hermes upstream since 2026-08-15 (1db9273584) writes ProgramArguments
+# `python -m hermes_cli.stderr_timestamp --error-log ... -- <gateway run>`:
+# the wrapper Popen()s the gateway as its child and never execs, so launchd's
+# job pid is the WRAPPER's, this process's parent (finding H2). That wrapper
+# forwards SIGTERM to its child and launchd ends the job's process group, so
+# kickstart -k on the job restarts this gateway like a direct one.
+
+WRAPPER_ARGV = (
+    "/Users/kc/.hermes/hermes-agent/venv/bin/python -m hermes_cli.stderr_timestamp"
+    " --error-log /Users/kc/.hermes/logs/gateway.error.log --"
+    " /Users/kc/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main"
+    " gateway run --external-supervisor"
+)
+
+
+class _FakeLaunchctlAndPs(_FakeLaunchctl):
+    """Also answers `ps -o command= -p <pid>` from a pid -> argv table."""
+
+    def __init__(self, bodies: dict[str, str], commands: dict[int, str]) -> None:
+        super().__init__(bodies)
+        self.commands = commands
+
+    def __call__(self, argv, **kwargs):
+        if argv[0] == "ps":
+            self.calls.append(list(argv))
+            assert kwargs.get("timeout"), "a probe must never hang the heartbeat"
+            command = self.commands.get(int(argv[-1]))
+            if command is None:
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout=command + "\n", stderr="")
+        return super().__call__(argv, **kwargs)
+
+
+def test_launchd_probe_accepts_hermes_stderr_wrapper_as_the_job() -> None:
+    fake = _FakeLaunchctlAndPs(
+        {"gui/501/ai.hermes.gateway": _launchctl_print(4200)},
+        {4200: WRAPPER_ARGV},
+    )
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
+        run=fake,
+    ) == "gui/501/ai.hermes.gateway"
+    assert ["ps", "-ww", "-o", "command=", "-p", "4200"] in fake.calls
+
+
+def test_launchd_probe_refuses_a_parent_that_is_not_the_hermes_wrapper() -> None:
+    """A job whose pid is our parent but runs something else (a shell
+    script that did not exec) is no authority: nothing says it forwards
+    the stop to this process."""
+    fake = _FakeLaunchctlAndPs(
+        {"gui/501/ai.hermes.gateway": _launchctl_print(4200)},
+        {4200: "/bin/bash /Users/kc/bin/run-hermes.sh"},
+    )
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
+        run=fake,
+    ) is None
+
+
+def test_launchd_probe_refuses_the_wrapper_when_ps_cannot_answer() -> None:
+    fake = _FakeLaunchctlAndPs(
+        {"gui/501/ai.hermes.gateway": _launchctl_print(4200)}, {},
+    )
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
+        run=fake,
+    ) is None
+
+
+def test_launchd_probe_refuses_a_wrapper_that_is_not_our_parent() -> None:
+    """The wrapper of ANOTHER gateway (same label, a second Hermes) is not
+    this process's job, whatever its argv says."""
+    fake = _FakeLaunchctlAndPs(
+        {"gui/501/ai.hermes.gateway": _launchctl_print(5000)},
+        {5000: WRAPPER_ARGV},
+    )
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
+        run=fake,
+    ) is None
+    assert not any(call[0] == "ps" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (WRAPPER_ARGV, True),
+        ("python3.11 -m hermes_cli.stderr_timestamp --error-log x -- y", True),
+        ("python -m hermes_cli.main gateway run", False),
+        ("python -m hermes_cli.stderr_timestamp_evil --error-log x", False),
+        ("/bin/sh -c echo -m hermes_cli.stderr_timestampx", False),
+        ("", False),
+    ],
+)
+def test_is_hermes_stderr_wrapper(command, expected) -> None:
+    assert self_update._is_hermes_stderr_wrapper(command) is expected
+
+
+def test_launchd_probe_tries_the_profile_label() -> None:
+    """Hermes names a named profile's agent ai.hermes.gateway-<profile>;
+    the profile is the HERMES_HOME leaf under profiles/ (topology.profile_dir
+    mirrors hermes_cli.profiles.get_profile_dir)."""
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway-ava": _launchctl_print(77, "ai.hermes.gateway-ava"),
+    })
+    target = self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=77,
+        hermes_home="/Users/kc/.hermes/profiles/ava", run=fake,
+    )
+    assert target == "gui/501/ai.hermes.gateway-ava"
+    assert [c[-1] for c in fake.calls] == [
+        "gui/501/ai.hermes.gateway", "user/501/ai.hermes.gateway",
+        "gui/501/ai.hermes.gateway-ava",
+    ]
+
+
+def test_launchd_probe_skips_an_unsafe_profile_name() -> None:
+    fake = _FakeLaunchctl({})
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=1,
+        hermes_home="/x/profiles/a b;rm -rf", run=fake,
+    ) is None
+    assert [c[-1] for c in fake.calls] == [
+        "gui/501/ai.hermes.gateway", "user/501/ai.hermes.gateway",
+    ]
+
+
+# Hermes upstream (hermes_cli/gateway.py _launchd_domain) loads the gateway
+# in gui/<uid> for an Aqua login and in user/<uid> for a Background or SSH
+# session. The probe asks both, gui first, and keeps the one whose job IS
+# this process; the restart then kickstarts exactly that target.
+
+
+def test_launchd_probe_finds_the_job_in_the_user_domain() -> None:
+    fake = _FakeLaunchctl({"user/501/ai.hermes.gateway": _launchctl_print(4242)})
+    target = self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    )
+    assert target == "user/501/ai.hermes.gateway"
+    assert [c[-1] for c in fake.calls] == [
+        "gui/501/ai.hermes.gateway", "user/501/ai.hermes.gateway",
+    ]
+
+
+def test_launchd_probe_keeps_the_domain_whose_job_is_this_pid() -> None:
+    """The same label loaded in both domains: the gui job runs ANOTHER
+    gateway, the user job runs this one. Kickstarting the gui target would
+    kill the wrong process."""
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway": _launchctl_print(999),
+        "user/501/ai.hermes.gateway": _launchctl_print(4242),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    ) == "user/501/ai.hermes.gateway"
+
+
+def test_launchd_probe_asks_gui_first_and_stops_there() -> None:
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway": _launchctl_print(4242),
+        "user/501/ai.hermes.gateway": _launchctl_print(4242),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    ) == "gui/501/ai.hermes.gateway"
+    assert [c[-1] for c in fake.calls] == ["gui/501/ai.hermes.gateway"]
+
+
+def test_launchd_probe_finds_a_profile_job_in_the_user_domain() -> None:
+    fake = _FakeLaunchctl({
+        "user/501/ai.hermes.gateway-ava": _launchctl_print(77, "ai.hermes.gateway-ava"),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=77,
+        hermes_home="/Users/kc/.hermes/profiles/ava", run=fake,
+    ) == "user/501/ai.hermes.gateway-ava"
+
+
+def test_launchd_probe_refuses_when_neither_domain_runs_this_pid() -> None:
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway": _launchctl_print(1),
+        "user/501/ai.hermes.gateway": _launchctl_print(2),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=4242, hermes_home=None, run=fake,
+    ) is None
+
+
+def test_schedule_launchd_restart_kickstarts_a_user_domain_target() -> None:
+    spawned: list[list[str]] = []
+
+    def fake_popen(argv, **kwargs):
+        spawned.append(list(argv))
+        return SimpleNamespace(pid=1)
+
+    assert self_update.schedule_launchd_restart(
+        "user/501/ai.hermes.gateway-ava", popen=fake_popen,
+    ) is True
+    assert spawned[0][-1] == "user/501/ai.hermes.gateway-ava"
+
+
+def test_launchd_probe_is_macos_only() -> None:
+    fake = _FakeLaunchctl({"gui/501/ai.hermes.gateway": _launchctl_print(5)})
+    assert self_update._probe_launchd_job(
+        platform="linux", uid=501, pid=5, hermes_home=None, run=fake,
+    ) is None
+    assert fake.calls == []
+
+
+def test_launchd_probe_spawn_error_is_none() -> None:
+    def boom(argv, **kwargs):
+        raise OSError("no launchctl")
+
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=5, hermes_home=None, run=boom,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("\tstate = running\n\tpid = 4242\n", 4242),
+        ("\tstate = not running\n", None),
+        # The job's own pid line comes first; a later nested pid never wins.
+        ("\tpid = 10\n\t\tpid = 4242\n", 10),
+        ("\tpid = abc\n", None),
+        ("", None),
+    ],
+)
+def test_launchd_print_pid(body, expected) -> None:
+    assert self_update._launchd_print_pid(body) == expected
+
+
+def test_launchd_service_target_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        self_update, "_launchd_result", self_update._UNIT_UNRESOLVED,
+    )
+    calls: list[int] = []
+
+    def probe(**kwargs):
+        calls.append(1)
+        return "gui/501/ai.hermes.gateway"
+
+    monkeypatch.setattr(self_update, "_probe_launchd_job", probe)
+    assert self_update.launchd_service_target() == "gui/501/ai.hermes.gateway"
+    assert self_update.launchd_service_target() == "gui/501/ai.hermes.gateway"
+    assert calls == [1]
+
+
+def test_verified_supervisor_prefers_systemd(monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: "hermes-gateway.service")
+    monkeypatch.setattr(
+        self_update, "launchd_service_target", lambda: "gui/501/ai.hermes.gateway",
+    )
+    assert self_update.verified_supervisor() == self_update.Supervisor(
+        "systemd", "hermes-gateway.service",
+    )
+
+
+def test_verified_supervisor_falls_back_to_launchd(monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: None)
+    monkeypatch.setattr(
+        self_update, "launchd_service_target", lambda: "gui/501/ai.hermes.gateway",
+    )
+    assert self_update.verified_supervisor() == self_update.Supervisor(
+        "launchd", "gui/501/ai.hermes.gateway",
+    )
+
+
+def test_verified_supervisor_none(monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: None)
+    monkeypatch.setattr(self_update, "launchd_service_target", lambda: None)
+    assert self_update.verified_supervisor() is None
+
+
+def test_update_readiness_reports_launchd(monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: None)
+    monkeypatch.setattr(
+        self_update, "launchd_service_target", lambda: "gui/501/ai.hermes.gateway",
+    )
+    monkeypatch.setattr(
+        self_update, "pending_restart_version", lambda clone_dir=None: None,
+    )
+    monkeypatch.delenv("BGOS_AUTO_UPDATE", raising=False)
+    assert self_update.update_readiness()["supervised"] == "launchd"
+
+
+# -----------------------------------------------------------------------------
+# Detached launchd restart (fact: this Mac's gateway plist has KeepAlive
+# {SuccessfulExit:false}, so a clean exit is NOT relaunched; the restart must
+# be `launchctl kickstart -k`, never a plain exit)
+# -----------------------------------------------------------------------------
+
+
+def test_schedule_launchd_restart_spawns_a_detached_delayed_kickstart() -> None:
+    spawned: list[tuple[list[str], dict]] = []
+
+    def fake_popen(argv, **kwargs):
+        spawned.append((list(argv), kwargs))
+        return SimpleNamespace(pid=1)
+
+    assert self_update.schedule_launchd_restart(
+        "gui/501/ai.hermes.gateway", popen=fake_popen,
+    ) is True
+    [(argv, kwargs)] = spawned
+    assert argv == [
+        "/bin/sh", "-c", 'sleep 2; exec launchctl kickstart -k "$1"',
+        "bgos-gateway-restart", "gui/501/ai.hermes.gateway",
+    ]
+    # Its own session: launchd's teardown of OUR process group must not
+    # take the pending kickstart down with it.
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_schedule_launchd_restart_refuses_a_foreign_target() -> None:
+    spawned: list[list[str]] = []
+    for target in (
+        "gui/501/com.apple.Finder",
+        "user/501/com.apple.Finder",
+        "system/ai.hermes.gateway",
+        "pid/4242/ai.hermes.gateway",
+        "gui/501/ai.hermes.gateway; rm -rf ~",
+    ):
+        assert self_update.schedule_launchd_restart(
+            target, popen=lambda argv, **kw: spawned.append(argv),
+        ) is False
+    assert spawned == []
+
+
+def test_schedule_launchd_restart_spawn_failure_is_false() -> None:
+    def boom(argv, **kwargs):
+        raise OSError("no /bin/sh")
+
+    assert self_update.schedule_launchd_restart(
+        "gui/501/ai.hermes.gateway", popen=boom,
+    ) is False
+
+
+def test_schedule_supervisor_restart_dispatches_by_kind(monkeypatch) -> None:
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        self_update, "schedule_unit_restart",
+        lambda unit: seen.append(("systemd", unit)) or True,
+    )
+    monkeypatch.setattr(
+        self_update, "schedule_launchd_restart",
+        lambda target: seen.append(("launchd", target)) or True,
+    )
+    assert self_update.schedule_supervisor_restart(
+        self_update.Supervisor("systemd", "hermes-gateway.service"),
+    )
+    assert self_update.schedule_supervisor_restart(
+        self_update.Supervisor("launchd", "gui/501/ai.hermes.gateway"),
+    )
+    assert self_update.schedule_supervisor_restart(
+        self_update.Supervisor("pm2", "x"),
+    ) is False
+    assert seen == [
+        ("systemd", "hermes-gateway.service"),
+        ("launchd", "gui/501/ai.hermes.gateway"),
+    ]
+
+
+def test_schedule_launchd_restart_refuses_a_trailing_newline() -> None:
+    spawned: list[list[str]] = []
+    assert self_update.schedule_launchd_restart(
+        "gui/501/ai.hermes.gateway\n", popen=lambda argv, **kw: spawned.append(argv),
+    ) is False
+    assert spawned == []
+
+
+def test_launchd_probe_reads_the_process_hermes_home(monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", "/Users/kc/.hermes/profiles/ava")
+    fake = _FakeLaunchctl({
+        "gui/501/ai.hermes.gateway-ava": _launchctl_print(77, "ai.hermes.gateway-ava"),
+    })
+    assert self_update._probe_launchd_job(
+        platform="darwin", uid=501, pid=77, run=fake,
+    ) == "gui/501/ai.hermes.gateway-ava"

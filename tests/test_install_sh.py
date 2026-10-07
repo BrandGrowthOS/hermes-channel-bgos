@@ -432,3 +432,49 @@ def test_parse_args_takes_the_agent_catalog_as_a_flag(tmp_path: Path):
     resolved = _resolved(result)
     assert resolved["agents"] == "wolf:Wolf Two"
     assert resolved["code"] == "BGOS-WOLF-01"
+
+
+def _fake_supervisor_bin(tmp_path: Path) -> tuple[Path, Path]:
+    """launchctl and systemctl stand-ins that record their argv and answer
+    "no such service" (exit 1). They sit FIRST on PATH, so the real
+    binaries (this Mac runs a live gateway under launchd) are never run."""
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    calls = tmp_path / "supervisor-calls.txt"
+    for name in ("launchctl", "systemctl"):
+        script = fakebin / name
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '{name} %s\\n' \"$*\" >> \"$SUPERVISOR_CALLS\"\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+    return fakebin, calls
+
+
+def test_restart_hermes_recommends_gateway_install_when_unmanaged(tmp_path: Path):
+    """Design 2.3: Hermes keeps itself alive through `hermes gateway
+    install`. With no managed service the warning must say that this is the
+    step that brings the gateway back after a crash or a reboot."""
+    fakebin, calls = _fake_supervisor_bin(tmp_path)
+    env = _isolated_env(tmp_path)
+    env["PATH"] = f"{fakebin}:/usr/bin:/bin"
+    env["SUPERVISOR_CALLS"] = str(calls)
+    result = subprocess.run(
+        ["bash", "-c", "source install.sh; restart_hermes"],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (
+        "RECOMMENDED: run `hermes gateway install` so the gateway restarts "
+        "after a crash or a reboot."
+    ) in result.stderr
+    # Only probes ran; nothing was restarted.
+    recorded = calls.read_text(encoding="utf-8").splitlines()
+    assert recorded and all(" print " in f" {c} " or "--user status" in c for c in recorded)
+    assert not any("kickstart" in c or "restart" in c.split()[1:2] for c in recorded)

@@ -22,16 +22,19 @@ import os
 import platform
 import re
 import struct
+import sys
 import time
+import weakref
 from dataclasses import asdict, dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 import httpx
 
 from . import __version__
+from . import scheduled_update
 from . import self_update
 from .bgos_api import BgosApi, BgosApiError, NOT_MODIFIED
 from .bgos_ws import BgosWs
@@ -265,6 +268,15 @@ _INLINE_OPTION_LIMIT = 6
 # POSTs a day).
 _HEARTBEAT_INTERVAL_SECONDS = 6 * 60 * 60
 
+# The backend stores at most one heartbeat per pairing per 10 s
+# (integrations.controller.ts shouldWriteHeartbeat, LAST_SEEN_DEBOUNCE_MS)
+# and answers a skipped one 204 all the same, so a beat that carries a new
+# scheduled outcome (lastError, or its clear) right behind another beat was
+# acknowledged and never stored (finding M2). Such a beat waits until this
+# long after the adapter's previous beat (or its connect, which may follow
+# the previous process's last beat by moments); a second of margin.
+_HEARTBEAT_WRITE_SPACING_SECONDS = 11.0
+
 # Threshold below which we inline base64 into POST /messages; at or above,
 # we upload via a presigned S3 PUT and reference by s3_key. Mirrors
 # openclaw-channel-bgos's policy + the memory note `bug_base64_body_limit.md`.
@@ -282,6 +294,207 @@ _DOCTOR_RPC_TIMEOUT_SECONDS = 45.0
 # long enough for a typical in-flight dispatch to finish writing its reply,
 # short enough that the app's live progress card never looks stuck.
 _UPDATE_DRAIN_SECONDS = 5.0
+
+# Scheduled apply (design 2.3, decision D8; decisions in scheduled_update.py):
+# how often the loop samples busy and quiet. Idle must hold across every
+# sample of the 10 minute quiet window, and the message stamps catch a turn
+# that starts and ends between two samples.
+_SCHEDULED_UPDATE_TICK_SECONDS = 60.0
+
+# Every BGOS adapter live in this gateway process. Multiplexed Hermes
+# profiles each run their own adapter in ONE process, and a restart ends all
+# of them: the busy and quiet checks must see every one, and only one
+# scheduled loop may act (two would race the same pull and restart). Weak
+# references so a dropped adapter never pins memory or a stale busy state.
+_LIVE_ADAPTERS: list[weakref.ref] = []
+_scheduled_update_owner: weakref.ref | None = None
+
+
+def _live_adapters() -> list["BGOSAdapter"]:
+    alive = [ref() for ref in _LIVE_ADAPTERS]
+    _LIVE_ADAPTERS[:] = [ref for ref, a in zip(list(_LIVE_ADAPTERS), alive) if a is not None]
+    return [a for a in alive if a is not None]
+
+
+def _register_live_adapter(adapter: "BGOSAdapter") -> None:
+    if not any(a is adapter for a in _live_adapters()):
+        _LIVE_ADAPTERS.append(weakref.ref(adapter))
+
+
+def _unregister_live_adapter(adapter: "BGOSAdapter") -> None:
+    _LIVE_ADAPTERS[:] = [ref for ref in _LIVE_ADAPTERS if ref() is not adapter]
+
+
+def _claim_scheduled_update(adapter: "BGOSAdapter") -> bool:
+    """First live adapter to ask owns the process's scheduled apply; the
+    claim passes on when the owner is gone or disconnected."""
+    global _scheduled_update_owner
+    owner = _scheduled_update_owner() if _scheduled_update_owner else None
+    if owner is None or owner is adapter:
+        _scheduled_update_owner = weakref.ref(adapter)
+        return True
+    return False
+
+
+def _release_scheduled_update(adapter: "BGOSAdapter") -> None:
+    global _scheduled_update_owner
+    owner = _scheduled_update_owner() if _scheduled_update_owner else None
+    if owner is None or owner is adapter:
+        _scheduled_update_owner = None
+
+
+# The scheduled apply's outcome for the app: the heartbeat lastError (a run
+# nobody requested has no update_rpc to report to). Process wide, because one
+# run updates every multiplexed profile in the process and each one's pairing
+# must hear it. None until there is something to say, then (generation,
+# lastError dict, or None to clear). Every adapter remembers the generation
+# its heartbeat delivered, so a failed POST is retried by its next beat.
+_scheduled_update_outcome: tuple[int, dict | None] | None = None
+
+# Once a restart is committed (the last busy check passed and the delayed
+# restart is next), new inbound work is HELD for the seconds the process has
+# left: not consumed, and the persisted cursor not advanced, so the poll of
+# the next process is handed it again. Process wide, because the restart ends
+# every adapter in it. Bounded: if the restart never comes (a kickstart that
+# failed after its spawn), intake reopens and what was held is fetched again.
+# Work already in flight is never touched.
+_INTAKE_HOLD_SECONDS = 120.0
+_intake_held_until: float | None = None
+
+# A held click or button callback is push only: the backend never delivers
+# it again, and it marks the card answered, so a second tap is ignored. Each
+# adapter keeps what it held (bounded) and delivers it once when intake
+# reopens without the restart (finding L2). A restart that does come ends
+# them with the process, as it would have cut off the turn they started.
+_HELD_INTERACTIONS_MAX = 100
+
+
+def _hold_intake(until: float) -> None:
+    global _intake_held_until
+    _intake_held_until = until
+
+
+def _release_intake() -> None:
+    global _intake_held_until
+    _intake_held_until = None
+
+
+# The first look of a process checks the persisted record once: did the
+# restart that ended the previous process land (clear), or is a reported
+# failure still standing (say it again)?
+_scheduled_update_boot_checked = False
+
+
+def _publish_scheduled_update_outcome(error: dict | None) -> bool:
+    """Set the outcome every adapter's next heartbeat carries. False when it
+    says nothing new (the same code and message, or a second clear), so a
+    failure that repeats every retry is not resent each time."""
+    global _scheduled_update_outcome
+    current = _scheduled_update_outcome
+    if current is not None:
+        previous = current[1]
+        if previous is None and error is None:
+            return False
+        if (
+            previous is not None
+            and error is not None
+            and (previous["code"], previous["message"]) == (error["code"], error["message"])
+        ):
+            return False
+    generation = current[0] + 1 if current is not None else 1
+    _scheduled_update_outcome = (generation, error)
+    return True
+
+
+# Finding 9 (design section 6): never restart under a running background job.
+# Hermes upstream tracks the processes its terminal tool starts with
+# background=true in tools/process_registry.py, and they die with the gateway
+# process a restart ends. Logged once when an older Hermes has no registry.
+_background_registry_absent_logged = False
+
+
+def _running_background_processes() -> int:
+    """Running Hermes background processes, from the upstream registry's
+    `has_any_active()`, else (an older registry) its `count_running()`.
+    has_any_active refreshes recovered sessions first: after a crash the
+    registry adopts a still running process as detached, and only such a
+    refresh notices it exit, so `count_running()` alone (a bare
+    len(_running)) can count a finished one forever (finding L1). An older
+    Hermes without the registry (module or both methods absent) has no such
+    processes to protect: 0, logged once. A registry that is present but
+    cannot answer reads as running (1): a guard that fails open would kill a
+    live job."""
+    global _background_registry_absent_logged
+    try:
+        from tools.process_registry import process_registry  # type: ignore
+    except Exception:
+        process_registry = None
+    has_any_active = getattr(process_registry, "has_any_active", None)
+    count_running = getattr(process_registry, "count_running", None)
+    if not callable(has_any_active) and not callable(count_running):
+        if not _background_registry_absent_logged:
+            _background_registry_absent_logged = True
+            log.info(
+                "Hermes process registry unavailable (older Hermes): "
+                "background processes are not counted as busy for updates",
+            )
+        return 0
+    try:
+        if callable(has_any_active):
+            return 1 if has_any_active() else 0
+        return int(count_running())
+    except Exception:
+        log.debug("Hermes process registry count failed", exc_info=True)
+        return 1
+
+
+def _running_cron_jobs() -> int:
+    """In-flight Hermes cron jobs (finding H3). Upstream runs them on
+    cron.scheduler's own thread pool inside this gateway process, outside
+    every session and `_running_agents` (#60432), so a restart cuts them
+    off. Read from the loaded module, never imported here: a process that
+    never loaded the scheduler runs no cron job, and an older Hermes without
+    get_running_job_ids has none to report (0). A scheduler that cannot
+    answer reads as running (1): a guard that fails open would kill a job."""
+    module = sys.modules.get("cron.scheduler")
+    get_running_job_ids = getattr(module, "get_running_job_ids", None)
+    if not callable(get_running_job_ids):
+        return 0
+    try:
+        return len(get_running_job_ids())
+    except Exception:
+        log.debug("Hermes cron scheduler running jobs read failed", exc_info=True)
+        return 1
+
+
+def _gateway_runner_turns(runner: Any, cron_jobs: int, own: Any) -> int:
+    """Agent work the Hermes gateway runner holds outside every BGOS adapter
+    (finding H3): upstream's own drain total `_active_work_count()` (turns of
+    EVERY multiplexed profile in `_running_agents`, API server runs, and the
+    cron jobs it also counts, taken out here because the caller reports them
+    as background_job), else an older runner's `_running_agents`; plus a live
+    session on any platform adapter, the primary profile's
+    (`runner.adapters`) and every secondary profile's
+    (`runner._profile_adapters`). Raises when the runner cannot answer; the
+    caller reads that as busy."""
+    work_count = getattr(runner, "_active_work_count", None)
+    if callable(work_count):
+        count = max(0, int(work_count()) - cron_jobs)
+    else:
+        count = len(getattr(runner, "_running_agents", None) or ())
+    adapters: list[Any] = []
+    primary = getattr(runner, "adapters", None)
+    if isinstance(primary, dict):
+        adapters.extend(primary.values())
+    profiles = getattr(runner, "_profile_adapters", None)
+    if isinstance(profiles, dict):
+        for profile_map in profiles.values():
+            if isinstance(profile_map, dict):
+                adapters.extend(profile_map.values())
+    for adapter in adapters:
+        if adapter is not own and getattr(adapter, "_active_sessions", None):
+            count += 1
+    return count
 
 # System locations that always hold secrets or credentials. SECURITY: outbound
 # MEDIA:/path markers and send_image/file local sources are agent-emitted, and
@@ -1268,6 +1481,46 @@ class BGOSAdapter(BasePlatformAdapter):
         # dedupe set + fire-and-forget task tracking.
         self._update_rpc_in_flight: set[str] = set()
         self._update_tasks: set[asyncio.Task] = set()
+        # Scheduled apply at a safe moment (design 2.3, decision D8; see
+        # scheduled_update.py). The clock is injectable so tests drive the
+        # quiet window without sleeping. The message stamps feed "quiet for
+        # 10 minutes since the last inbound or outbound message": inbound in
+        # _handle_inbound, _handle_inbound_click and _handle_callback,
+        # outbound through the BgosApi hook (every post, patch, send-message
+        # and peer send, whichever adapter path made it).
+        self._clock: Callable[[], float] = time.monotonic
+        # Epoch seconds, for what is compared with real dates: the lastError
+        # `at` stamp and the soak against a git committer time.
+        self._wall_clock: Callable[[], float] = time.time
+        # The scheduled outcome generation this adapter's heartbeat delivered.
+        self._scheduled_outcome_delivered: int = 0
+        # Heartbeats one at a time, and when the last one went out (or the
+        # adapter connected), so a beat carrying an outcome can wait out the
+        # backend's write window (_HEARTBEAT_WRITE_SPACING_SECONDS). The
+        # sleep is injectable with the clock.
+        self._heartbeat_lock = asyncio.Lock()
+        self._heartbeat_sent_at: float | None = None
+        self._sleep: Callable[[float], Any] = asyncio.sleep
+        # The cursor this adapter's intake was held at (a committed restart),
+        # so held messages are fetched again if the restart never comes.
+        self._intake_resume_cursor: int | None = None
+        # Clicks and button callbacks held by a committed restart, in order:
+        # (kind, payload, newest message id held before it), delivered if
+        # the restart never comes (L2), each just ahead of the first held
+        # message that came after it (F3). The newest held message id only
+        # grows, so one from an earlier hold still orders a later one right.
+        self._held_interactions: list[tuple[str, dict, int]] = []
+        self._held_message_high: int = 0
+        self._last_inbound_message_at: float | None = None
+        self._last_outbound_message_at: float | None = None
+        self._scheduled_update_task: asyncio.Task | None = None
+        self._scheduled_update_idle_since: float | None = None
+        self._scheduled_update_not_before: float | None = None
+        self._scheduled_update_running: bool = False
+        # Whether the last plan was the pin's wait, so that wait is logged
+        # once per stretch instead of every minute.
+        self._scheduled_update_pinned: bool = False
+        self._api.on_message_activity = self._note_outbound_message
         # Agent Boards round trip ([[BGOS_BOARDS]] marker). Executor tasks
         # are fire-and-forget like _voice_tasks (tracked so exceptions are
         # retrieved and disconnect can drain them). The per-chat counter is
@@ -1673,8 +1926,24 @@ class BGOSAdapter(BasePlatformAdapter):
         # Version heartbeat: fire once now (boot) and then every 6h so the
         # backend's pairing row always knows what plugin version this daemon
         # runs — the app's update prompt cannot cover Hermes otherwise.
+        # The previous process may have beaten moments ago (the restart that
+        # started this one): a beat carrying a scheduled outcome waits out
+        # the backend's write window from here (finding M2).
+        self._heartbeat_sent_at = self._clock()
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+        # Scheduled apply (decision D8): applies a newer version, or finishes
+        # a staged one, at a safe moment under a verified supervisor only.
+        # Every adapter runs the loop; the first to claim it acts.
+        _register_live_adapter(self)
+        if (
+            self._scheduled_update_task is None
+            or self._scheduled_update_task.done()
+        ):
+            self._scheduled_update_task = asyncio.create_task(
+                self._scheduled_update_loop(),
+            )
         return True
 
     async def _heartbeat_loop(self) -> None:
@@ -1693,6 +1962,18 @@ class BGOSAdapter(BasePlatformAdapter):
         raise, so they run in a worker thread off the event loop.
         """
         while True:
+            await self._post_heartbeat_once()
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+
+    async def _post_heartbeat_once(self) -> None:
+        """One best-effort heartbeat (the loop's body). The scheduled apply
+        also calls it so a staged or restarting update is visible at once
+        (pendingRestartVersion), not up to 6 hours later. A scheduled
+        outcome this adapter has not delivered yet rides along as lastError
+        (an object sets the app's error, None clears it). Such a beat waits
+        out the backend's write window first (finding M2), so it is stored,
+        not only acknowledged; one beat at a time per adapter."""
+        async with self._heartbeat_lock:
             try:
                 latest = await asyncio.to_thread(
                     self_update.latest_known_version,
@@ -1700,11 +1981,27 @@ class BGOSAdapter(BasePlatformAdapter):
                 readiness = await asyncio.to_thread(
                     self_update.update_readiness,
                 )
-                await self._api.post_heartbeat(
-                    daemon_version=__version__, env=_daemon_env(),
-                    latest_known_version=latest,
-                    update_readiness=readiness,
-                )
+                outcome = _scheduled_update_outcome
+                if outcome is not None and outcome[0] != self._scheduled_outcome_delivered:
+                    await self._wait_heartbeat_write_window()
+                    # Still undelivered (only this adapter delivers its own),
+                    # and possibly newer by now.
+                    outcome = _scheduled_update_outcome
+                extra: dict[str, Any] = {}
+                if outcome is not None and outcome[0] != self._scheduled_outcome_delivered:
+                    extra["last_error"] = outcome[1]
+                try:
+                    await self._api.post_heartbeat(
+                        daemon_version=__version__, env=_daemon_env(),
+                        latest_known_version=latest,
+                        update_readiness=readiness,
+                        **extra,
+                    )
+                finally:
+                    # Even a failed POST may have reached the backend.
+                    self._heartbeat_sent_at = self._clock()
+                if outcome is not None:
+                    self._scheduled_outcome_delivered = outcome[0]
                 log.info(
                     "BGOS heartbeat sent (daemonVersion=%s)", __version__,
                 )
@@ -1712,7 +2009,16 @@ class BGOSAdapter(BasePlatformAdapter):
                 raise
             except Exception:
                 log.debug("BGOS heartbeat failed (ignored)", exc_info=True)
-            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+
+    async def _wait_heartbeat_write_window(self) -> None:
+        """Until _HEARTBEAT_WRITE_SPACING_SECONDS after this adapter's
+        previous beat (or its connect); at once when there was none."""
+        last = self._heartbeat_sent_at
+        if last is None:
+            return
+        wait = last + _HEARTBEAT_WRITE_SPACING_SECONDS - self._clock()
+        if wait > 0:
+            await self._sleep(wait)
 
     async def _refresh_pairing_scope(self) -> bool:
         """Re-fetch the pairing scope from `GET /api/v1/integrations/me` and
@@ -2203,6 +2509,15 @@ class BGOSAdapter(BasePlatformAdapter):
             await asyncio.gather(*update_tasks, return_exceptions=True)
         self._update_tasks.clear()
         self._update_rpc_in_flight.clear()
+        # The scheduled-update loop goes with its adapter, and the process
+        # claim passes to the next live adapter.
+        scheduled_task = self._scheduled_update_task
+        self._scheduled_update_task = None
+        if scheduled_task is not None and not scheduled_task.done():
+            scheduled_task.cancel()
+            await asyncio.gather(scheduled_task, return_exceptions=True)
+        _unregister_live_adapter(self)
+        _release_scheduled_update(self)
         setup_tasks = [
             task for task in self._stt_setup_tasks if not task.done()
         ]
@@ -5036,7 +5351,30 @@ class BGOSAdapter(BasePlatformAdapter):
         `batchable=False` disables the adaptive text-batching path — used by
         backfill replay (history isn't "user typing fast", it's historical)
         and `/retry` replay (already merged into a single canonical text).
+
+        While a committed restart holds intake, the message is left
+        unconsumed (no cursor advance, no dedup mark): the next process's
+        poll is handed it again.
         """
+        if self._intake_held():
+            held_id = data.get("message_id") or data.get("messageId")
+            log.info(
+                "inbound message_id=%s held: a restart is committed, it is "
+                "delivered again after it",
+                held_id,
+            )
+            held_id = self._int_or_none(held_id)
+            if held_id is not None:
+                # A click held from here on came after this message (F3).
+                self._held_message_high = max(self._held_message_high, held_id)
+            return
+        resume = self._take_intake_resume_cursor()
+        if resume is not None:
+            # The restart never came: fetch what was held FIRST, before this
+            # newer message can move the cursor past it (dedup drops this
+            # one below when the fetch already delivered it).
+            await self._run_backfill(resume)
+        self._note_inbound_message()
         data = _normalize_inbound_payload(data)
         assistant_id = data.get("assistant_id")
         if assistant_id is None:
@@ -5657,6 +5995,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # (`callbackData`, live WS / inbound_click shape). Approval buttons
         # must honor both; otherwise the tap falls through as a normal
         # "Always allow" chat message and the blocking approval times out.
+        self._note_inbound_message()
         cb = data.get("callback_data") or data.get("callbackData") or ""
         user_id_for_authz = data.get("user_id") or data.get("userId")
         if not self._is_callback_user_authorized(user_id_for_authz):
@@ -5777,6 +6116,17 @@ class BGOSAdapter(BasePlatformAdapter):
         if handler is None:
             log.debug("no handle_button_press; dropping callback_data=%s", cb)
             return
+        if self._intake_held():
+            # New work for the agent; approvals above resolve work in flight
+            # and are never held.
+            log.warning("callback held: a restart is committed (%s)", cb)
+            self._hold_interaction("callback", data)
+            return
+        # The restart never came: what was held goes first (as in
+        # _handle_inbound), or this newer press jumps ahead of it.
+        resume = self._take_intake_resume_cursor()
+        if resume is not None:
+            await self._run_backfill(resume)
         result = handler(data)
         if asyncio.iscoroutine(result):
             await result
@@ -5800,6 +6150,7 @@ class BGOSAdapter(BasePlatformAdapter):
           { assistantId, userId, chatId, messageId, optionId, callbackData,
             buttonText, customText? }
         """
+        self._note_inbound_message()
         assistant_id = data.get("assistantId")
         if assistant_id is None:
             log.debug("inbound_click missing assistantId: %s", data)
@@ -5840,6 +6191,24 @@ class BGOSAdapter(BasePlatformAdapter):
                 "buttonText": button_text,
             })
             return
+
+        # A committed restart holds new work: a turn started now would be
+        # cut off by the restart moments later. A click is push only (the
+        # backend does not deliver it again), so it is kept, and delivered
+        # if the restart never comes.
+        if self._intake_held():
+            log.warning(
+                "inbound_click chat=%s message=%s held: a restart is committed",
+                chat_id, message_id,
+            )
+            self._hold_interaction("click", data)
+            return
+        # The restart never came: what was held goes first (as in
+        # _handle_inbound), or this newer tap jumps ahead of it. A held tap
+        # delivered by that replay finds the cursor already taken.
+        resume = self._take_intake_resume_cursor()
+        if resume is not None:
+            await self._run_backfill(resume)
 
         # The agent's natural view: the user's reply is the button's visible
         # label. `__custom__` sentinels carry the user's typed text — prefer
@@ -5934,21 +6303,53 @@ class BGOSAdapter(BasePlatformAdapter):
         Field-name adaptation: backend REST responses use the primary-key
         name `id` for message rows, while the WS event uses `message_id`.
         MessageEvent.from_ws reads `message_id`, so we normalize here.
+
+        Nothing is fetched while a committed restart holds intake; once a
+        hold ends without the restart, the fetch starts no later than the
+        cursor it was held at.
         """
+        if self._intake_held():
+            return
+        resume = self._take_intake_resume_cursor()
+        if resume is not None:
+            last_message_id = min(last_message_id, resume)
+        if await self._replay_inbound_since(last_message_id):
+            # Clicks and callbacks a hold kept are not in this fetch (it
+            # returns user message rows only): they are delivered from
+            # memory. Those held before a replayed message went just ahead
+            # of it (F3); the rest go now, also when the fetch returned
+            # nothing.
+            await self._deliver_held_interactions()
+            return
+        # The fetch failed and the cursor has not moved: the next fetch
+        # replays the held messages. Only the taps no held message came
+        # before go now; the others wait to go in their place then.
+        await self._deliver_held_interactions(before_message_id=last_message_id + 1)
+        if self._held_interactions:
+            # Still a reopen: a fresh push, tap or callback fetches first.
+            pending = self._intake_resume_cursor
+            self._intake_resume_cursor = (
+                last_message_id if pending is None else min(pending, last_message_id)
+            )
+
+    async def _replay_inbound_since(self, last_message_id: int) -> bool:
+        """The fetch and replay _run_backfill describes, from
+        `last_message_id`, with the held clicks in their place. False only
+        when the fetch failed."""
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
             log.exception("backfill fetch failed for since_message_id=%d",
                           last_message_id)
-            return
+            return False
         # Conditional-GET fast path: the Stage-3 backend answers an unchanged
         # poll with a 0-byte 304, surfaced here as the NOT_MODIFIED sentinel.
         # Nothing to replay — return without touching the cursor (egress fix).
         if resp is NOT_MODIFIED:
-            return
+            return True
         messages = resp.get("messages") if isinstance(resp, dict) else None
         if not messages:
-            return
+            return True
 
         normalized: list[dict[str, Any]] = []
         for msg in messages:
@@ -5960,7 +6361,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 msg = {**msg, "message_id": msg["id"]}
             normalized.append(msg)
         if not normalized:
-            return
+            return True
 
         # Storm guard (2026-06-28): if the durable cursor is missing/stale,
         # BGOS can return a long historical backlog on gateway startup. Replaying
@@ -5985,9 +6386,14 @@ class BGOSAdapter(BasePlatformAdapter):
                 "since_message_id=%d and advanced cursor to %d",
                 len(normalized), last_message_id, max_id,
             )
-            return
+            return True
 
         for msg in normalized:
+            replayed_id = self._int_or_none(msg.get("message_id"))
+            if replayed_id is not None:
+                # A click held before this message arrived goes first: the
+                # agent sees what the user did in the order they did it.
+                await self._deliver_held_interactions(before_message_id=replayed_id)
             try:
                 # Backfill is historical replay, not "user typing fast" —
                 # bypass batching so each missed message lands as its own
@@ -5995,6 +6401,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._handle_inbound(msg, batchable=False)
             except Exception:
                 log.exception("backfill replay failed for message=%s", msg)
+        return True
 
     # -------------------------------------------------------------------------
     # Owner-triggered doctor checks (doctor_rpc)
@@ -6212,7 +6619,7 @@ class BGOSAdapter(BasePlatformAdapter):
             log.debug("dropping in-flight update_rpc duplicate rpc=%s", rpc_id)
             return
 
-        if self._update_rpc_in_flight:
+        if self._update_rpc_in_flight or self._scheduled_update_running_in_process():
             try:
                 await self._api.post_update_rpc_ack(rpc_id)
             except Exception:
@@ -6248,22 +6655,61 @@ class BGOSAdapter(BasePlatformAdapter):
                 rpc_id, stage, exc_info=True,
             )
 
-    async def _drain_for_update(self, timeout: float) -> bool:
+    def _local_update_busy(self) -> bool:
+        """This adapter has a live session or pending plugin work."""
+        tasks = (
+            *self._voice_tasks, *self._boards_tasks, *self._peer_tasks,
+            *self._doctor_tasks, *self._profile_tasks,
+            *self._pending_text_tasks.values(),
+        )
+        return any(not t.done() for t in tasks) or bool(
+            getattr(self, "_active_sessions", {}),
+        )
+
+    def _update_busy_reason(self) -> str | None:
+        """The ONE busy definition every update path uses (update_now's
+        drain and the scheduled apply), None when idle. A restart ends the
+        whole gateway process, so a session or pending plugin task on ANY
+        BGOS adapter in it (multiplexed profiles) is `busy`, and so is the
+        agent work the gateway runner holds: a turn on any profile, an API
+        server run, a live session on any platform adapter of any profile
+        (finding H3). A runner that cannot answer is `busy`. A running
+        Hermes cron job (finding H3) or background process (terminal tool,
+        background=true; finding 9) is `background_job`."""
+        if any(
+            adapter._local_update_busy()
+            for adapter in (self, *_live_adapters())
+        ):
+            return "busy"
+        cron_jobs = _running_cron_jobs()
+        runner = getattr(self, "gateway_runner", None)
+        if runner is not None:
+            try:
+                if _gateway_runner_turns(runner, cron_jobs, self) > 0:
+                    return "busy"
+            except Exception:
+                log.debug("gateway runner work count failed", exc_info=True)
+                return "busy"
+        if cron_jobs > 0 or _running_background_processes() > 0:
+            return "background_job"
+        return None
+
+    def _update_busy(self) -> bool:
+        return self._update_busy_reason() is not None
+
+    async def _drain_for_update(self, timeout: float) -> str | None:
         """Let in-flight fire-and-forget work settle before the restart.
+        None once idle, else the busy reason still holding at the deadline.
 
         A timeout refuses the update, never cancels a live turn."""
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
-            tasks = (
-                *self._voice_tasks, *self._boards_tasks, *self._peer_tasks,
-                *self._doctor_tasks, *self._profile_tasks,
-                *self._pending_text_tasks.values(),
-            )
-            if not any(not t.done() for t in tasks) and not getattr(self, "_active_sessions", {}):
-                return True
+            reason = self._update_busy_reason()
+            if reason is None:
+                return None
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                return False
+                return reason
             await asyncio.sleep(min(0.1, remaining))
 
     async def _run_update_rpc(self, rpc_id: str) -> None:
@@ -6284,18 +6730,26 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
             # Relaunch authority BEFORE any work: it decides whether this
-            # run may exit for relaunch or must stage to disk. Attachment
-            # mode is log-only (both modes update the same editable clone).
-            unit = await asyncio.to_thread(self_update.systemd_user_unit)
+            # run may exit for relaunch or must stage to disk. A verified
+            # systemd unit or (macOS, design 2.3) a launchd job whose pid
+            # is this process. Attachment mode is log-only (both modes
+            # update the same editable clone).
+            supervisor = await asyncio.to_thread(self_update.verified_supervisor)
             log.info(
-                "update_rpc rpc=%s unit=%s attachment=%s",
-                rpc_id, unit or "none",
+                "update_rpc rpc=%s supervisor=%s attachment=%s",
+                rpc_id,
+                f"{supervisor.kind}:{supervisor.name}" if supervisor else "none",
                 self_update.detect_attachment_mode(self._hermes_home),
             )
 
             await self._post_update_progress(rpc_id, "draining")
-            if not await self._drain_for_update(_UPDATE_DRAIN_SECONDS):
-                await self._post_update_progress(rpc_id, "error", message="agent_busy")
+            busy = await self._drain_for_update(_UPDATE_DRAIN_SECONDS)
+            if busy is not None:
+                # A background job is named as such, so the app can say why.
+                await self._post_update_progress(
+                    rpc_id, "error",
+                    message="background_job" if busy == "background_job" else "agent_busy",
+                )
                 return
 
             await self._post_update_progress(rpc_id, "installing")
@@ -6303,14 +6757,22 @@ class BGOSAdapter(BasePlatformAdapter):
                 applied = await asyncio.to_thread(self_update.apply_update)
                 target_version = applied.after_version
             except self_update.SelfUpdateError as exc:
-                if exc.reason == "no_update_available":
+                if exc.reason in ("no_update_available", "pinned"):
                     # The clone may already hold a newer install from an
                     # earlier staged run; a restart is then all that is
                     # missing, so update_now completes it instead of
-                    # erroring on a technicality.
+                    # erroring on a technicality. A pinned clone too
+                    # (finding F1): `--pin` checks out and never restarts,
+                    # and a restart onto what is on disk moves no git ref.
+                    # Never backwards there: restarting onto a rollback is
+                    # the operator's step, not an update.
                     pending_version = await asyncio.to_thread(
                         self_update.pending_restart_version,
                     )
+                    if exc.reason == "pinned" and not self_update.decide_version_update(
+                        __version__, pending_version,
+                    ):
+                        pending_version = None
                     if pending_version is None:
                         await self._post_update_progress(
                             rpc_id, "error", message=exc.reason,
@@ -6334,7 +6796,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
                 return
 
-            if unit is None:
+            if supervisor is None:
                 # No verified supervisor: NEVER exit. The install is on
                 # disk; 'staged' is daemon-terminal and the next heartbeat
                 # carries pendingRestartVersion.
@@ -6345,20 +6807,25 @@ class BGOSAdapter(BasePlatformAdapter):
 
             # Work can arrive while git runs in its worker thread. Keep the
             # install staged instead of cutting off a turn that arrived then.
-            if not await self._drain_for_update(_UPDATE_DRAIN_SECONDS):
+            if await self._drain_for_update(_UPDATE_DRAIN_SECONDS) is not None:
                 await self._post_update_progress(rpc_id, "staged", target_version=target_version)
                 return
+            # Committed: hold new inbound work (no await since the drain's
+            # last busy check), so nothing starts that the restart would cut.
+            _hold_intake(self._clock() + _INTAKE_HOLD_SECONDS)
 
             # 'restarting' arms the backend's completion detection, then
-            # the detached 2s systemd-run timer restarts our own unit so
-            # this POST has flushed before the process dies.
+            # the detached 2s restart (a systemd-run timer, or a delayed
+            # `launchctl kickstart -k` in its own session) restarts our own
+            # service so this POST has flushed before the process dies.
             await self._post_update_progress(
                 rpc_id, "restarting", target_version=target_version,
             )
             spawned = await asyncio.to_thread(
-                self_update.schedule_unit_restart, unit,
+                self_update.schedule_supervisor_restart, supervisor,
             )
             if not spawned:
+                _release_intake()
                 # Without the error the app would wait out the backend's
                 # full 5 minute no-comeback window for nothing.
                 await self._post_update_progress(
@@ -6366,6 +6833,464 @@ class BGOSAdapter(BasePlatformAdapter):
                 )
         finally:
             self._update_rpc_in_flight.discard(rpc_id)
+
+    # -------------------------------------------------------------------------
+    # Scheduled apply at a safe moment (design 2.3, decision D8)
+    # -------------------------------------------------------------------------
+
+    def _note_inbound_message(self) -> None:
+        self._last_inbound_message_at = self._clock()
+
+    def _intake_held(self) -> bool:
+        """True while a committed restart holds new inbound work (see
+        _INTAKE_HOLD_SECONDS). Remembers the cursor intake was held at, so
+        a restart that never comes loses nothing."""
+        until = _intake_held_until
+        if until is None or self._clock() >= until:
+            return False
+        if self._intake_resume_cursor is None:
+            self._intake_resume_cursor = self._load_last_id()
+        return True
+
+    def _take_intake_resume_cursor(self) -> int | None:
+        """The cursor a hold that has ended was taken at, once; None when
+        nothing was held."""
+        cursor, self._intake_resume_cursor = self._intake_resume_cursor, None
+        if cursor is not None:
+            log.warning(
+                "inbound intake reopened without the committed restart; "
+                "fetching what was held since message_id=%d", cursor,
+            )
+        return cursor
+
+    def _hold_interaction(self, kind: str, data: dict) -> None:
+        """Keep a click or callback a committed restart held (L2), with
+        the newest message held before it, its place in the replay (F3)."""
+        if len(self._held_interactions) >= _HELD_INTERACTIONS_MAX:
+            log.warning("held %s dropped: %d already held", kind, _HELD_INTERACTIONS_MAX)
+            return
+        self._held_interactions.append((kind, data, self._held_message_high))
+
+    async def _deliver_held_interactions(
+        self, *, before_message_id: int | None = None,
+    ) -> None:
+        """Once intake reopens without the restart: deliver held clicks and
+        callbacks, in order, once. With `before_message_id`, only those held
+        before that message arrived (the replay delivers them just ahead of
+        it); otherwise every one. Nothing while still held."""
+        if not self._held_interactions or self._intake_held():
+            return
+        cut = len(self._held_interactions)
+        if before_message_id is not None:
+            # Held in arrival order, so their message marks never go down.
+            cut = 0
+            while (
+                cut < len(self._held_interactions)
+                and self._held_interactions[cut][2] < before_message_id
+            ):
+                cut += 1
+            if cut == 0:
+                return
+        held = self._held_interactions[:cut]
+        self._held_interactions = self._held_interactions[cut:]
+        log.warning(
+            "inbound intake reopened without the committed restart; "
+            "delivering %d held click(s) and callback(s)", len(held),
+        )
+        for kind, data, _after in held:
+            try:
+                if kind == "click":
+                    await self._handle_inbound_click(data)
+                else:
+                    await self._handle_callback(data)
+            except Exception:
+                log.exception("held %s delivery failed", kind)
+
+    def _note_outbound_message(self) -> None:
+        self._last_outbound_message_at = self._clock()
+
+    def _update_rpc_in_flight_in_process(self) -> bool:
+        """An update_now runs on ANY BGOS adapter in this process. They all
+        share one clone and one restart, so the scheduled apply stands down."""
+        return any(
+            adapter._update_rpc_in_flight
+            for adapter in (self, *_live_adapters())
+        )
+
+    def _scheduled_update_running_in_process(self) -> bool:
+        """A scheduled run is in progress on ANY BGOS adapter in this
+        process (only the claim owner runs one), so update_now refuses."""
+        return any(
+            adapter._scheduled_update_running
+            for adapter in (self, *_live_adapters())
+        )
+
+    def _last_message_at(self) -> float | None:
+        """Newest message in or out on ANY BGOS adapter in this process."""
+        stamps = [
+            stamp
+            for adapter in (self, *_live_adapters())
+            for stamp in (
+                adapter._last_inbound_message_at,
+                adapter._last_outbound_message_at,
+            )
+            if stamp is not None
+        ]
+        return max(stamps) if stamps else None
+
+    def _scheduled_safe_moment(self, now: float) -> scheduled_update.SafeMoment:
+        busy_reason = self._update_busy_reason()
+        busy = busy_reason is not None
+        self._scheduled_update_idle_since = scheduled_update.next_idle_since(
+            busy=busy, idle_since=self._scheduled_update_idle_since, now=now,
+        )
+        return scheduled_update.decide_safe_moment(
+            now=now,
+            busy=busy,
+            busy_reason=busy_reason or "busy",
+            idle_since=self._scheduled_update_idle_since,
+            last_message_at=self._last_message_at(),
+            not_before=self._scheduled_update_not_before,
+        )
+
+    async def _scheduled_update_loop(self) -> None:
+        """Sample once a minute for the life of the adapter. Best effort: a
+        failing tick is logged and the next one runs; nothing here may take
+        the gateway down."""
+        while True:
+            try:
+                status = await self._scheduled_update_tick()
+                log.debug("scheduled update tick: %s", status)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.debug("scheduled update tick failed (ignored)", exc_info=True)
+            await asyncio.sleep(_SCHEDULED_UPDATE_TICK_SECONDS)
+
+    async def _scheduled_update_tick(self) -> str:
+        """One look: returns a short status token (the plan or safe-moment
+        reason, or the run's outcome)."""
+        global _scheduled_update_boot_checked
+        if not _claim_scheduled_update(self):
+            return "not_owner"
+        if not _scheduled_update_boot_checked:
+            _scheduled_update_boot_checked = True
+            await self._scheduled_update_boot_check()
+        now = self._clock()
+        if self._update_rpc_in_flight_in_process() or self._scheduled_update_running:
+            # An update_now owns the clone and the restart right now; its
+            # own drain decides. Counts as busy for the idle stretch.
+            self._scheduled_update_idle_since = None
+            return "update_in_flight"
+        moment = self._scheduled_safe_moment(now)
+
+        plan, supervisor = await self._scheduled_update_plan()
+        was_pinned = self._scheduled_update_pinned
+        self._scheduled_update_pinned = plan.reason == "pinned"
+        if plan.action == "none":
+            if plan.reason == "attempts_exhausted":
+                await self._scheduled_update_exhausted(plan.target_version)
+            elif plan.reason == "pinned":
+                if not was_pinned:
+                    log.info(
+                        "scheduled update waiting reason=pinned: the checkout "
+                        "is held off %s", self_update.MAIN_BRANCH,
+                    )
+                # An operator can pin without a restart, so the tick (not
+                # only the boot check) withdraws what was reported before.
+                await self._withdraw_scheduled_error()
+            return plan.reason
+        if not moment.safe:
+            return moment.reason
+        return await self._run_scheduled_update(plan, supervisor)
+
+    async def _scheduled_update_plan(
+        self,
+    ) -> tuple[scheduled_update.ScheduledPlan, self_update.Supervisor | None]:
+        """The probes (in worker threads) and the pure plan on them. The pin
+        is a git call, so it is only probed when the apply could run at all
+        (the off switches come first in the plan anyway)."""
+        supervisor = await asyncio.to_thread(self_update.verified_supervisor)
+        latest = await asyncio.to_thread(self_update.latest_known_version)
+        pending = await asyncio.to_thread(self_update.pending_restart_version)
+        attempts = await asyncio.to_thread(
+            scheduled_update.load_attempts, scheduled_update.attempts_path(),
+        )
+        enabled = self_update.auto_update_enabled()
+        pinned = False
+        if enabled and supervisor is not None:
+            pinned = await asyncio.to_thread(self_update.clone_pinned)
+        plan = scheduled_update.decide_scheduled_update(
+            current=__version__,
+            latest=latest,
+            pending=pending,
+            auto_update_enabled=enabled,
+            supervised=supervisor is not None,
+            attempts=attempts,
+            pinned=pinned,
+        )
+        return plan, supervisor
+
+    async def _scheduled_update_boot_check(self) -> None:
+        """Once per process: did the restart that ended the previous one
+        land? Then the update took: clear the app's error (lastError: null)
+        and forget the record. A reported failure whose target has not
+        landed is said again (a restart can cut off the heartbeat that
+        carried it), unless the scheduled apply no longer runs here
+        (switched off, no supervisor, or a pinned clone with nothing of its
+        own to restart onto): then it is withdrawn the same way as a landed
+        one (findings L3 and F2)."""
+        attempts_path = scheduled_update.attempts_path()
+        report_path = scheduled_update.report_path()
+        attempts = await asyncio.to_thread(
+            scheduled_update.load_attempts, attempts_path,
+        )
+        report = await asyncio.to_thread(scheduled_update.load_report, report_path)
+        attempt_landed = any(
+            scheduled_update.landed(target, __version__) for target in attempts
+        )
+        report_landed = report is not None and scheduled_update.landed(
+            report["target"], __version__,
+        )
+        if attempt_landed:
+            await asyncio.to_thread(scheduled_update.clear_record, attempts_path)
+        if report_landed:
+            await asyncio.to_thread(scheduled_update.clear_record, report_path)
+        if report is not None and not report_landed:
+            plan, _supervisor = await self._scheduled_update_plan()
+            if plan.reason not in scheduled_update.APPLY_OFF_REASONS:
+                error: dict | None = report["lastError"]
+            else:
+                # Switched off (BGOS_AUTO_UPDATE), no supervisor, or pinned:
+                # nothing here retries or lands that target, so its failure
+                # is no longer this host's state. Clear it once, do not
+                # re-say it on every boot.
+                await asyncio.to_thread(scheduled_update.clear_record, report_path)
+                log.info("scheduled update off here: withdrawing the stored failure")
+                error = None
+        elif attempt_landed or report_landed:
+            log.info("scheduled update landed: running %s", __version__)
+            error = None
+        else:
+            return
+        if _publish_scheduled_update_outcome(error):
+            await self._announce_scheduled_outcome()
+
+    async def _announce_scheduled_outcome(self) -> None:
+        """Send the outcome now, from every BGOS adapter in the process,
+        instead of waiting up to 6 hours for each one's next beat."""
+        adapters: list[BGOSAdapter] = []
+        for adapter in (self, *_live_adapters()):
+            if not any(adapter is seen for seen in adapters):
+                adapters.append(adapter)
+        # Together: each may wait out its own backend write window.
+        await asyncio.gather(*(adapter._post_heartbeat_once() for adapter in adapters))
+
+    async def _report_scheduled_error(
+        self, code: str, target: str | None, message: str,
+    ) -> None:
+        """A failed or exhausted run, for the app: kept for the next process
+        and sent at once as the heartbeat lastError (new news only)."""
+        error = scheduled_update.last_error(code, message, at=self._wall_clock())
+        if not _publish_scheduled_update_outcome(error):
+            return
+        await asyncio.to_thread(
+            scheduled_update.save_report,
+            scheduled_update.report_path(), target or "unknown", error,
+        )
+        await self._announce_scheduled_outcome()
+
+    async def _withdraw_scheduled_error(self) -> None:
+        """The scheduled apply does not run on a pinned clone, so a failure
+        it reported is no longer this host's state: forget the report and
+        clear the app's error, once (the boot check does the same when the
+        apply is switched off or unsupervised). Nothing to clear when
+        nothing was reported."""
+        path = scheduled_update.report_path()
+        report = await asyncio.to_thread(scheduled_update.load_report, path)
+        current = _scheduled_update_outcome
+        if report is None and (current is None or current[1] is None):
+            return
+        await asyncio.to_thread(scheduled_update.clear_record, path)
+        if _publish_scheduled_update_outcome(None):
+            await self._announce_scheduled_outcome()
+
+    async def _scheduled_update_exhausted(self, target: str | None) -> None:
+        await self._report_scheduled_error(
+            scheduled_update.EXHAUSTED_CODE,
+            target,
+            f"Update to {target or 'unknown'} did not take after "
+            f"{scheduled_update.MAX_ATTEMPTS_PER_TARGET} restarts; "
+            "left for a person to update",
+        )
+
+    async def _report_scheduled_update(
+        self,
+        stage: str,
+        *,
+        target_version: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Progress for a run nobody requested: there is no rpcId to POST
+        update_rpc progress to, so the stages (the update_now vocabulary)
+        go to the log, and a staged or restarting install is announced by
+        an immediate heartbeat (its updateReadiness carries
+        pendingRestartVersion; the next boot heartbeat carries the new
+        daemonVersion)."""
+        log.info(
+            "scheduled update stage=%s target=%s message=%s",
+            stage, target_version or "-", message or "-",
+        )
+        if stage in ("staged", "restarting"):
+            await self._post_heartbeat_once()
+
+    async def _run_scheduled_update(
+        self,
+        plan: scheduled_update.ScheduledPlan,
+        supervisor: self_update.Supervisor | None,
+    ) -> str:
+        if supervisor is None:  # decide_scheduled_update already refused
+            return "unsupervised"
+        # The tick awaited its probes in worker threads, so an update_now
+        # may have been accepted since its first check. Check again with no
+        # await between this check and the claim below.
+        if self._update_rpc_in_flight_in_process():
+            self._scheduled_update_idle_since = None
+            return "update_in_flight"
+        self._scheduled_update_running = True
+        try:
+            target_version = plan.target_version
+            if plan.action == "apply":
+                await self._report_scheduled_update(
+                    "installing", target_version=target_version,
+                )
+                try:
+                    applied = await asyncio.to_thread(
+                        self_update.apply_update,
+                        soak_seconds=scheduled_update.SOAK_SECONDS,
+                        now=self._wall_clock,
+                    )
+                    target_version = applied.after_version
+                except self_update.SelfUpdateError as exc:
+                    if exc.reason == "soak":
+                        return self._scheduled_update_wait(
+                            "soak", target_version, exc.retry_after,
+                        )
+                    if exc.reason == "pinned":
+                        # An operator pinned the clone (a pin or a rollback
+                        # left HEAD off main, finding H1) after the plan's
+                        # own probe. Not a failure, and one reported before
+                        # the pin no longer describes this host; the next
+                        # plan sees the pin and takes it from there.
+                        await self._withdraw_scheduled_error()
+                        return self._scheduled_update_wait(
+                            "pinned", target_version, None,
+                        )
+                    # Same fallback as update_now: a clone already holding
+                    # the newer install only needs the restart.
+                    pending = None
+                    if exc.reason == "no_update_available":
+                        pending = await asyncio.to_thread(
+                            self_update.pending_restart_version,
+                        )
+                        if pending is None:
+                            # The daily check saw a version origin/main no
+                            # longer has (pulled during its soak): nothing
+                            # failed, there is just nothing to take yet.
+                            return self._scheduled_update_wait(
+                                exc.reason, target_version, None,
+                            )
+                    if pending is None:
+                        return await self._scheduled_update_failed(
+                            exc.reason, target_version,
+                        )
+                    target_version = pending
+                except Exception as exc:
+                    log.exception("scheduled update apply crashed")
+                    return await self._scheduled_update_failed(
+                        (str(exc) or exc.__class__.__name__)[:300],
+                        target_version,
+                    )
+
+            # Work can arrive while git runs in its worker thread: judge the
+            # moment again on fresh state, and keep the install staged (the
+            # next safe moment restarts onto it) rather than cut it off.
+            now = self._clock()
+            moment = self._scheduled_safe_moment(now)
+            if not moment.safe:
+                await self._report_scheduled_update(
+                    "staged", target_version=target_version,
+                    message=moment.reason,
+                )
+                return "staged"
+
+            await self._report_scheduled_update(
+                "restarting", target_version=target_version,
+            )
+            # The heartbeat POST took real time: one last look before the
+            # point of no return, the whole safe moment and not only busy, so
+            # a message stamped on its way in (not yet a session) counts too.
+            # Never cancel or interrupt a turn.
+            moment = self._scheduled_safe_moment(self._clock())
+            if not moment.safe:
+                await self._report_scheduled_update(
+                    "staged", target_version=target_version,
+                    message=moment.reason,
+                )
+                return "staged"
+            # Committed. Hold new inbound work from here, with no await since
+            # the busy check, so nothing starts that the restart would cut.
+            _hold_intake(self._clock() + _INTAKE_HOLD_SECONDS)
+            # Count the attempt BEFORE the restart (the count must survive
+            # the very restart it records, so a restart that keeps landing
+            # on the old code stops at the cap instead of looping), but only
+            # once committed: a run that stayed staged used none.
+            await asyncio.to_thread(
+                scheduled_update.record_attempt,
+                scheduled_update.attempts_path(),
+                target_version or "unknown",
+            )
+            self._scheduled_update_not_before = (
+                self._clock() + scheduled_update.RETRY_SECONDS
+            )
+            spawned = await asyncio.to_thread(
+                self_update.schedule_supervisor_restart, supervisor,
+            )
+            if not spawned:
+                _release_intake()
+                return await self._scheduled_update_failed(
+                    "restart_spawn_failed", target_version,
+                )
+            return "restarting"
+        finally:
+            self._scheduled_update_running = False
+
+    def _scheduled_update_wait(
+        self, reason: str, target: str | None, wait: float | None,
+    ) -> str:
+        """Not a failure, so nothing reaches the app: wait `wait` seconds
+        (the retry window when unknown) before the next fetch."""
+        wait = wait if wait is not None and wait > 0 else scheduled_update.RETRY_SECONDS
+        self._scheduled_update_not_before = self._clock() + wait
+        log.info(
+            "scheduled update waiting reason=%s target=%s for=%ds",
+            reason, target or "-", int(wait),
+        )
+        return reason
+
+    async def _scheduled_update_failed(self, reason: str, target: str | None) -> str:
+        self._scheduled_update_not_before = (
+            self._clock() + scheduled_update.RETRY_SECONDS
+        )
+        await self._report_scheduled_update(
+            "error", target_version=target, message=reason,
+        )
+        await self._report_scheduled_error(
+            scheduled_update.FAILED_CODE,
+            target,
+            f"Scheduled update to {target or 'unknown'} failed: {reason}",
+        )
+        return "error"
 
     # -------------------------------------------------------------------------
     # Native in-app voice (voice_rpc, spec section 6.2, the Hermes broker)

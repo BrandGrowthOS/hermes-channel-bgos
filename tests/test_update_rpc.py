@@ -298,6 +298,31 @@ async def test_unsupervised_install_stages_to_disk_and_never_restarts(
     assert adapter._test_restarts == []
 
 
+async def test_launchd_supervised_update_restarts_through_kickstart(
+    adapter_and_api, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design 2.3: on macOS the verified launchd job is relaunch authority
+    too; before, the systemd-only probe made every Mac update stage."""
+    adapter, fake_api = adapter_and_api
+    monkeypatch.setattr(self_update, "systemd_user_unit", lambda: None)
+    monkeypatch.setattr(
+        self_update, "launchd_service_target",
+        lambda: "gui/501/ai.hermes.gateway",
+    )
+    kickstarts: list[str] = []
+    monkeypatch.setattr(
+        self_update, "schedule_launchd_restart",
+        lambda target: kickstarts.append(target) or True,
+    )
+
+    await adapter._handle_update_rpc(UPDATE_FRAME)
+    await _settle_update_tasks(adapter)
+
+    assert _stages(fake_api) == ["draining", "installing", "restarting"]
+    assert kickstarts == ["gui/501/ai.hermes.gateway"]
+    assert adapter._test_restarts == []
+
+
 @pytest.mark.parametrize(
     "reason", ["dirty_tree", "fetch_failed", "not_a_git_checkout"],
 )
@@ -480,6 +505,9 @@ async def test_boot_heartbeat_reports_readiness_and_latest_version(
     monkeypatch.setattr(
         self_update, "pending_restart_version", lambda clone_dir=None: None,
     )
+    # The scheduled tick connect() starts probes the pin under a supervisor:
+    # never run git against the checkout the suite runs from.
+    monkeypatch.setattr(self_update, "clone_pinned", lambda clone_dir=None: False)
     monkeypatch.delenv("BGOS_AUTO_UPDATE", raising=False)
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
         200, {"pairing_id": 42, "assistants": []},

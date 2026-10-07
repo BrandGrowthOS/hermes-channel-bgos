@@ -85,6 +85,24 @@ async def test_post_heartbeat_optional_fields(mock_bgos_server):
     await api.close()
 
 
+async def test_post_heartbeat_sends_explicit_null_last_error(mock_bgos_server):
+    """`lastError: null` clears the stored error (backend HeartbeatDto); an
+    omitted lastError leaves it untouched."""
+    api = BgosApi(
+        BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
+    )
+    mock_bgos_server.on("POST", HEARTBEAT_PATH).respond(204)
+
+    await api.post_heartbeat(daemon_version="1.2.3", last_error=None)
+    req = mock_bgos_server.last_request("POST", HEARTBEAT_PATH)
+    assert req.json_body == {"daemonVersion": "1.2.3", "lastError": None}
+
+    await api.post_heartbeat(daemon_version="1.2.3")
+    req = mock_bgos_server.last_request("POST", HEARTBEAT_PATH)
+    assert req.json_body == {"daemonVersion": "1.2.3"}
+    await api.close()
+
+
 # -----------------------------------------------------------------------------
 # Adapter lifecycle: boot heartbeat + failure tolerance
 # -----------------------------------------------------------------------------
@@ -151,6 +169,54 @@ async def test_disconnect_cancels_heartbeat_task(mock_bgos_server):
     assert adapter._heartbeat_task is None
     await asyncio.sleep(0)
     assert task.cancelled() or task.done()
+
+
+async def test_connect_starts_the_write_window_for_an_outcome_beat(
+    mock_bgos_server, monkeypatch,
+):
+    """Finding M2, across a restart: the process that restarted onto this
+    one beat moments before it ended, and the backend stores at most one
+    beat per pairing per 10 s. connect() itself starts this adapter's write
+    window, so the first beat carrying a scheduled outcome waits it out
+    even before this process has beaten once."""
+    from hermes_channel_bgos import bgos_adapter as bgos_adapter_module
+    from hermes_channel_bgos import self_update
+
+    async def idle(self) -> None:
+        return None
+
+    # No boot beat and no scheduled tick: only connect() can start the window.
+    monkeypatch.setattr(BGOSAdapter, "_heartbeat_loop", idle)
+    monkeypatch.setattr(BGOSAdapter, "_scheduled_update_loop", idle)
+    monkeypatch.setattr(self_update, "latest_known_version", lambda: None)
+    mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
+        200, {"pairing_id": 42, "assistants": []},
+    )
+    mock_bgos_server.on("POST", HEARTBEAT_PATH).respond(204)
+    adapter = BGOSAdapter(
+        BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"),
+    )
+    clock = [1000.0]
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        clock[0] += seconds
+
+    adapter._clock = lambda: clock[0]
+    adapter._sleep = sleep
+    await adapter.connect()
+    try:
+        clock[0] += 3.0  # the boot check publishes an outcome moments later
+        monkeypatch.setattr(
+            bgos_adapter_module, "_scheduled_update_outcome", (1, None),
+        )
+        await adapter._post_heartbeat_once()
+        assert waits == [pytest.approx(8.0)]
+        req = mock_bgos_server.last_request("POST", HEARTBEAT_PATH)
+        assert req.json_body["lastError"] is None
+    finally:
+        await adapter.disconnect()
 
 
 # -----------------------------------------------------------------------------
