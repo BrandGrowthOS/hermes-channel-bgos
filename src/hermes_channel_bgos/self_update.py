@@ -502,6 +502,38 @@ def _local_pyproject_version(clone_dir: Path) -> str:
     return version
 
 
+def _held_off_main(root: Path) -> str | None:
+    """None when HEAD is the main branch; otherwise what holds the clone
+    off it (another branch's ref, or "detached HEAD" for a pin or a
+    rollback). Raises git_status_failed when git cannot read the
+    repository."""
+    branch = _git(root, "symbolic-ref", "-q", "HEAD")
+    if branch.returncode not in (0, 1):
+        # Only exit 1 is git's quiet "not a symbolic ref" (a detached HEAD).
+        # Anything else is a repository git cannot read: a failure the app
+        # must see, as the status read reports it, never a quiet pin
+        # (which would also withdraw a failure reported before).
+        raise SelfUpdateError("git_status_failed", branch.stderr)
+    if branch.returncode != 0 or branch.stdout.strip() != f"refs/heads/{MAIN_BRANCH}":
+        return branch.stdout.strip() or "detached HEAD"
+    return None
+
+
+def clone_pinned(clone_dir: Path | None = None) -> bool:
+    """True when the clone is held off main (a pin, a rollback or another
+    branch), so the scheduled apply pulls nothing there: apply_update's
+    `pinned` test, without the fetch, for the scheduled plan (findings F1
+    and F2). False when there is no clone or git cannot read it: those are
+    failures apply_update reports, never a pin. Never raises."""
+    root = clone_dir if clone_dir is not None else clone_root()
+    if root is None or not (root / ".git").exists():
+        return False
+    try:
+        return _held_off_main(root) is not None
+    except SelfUpdateError:
+        return False
+
+
 def soak_remaining(committed_at: float, now: float, soak_seconds: float) -> float:
     """Pure: seconds until a commit made at `committed_at` (epoch) has been
     published for `soak_seconds`; 0 once it has."""
@@ -544,15 +576,9 @@ def apply_update(
     # just the same: an unattended run would take back a release someone
     # rolled away from. Another branch is a developer's, not ours to move.
     # Checked first, so a held clone is a quiet `pinned`, never an error.
-    branch = _git(root, "symbolic-ref", "-q", "HEAD")
-    if branch.returncode not in (0, 1):
-        # Only exit 1 is git's quiet "not a symbolic ref" (a detached HEAD).
-        # Anything else is a repository git cannot read: a failure the app
-        # must see, as the status read below reports it, never a quiet pin
-        # (which would also withdraw a failure reported before).
-        raise SelfUpdateError("git_status_failed", branch.stderr)
-    if branch.returncode != 0 or branch.stdout.strip() != f"refs/heads/{MAIN_BRANCH}":
-        raise SelfUpdateError("pinned", branch.stdout.strip() or "detached HEAD")
+    held = _held_off_main(root)
+    if held is not None:
+        raise SelfUpdateError("pinned", held)
 
     status = _git(root, "status", "--porcelain", "--untracked-files=normal")
     if status.returncode != 0:

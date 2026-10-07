@@ -640,6 +640,34 @@ def test_apply_update_reports_an_unreadable_repository_not_a_pin(
     assert excinfo.value.reason == "git_status_failed"
 
 
+def test_clone_pinned_reads_the_head_apply_update_refuses(cloned_repos) -> None:
+    """The scheduled plan's cheap probe (findings F1 and F2): the same
+    branch test as apply_update's `pinned`, without a fetch, so a held
+    clone is known before a run is planned."""
+    _origin, clone = cloned_repos
+    assert self_update.clone_pinned(clone) is False
+    _run_git(clone, "checkout", "--detach", "HEAD")
+    assert self_update.clone_pinned(clone) is True
+    _run_git(clone, "checkout", "-b", "local-work")
+    assert self_update.clone_pinned(clone) is True
+    _run_git(clone, "checkout", "main")
+    assert self_update.clone_pinned(clone) is False
+
+
+def test_clone_pinned_is_false_when_git_cannot_say(
+    cloned_repos, monkeypatch, tmp_path: Path,
+) -> None:
+    """No clone, or one git cannot read, is a failure apply_update reports,
+    never a pin that would withdraw it."""
+    _origin, clone = cloned_repos
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert self_update.clone_pinned(plain) is False
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(clone.parent))
+    (clone / ".git" / "HEAD").write_text("not a ref\n", encoding="utf-8")
+    assert self_update.clone_pinned(clone) is False
+
+
 def test_apply_update_takes_updates_again_once_back_on_main(cloned_repos) -> None:
     """Undoing the pin is `git checkout main` (or re-running install.sh)."""
     origin, clone = cloned_repos
