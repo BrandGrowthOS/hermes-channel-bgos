@@ -6313,30 +6313,43 @@ class BGOSAdapter(BasePlatformAdapter):
         resume = self._take_intake_resume_cursor()
         if resume is not None:
             last_message_id = min(last_message_id, resume)
-        await self._replay_inbound_since(last_message_id)
-        # Clicks and callbacks a hold kept are not in this fetch (it returns
-        # user message rows only): they are delivered from memory. Those
-        # held before a replayed message went just ahead of it (F3); the
-        # rest go now, also when the fetch failed or returned nothing.
-        await self._deliver_held_interactions()
+        if await self._replay_inbound_since(last_message_id):
+            # Clicks and callbacks a hold kept are not in this fetch (it
+            # returns user message rows only): they are delivered from
+            # memory. Those held before a replayed message went just ahead
+            # of it (F3); the rest go now, also when the fetch returned
+            # nothing.
+            await self._deliver_held_interactions()
+            return
+        # The fetch failed and the cursor has not moved: the next fetch
+        # replays the held messages. Only the taps no held message came
+        # before go now; the others wait to go in their place then.
+        await self._deliver_held_interactions(before_message_id=last_message_id + 1)
+        if self._held_interactions:
+            # Still a reopen: a fresh push, tap or callback fetches first.
+            pending = self._intake_resume_cursor
+            self._intake_resume_cursor = (
+                last_message_id if pending is None else min(pending, last_message_id)
+            )
 
-    async def _replay_inbound_since(self, last_message_id: int) -> None:
+    async def _replay_inbound_since(self, last_message_id: int) -> bool:
         """The fetch and replay _run_backfill describes, from
-        `last_message_id`, with the held clicks in their place."""
+        `last_message_id`, with the held clicks in their place. False only
+        when the fetch failed."""
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
             log.exception("backfill fetch failed for since_message_id=%d",
                           last_message_id)
-            return
+            return False
         # Conditional-GET fast path: the Stage-3 backend answers an unchanged
         # poll with a 0-byte 304, surfaced here as the NOT_MODIFIED sentinel.
         # Nothing to replay — return without touching the cursor (egress fix).
         if resp is NOT_MODIFIED:
-            return
+            return True
         messages = resp.get("messages") if isinstance(resp, dict) else None
         if not messages:
-            return
+            return True
 
         normalized: list[dict[str, Any]] = []
         for msg in messages:
@@ -6348,7 +6361,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 msg = {**msg, "message_id": msg["id"]}
             normalized.append(msg)
         if not normalized:
-            return
+            return True
 
         # Storm guard (2026-06-28): if the durable cursor is missing/stale,
         # BGOS can return a long historical backlog on gateway startup. Replaying
@@ -6373,7 +6386,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 "since_message_id=%d and advanced cursor to %d",
                 len(normalized), last_message_id, max_id,
             )
-            return
+            return True
 
         for msg in normalized:
             replayed_id = self._int_or_none(msg.get("message_id"))
@@ -6388,6 +6401,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._handle_inbound(msg, batchable=False)
             except Exception:
                 log.exception("backfill replay failed for message=%s", msg)
+        return True
 
     # -------------------------------------------------------------------------
     # Owner-triggered doctor checks (doctor_rpc)

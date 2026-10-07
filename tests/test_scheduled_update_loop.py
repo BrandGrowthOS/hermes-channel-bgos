@@ -1199,7 +1199,8 @@ async def test_held_messages_and_clicks_are_delivered_in_arrival_order(
 
 async def test_a_held_click_is_delivered_when_the_fetch_fails(sched):
     """The click is in memory, not in the fetch: a failed fetch still
-    delivers it (the held messages come with the next poll)."""
+    delivers a click no held message came before (the held messages come
+    with the next poll)."""
     adapter, api, clock, _state = sched
     received = _capture(adapter)
     adapter._save_last_id(500)
@@ -1292,6 +1293,63 @@ async def test_a_fresh_callback_after_the_hold_lapses_comes_after_what_was_held(
     await adapter._handle_callback({"callbackData": "menu:fresh", "userId": "u"})
     await asyncio.sleep(0.05)
     assert received == ["wait", "cb:menu:held", "cb:menu:fresh"]
+    assert api.fetches == [500]
+
+
+async def test_a_failed_reopen_fetch_keeps_a_tap_behind_the_message_held_before_it(
+    sched,
+):
+    """Review 3, F3-fetch-fail-reorders: the fetch that reopens intake
+    fails. A tap held after a typed message stays in memory (the cursor
+    has not moved, so the next fetch replays that message), and goes just
+    after it then, not ahead of it now."""
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+    await _hold_a_message_then_a_tap(adapter, clock)
+    real_fetch = api.fetch_inbound_since
+
+    async def down(last_id: int):
+        raise RuntimeError("backend down")
+
+    api.fetch_inbound_since = down  # type: ignore[method-assign]
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    await adapter._run_backfill(adapter._load_last_id())
+    await asyncio.sleep(0.05)
+    assert received == []
+    assert adapter._load_last_id() == 500
+
+    api.fetch_inbound_since = real_fetch  # type: ignore[method-assign]
+    api.inbound = [_message(501, "wait, change of plan")]
+    await adapter._run_backfill(adapter._load_last_id())
+    await asyncio.sleep(0.05)
+    assert received == ["wait, change of plan", "Yes"]
+    assert api.fetches == [500]
+
+
+async def test_a_fresh_tap_after_a_failed_reopen_fetch_still_comes_after_what_was_held(
+    sched,
+):
+    """A tap left in memory by a failed reopen fetch keeps the reopen
+    pending: a fresh tap after it fetches again first, and lands after the
+    held message and the held tap."""
+    adapter, api, clock, _state = sched
+    received = _capture(adapter)
+    await _hold_a_message_then_a_tap(adapter, clock)
+    real_fetch = api.fetch_inbound_since
+
+    async def down(last_id: int):
+        raise RuntimeError("backend down")
+
+    api.fetch_inbound_since = down  # type: ignore[method-assign]
+    clock[0] += bgos_adapter_module._INTAKE_HOLD_SECONDS
+    await adapter._run_backfill(adapter._load_last_id())
+    assert received == []
+
+    api.fetch_inbound_since = real_fetch  # type: ignore[method-assign]
+    api.inbound = [_message(501, "wait, change of plan")]
+    await adapter._handle_inbound_click(dict(_FRESH_CLICK))
+    await asyncio.sleep(0.05)
+    assert received == ["wait, change of plan", "Yes", "No"]
     assert api.fetches == [500]
 
 
