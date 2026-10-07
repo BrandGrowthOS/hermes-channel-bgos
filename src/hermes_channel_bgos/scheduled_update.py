@@ -9,8 +9,9 @@ decisions the adapter's scheduled-update loop runs every minute:
   (`apply`), restart onto an install already on disk (`restart`), or
   nothing. Only under a VERIFIED supervisor (systemd unit or launchd job
   owning this pid; decision D8: never exit without something to bring the
-  gateway back), only while BGOS_AUTO_UPDATE allows it, and never a fourth
-  time onto a target that already failed to come up three times.
+  gateway back), only while BGOS_AUTO_UPDATE allows it, never a pull on a
+  clone held off main (a pin or a rollback), and never a fourth time onto
+  a target that already failed to come up three times.
 - `decide_safe_moment`: WHEN. The update_now drain's busy definition (no
   active session, no pending plugin task, no agent work the gateway runner
   holds for any profile, no running Hermes cron job or background process)
@@ -82,6 +83,12 @@ REPORT_FILENAME = "bgos_scheduled_update_error.json"
 # they are set, whatever last_seen_at says.
 FAILED_CODE = "scheduled_update_failed"
 EXHAUSTED_CODE = "scheduled_update_exhausted"
+
+# The plan reasons that mean the scheduled apply pursues nothing on this
+# host: switched off, no verified supervisor, or a clone held off main with
+# no newer install of its own on disk. A failure it reported before is then
+# no longer this host's state, and is withdrawn (findings L3 and F2).
+APPLY_OFF_REASONS = frozenset({"updates_disabled", "unsupervised", "pinned"})
 _ERROR_CODE_MAX = 64
 _ERROR_MESSAGE_MAX = 300
 
@@ -111,13 +118,15 @@ def decide_scheduled_update(
     auto_update_enabled: bool,
     supervised: bool,
     attempts: Mapping[str, int],
+    pinned: bool,
 ) -> ScheduledPlan:
     """Pure: what the scheduled loop should do right now.
 
     `current` is the running version, `latest` the daily-checked newest at
     the pinned source, `pending` the on-disk clone version when it differs
     from the running one (self_update.pending_restart_version), `attempts`
-    restarts already tried per target version.
+    restarts already tried per target version, `pinned` whether the clone
+    is held off main (self_update.clone_pinned).
     """
     if not auto_update_enabled:
         return ScheduledPlan("none", "updates_disabled")
@@ -127,8 +136,17 @@ def decide_scheduled_update(
         return ScheduledPlan("none", "unsupervised")
 
     staged = pending if decide_version_update(current, pending) else None
-    baseline = staged or current
-    if decide_version_update(baseline, latest):
+    if pinned:
+        # An operator holds the clone (a pin, a rollback or a branch,
+        # finding H1): nothing is pulled, so the source's version is no
+        # target here, and neither is one exhausted before the pin (F2). A
+        # newer install the pin itself put on disk (`--pin` never restarts)
+        # is still restarted onto: that moves no git ref (F1), and the cap
+        # below counts that very target.
+        if staged is None:
+            return ScheduledPlan("none", "pinned")
+        plan = ScheduledPlan("restart", "staged", staged)
+    elif decide_version_update(staged or current, latest):
         plan = ScheduledPlan("apply", "newer_available", latest)
     elif staged is not None:
         plan = ScheduledPlan("restart", "staged", staged)

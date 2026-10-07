@@ -47,3 +47,7 @@ def test_readme_says_a_pin_holds_and_how_to_take_updates_again() -> None:
     assert "Pins hold" in section
     assert "reason=pinned" in section
     assert "checkout main" in section
+    # What a pin still gets (findings F1 and F2): the restart onto its own
+    # newer install, and an exhausted update withdrawn.
+    assert "restarts onto it" in section
+    assert "`scheduled_update_exhausted` included" in section

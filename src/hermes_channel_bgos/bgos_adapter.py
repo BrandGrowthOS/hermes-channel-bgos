@@ -1513,6 +1513,9 @@ class BGOSAdapter(BasePlatformAdapter):
         self._scheduled_update_idle_since: float | None = None
         self._scheduled_update_not_before: float | None = None
         self._scheduled_update_running: bool = False
+        # Whether the last plan was the pin's wait, so that wait is logged
+        # once per stretch instead of every minute.
+        self._scheduled_update_pinned: bool = False
         self._api.on_message_activity = self._note_outbound_message
         # Agent Boards round trip ([[BGOS_BOARDS]] marker). Executor tasks
         # are fire-and-forget like _voice_tasks (tracked so exceptions are
@@ -6918,35 +6921,62 @@ class BGOSAdapter(BasePlatformAdapter):
             return "update_in_flight"
         moment = self._scheduled_safe_moment(now)
 
+        plan, supervisor = await self._scheduled_update_plan()
+        was_pinned = self._scheduled_update_pinned
+        self._scheduled_update_pinned = plan.reason == "pinned"
+        if plan.action == "none":
+            if plan.reason == "attempts_exhausted":
+                await self._scheduled_update_exhausted(plan.target_version)
+            elif plan.reason == "pinned":
+                if not was_pinned:
+                    log.info(
+                        "scheduled update waiting reason=pinned: the checkout "
+                        "is held off %s", self_update.MAIN_BRANCH,
+                    )
+                # An operator can pin without a restart, so the tick (not
+                # only the boot check) withdraws what was reported before.
+                await self._withdraw_scheduled_error()
+            return plan.reason
+        if not moment.safe:
+            return moment.reason
+        return await self._run_scheduled_update(plan, supervisor)
+
+    async def _scheduled_update_plan(
+        self,
+    ) -> tuple[scheduled_update.ScheduledPlan, self_update.Supervisor | None]:
+        """The probes (in worker threads) and the pure plan on them. The pin
+        is a git call, so it is only probed when the apply could run at all
+        (the off switches come first in the plan anyway)."""
         supervisor = await asyncio.to_thread(self_update.verified_supervisor)
         latest = await asyncio.to_thread(self_update.latest_known_version)
         pending = await asyncio.to_thread(self_update.pending_restart_version)
         attempts = await asyncio.to_thread(
             scheduled_update.load_attempts, scheduled_update.attempts_path(),
         )
+        enabled = self_update.auto_update_enabled()
+        pinned = False
+        if enabled and supervisor is not None:
+            pinned = await asyncio.to_thread(self_update.clone_pinned)
         plan = scheduled_update.decide_scheduled_update(
             current=__version__,
             latest=latest,
             pending=pending,
-            auto_update_enabled=self_update.auto_update_enabled(),
+            auto_update_enabled=enabled,
             supervised=supervisor is not None,
             attempts=attempts,
+            pinned=pinned,
         )
-        if plan.action == "none":
-            if plan.reason == "attempts_exhausted":
-                await self._scheduled_update_exhausted(plan.target_version)
-            return plan.reason
-        if not moment.safe:
-            return moment.reason
-        return await self._run_scheduled_update(plan, supervisor)
+        return plan, supervisor
 
     async def _scheduled_update_boot_check(self) -> None:
         """Once per process: did the restart that ended the previous one
         land? Then the update took: clear the app's error (lastError: null)
         and forget the record. A reported failure whose target has not
         landed is said again (a restart can cut off the heartbeat that
-        carried it), unless the scheduled apply no longer runs here: then it
-        is withdrawn the same way as a landed one (finding L3)."""
+        carried it), unless the scheduled apply no longer runs here
+        (switched off, no supervisor, or a pinned clone with nothing of its
+        own to restart onto): then it is withdrawn the same way as a landed
+        one (findings L3 and F2)."""
         attempts_path = scheduled_update.attempts_path()
         report_path = scheduled_update.report_path()
         attempts = await asyncio.to_thread(
@@ -6964,14 +6994,14 @@ class BGOSAdapter(BasePlatformAdapter):
         if report_landed:
             await asyncio.to_thread(scheduled_update.clear_record, report_path)
         if report is not None and not report_landed:
-            supervisor = await asyncio.to_thread(self_update.verified_supervisor)
-            if self_update.auto_update_enabled() and supervisor is not None:
+            plan, _supervisor = await self._scheduled_update_plan()
+            if plan.reason not in scheduled_update.APPLY_OFF_REASONS:
                 error: dict | None = report["lastError"]
             else:
-                # Switched off (BGOS_AUTO_UPDATE) or no supervisor: nothing
-                # here retries or lands that target, so its failure is no
-                # longer this host's state. Clear it once, do not re-say it
-                # on every boot.
+                # Switched off (BGOS_AUTO_UPDATE), no supervisor, or pinned:
+                # nothing here retries or lands that target, so its failure
+                # is no longer this host's state. Clear it once, do not
+                # re-say it on every boot.
                 await asyncio.to_thread(scheduled_update.clear_record, report_path)
                 log.info("scheduled update off here: withdrawing the stored failure")
                 error = None
@@ -7084,10 +7114,11 @@ class BGOSAdapter(BasePlatformAdapter):
                             "soak", target_version, exc.retry_after,
                         )
                     if exc.reason == "pinned":
-                        # An operator holds this clone (a pin or a rollback
-                        # left HEAD off main, finding H1). Not a failure, and
-                        # one reported before the pin no longer describes
-                        # this host: the scheduled apply is off for it.
+                        # An operator pinned the clone (a pin or a rollback
+                        # left HEAD off main, finding H1) after the plan's
+                        # own probe. Not a failure, and one reported before
+                        # the pin no longer describes this host; the next
+                        # plan sees the pin and takes it from there.
                         await self._withdraw_scheduled_error()
                         return self._scheduled_update_wait(
                             "pinned", target_version, None,

@@ -107,11 +107,16 @@ async def sched(monkeypatch: pytest.MonkeyPatch):
         apply_kwargs=[],
         restarts=[],
         spawn_ok=True,
+        # The clone is held off main (a pin, a rollback or a branch): what
+        # self_update.clone_pinned reports, and apply_update refuses.
+        pinned=False,
     )
 
     def apply(clone_dir=None, **kwargs):
         state.applied.append(True)
         state.apply_kwargs.append(kwargs)
+        if state.pinned:
+            raise SelfUpdateError("pinned")
         if callable(state.apply_result):
             return state.apply_result()
         return state.apply_result
@@ -122,6 +127,9 @@ async def sched(monkeypatch: pytest.MonkeyPatch):
         self_update, "pending_restart_version", lambda clone_dir=None: state.pending,
     )
     monkeypatch.setattr(self_update, "apply_update", apply)
+    monkeypatch.setattr(
+        self_update, "clone_pinned", lambda clone_dir=None: state.pinned,
+    )
     monkeypatch.setattr(
         self_update, "schedule_supervisor_restart",
         lambda supervisor: state.restarts.append(supervisor) or state.spawn_ok,
@@ -444,8 +452,9 @@ async def test_a_pulled_release_is_not_an_error(sched):
 
 async def test_a_pinned_clone_waits_quietly(sched, caplog):
     """A pin or a rollback holds the clone (apply_update refuses `pinned`,
-    finding H1): a wait, not a failure. Nothing restarts, no attempt is
-    used, nothing reaches the app as an error."""
+    finding H1), here one made after the plan's own probe: a wait, not a
+    failure. Nothing restarts, no attempt is used, nothing reaches the app
+    as an error."""
     adapter, api, clock, state = sched
     caplog.set_level("INFO", logger=bgos_adapter_module.log.name)
 
@@ -466,7 +475,9 @@ async def test_a_pinned_clone_waits_quietly(sched, caplog):
 async def test_a_pin_withdraws_a_failure_reported_before_it(sched):
     """An error the scheduled apply reported before the operator pinned is
     no longer this host's state: the apply is off for a held clone, so the
-    report is forgotten and the app's error cleared, once."""
+    report is forgotten and the app's error cleared, once (here a pin made
+    after the plan's own probe; test_a_pin_withdraws_an_exhausted_update
+    covers the plan seeing it)."""
     adapter, api, clock, state = sched
     error = scheduled_update.last_error(
         scheduled_update.FAILED_CODE,
@@ -484,6 +495,135 @@ async def test_a_pin_withdraws_a_failure_reported_before_it(sched):
     clock[0] += scheduled_update.RETRY_SECONDS
     assert await _tick(adapter) == "pinned"
     assert _errors(api) == [error, None]
+
+
+async def test_a_pinned_clone_is_never_pulled(sched, caplog):
+    """The plan sees the pin before any run: no fetch at a safe moment, no
+    attempt, nothing for the app, and the wait is logged once, not every
+    minute."""
+    adapter, api, clock, state = sched
+    caplog.set_level("INFO", logger=bgos_adapter_module.log.name)
+    state.pinned = True
+    for _ in range(3):
+        assert await _tick(adapter) == "pinned"
+        clock[0] += QUIET
+    assert state.applied == [] and state.restarts == []
+    assert _errors(api) == []
+    assert scheduled_update.load_attempts(scheduled_update.attempts_path()) == {}
+    logged = [r for r in caplog.records if "reason=pinned" in r.getMessage()]
+    assert len(logged) == 1
+
+
+async def test_a_pinned_clone_restarts_onto_the_newer_install_its_pin_staged(sched):
+    """Finding F1: `--pin v<newer> --yes` never restarts, and the source has
+    moved on past the pin. Nothing is pulled on a held clone, but the
+    restart onto what the pin put on disk moves no git ref: it happens at
+    the next safe moment, counted against that very version."""
+    adapter, _api, clock, state = sched
+    state.pinned = True
+    state.pending = NEWER
+    state.latest = NEWEST
+    assert await _idle_through_quiet_window(adapter, clock) == "restarting"
+    assert state.applied == []
+    assert state.restarts == [LAUNCHD]
+    assert scheduled_update.load_attempts(scheduled_update.attempts_path()) == {
+        NEWER: 1,
+    }
+
+
+async def test_the_cap_counts_the_install_a_pin_staged(sched):
+    """A pin's own install that never comes up is capped like any other
+    target, not restarted onto every 30 minutes for good: the cap counts the
+    version the restart lands on, never the source's newer one."""
+    adapter, api, clock, state = sched
+    state.pinned = True
+    state.pending = NEWER
+    state.latest = NEWEST
+    for _ in range(scheduled_update.MAX_ATTEMPTS_PER_TARGET):
+        scheduled_update.record_attempt(scheduled_update.attempts_path(), NEWER)
+    assert await _tick(adapter) == "attempts_exhausted"
+    clock[0] += QUIET
+    assert await _tick(adapter) == "attempts_exhausted"
+    assert state.applied == [] and state.restarts == []
+    [error] = _errors(api)
+    assert error["code"] == "scheduled_update_exhausted"
+    assert NEWER in error["message"]
+
+
+async def test_a_pin_withdraws_an_exhausted_update(sched):
+    """Finding F2: three restarts onto NEWER did not take, and the app says
+    to update by hand. The operator does: a pin (here a rollback onto the
+    running version). The cap is checked before any pull, so the plan must
+    see the pin first: the exhausted error is withdrawn, once, instead of
+    standing for good."""
+    adapter, api, clock, state = sched
+    path = scheduled_update.attempts_path()
+    for _ in range(scheduled_update.MAX_ATTEMPTS_PER_TARGET):
+        scheduled_update.record_attempt(path, NEWER)
+    assert await _tick(adapter) == "attempts_exhausted"
+    [error] = _errors(api)
+    assert error["code"] == "scheduled_update_exhausted"
+
+    state.pinned = True
+    clock[0] += QUIET
+    assert await _tick(adapter) == "pinned"
+    assert _errors(api) == [error, None]
+    assert scheduled_update.load_report(scheduled_update.report_path()) is None
+    clock[0] += QUIET
+    assert await _tick(adapter) == "pinned"
+    assert _errors(api) == [error, None]
+    assert state.applied == [] and state.restarts == []
+
+
+@pytest.mark.parametrize(
+    ("code", "latest"),
+    [
+        (scheduled_update.EXHAUSTED_CODE, NEWER),
+        # Nothing newer known: the plan would otherwise be up_to_date.
+        (scheduled_update.FAILED_CODE, None),
+    ],
+    ids=["exhausted", "failed_nothing_newer"],
+)
+async def test_a_failure_stored_before_a_pin_is_withdrawn_at_boot(sched, code, latest):
+    """F2 at boot: a stored failure whose target has not landed is said
+    again only while the scheduled apply still pursues something here. A
+    pinned clone with no newer install of its own on disk pursues nothing,
+    so the boot withdraws it, the same as with the apply switched off."""
+    adapter, api, _clock, state = sched
+    state.pinned = True
+    state.latest = latest
+    path = scheduled_update.attempts_path()
+    for _ in range(scheduled_update.MAX_ATTEMPTS_PER_TARGET):
+        scheduled_update.record_attempt(path, NEWER)
+    error = scheduled_update.last_error(code, f"Update to {NEWER} did not take", at=0.0)
+    scheduled_update.save_report(scheduled_update.report_path(), NEWER, error)
+    assert await _tick(adapter) == "pinned"
+    assert _errors(api) == [None]
+    assert scheduled_update.load_report(scheduled_update.report_path()) is None
+
+
+async def test_an_exhausted_pin_install_still_stands_at_boot(sched):
+    """The pin's own newer install used its 3 restarts: the apply still
+    pursues it here, so its exhausted error is said again at boot, not
+    withdrawn and then reported anew on every boot."""
+    adapter, api, clock, state = sched
+    state.pinned = True
+    state.pending = NEWER
+    for _ in range(scheduled_update.MAX_ATTEMPTS_PER_TARGET):
+        scheduled_update.record_attempt(scheduled_update.attempts_path(), NEWER)
+    # What the previous process reported (the adapter's own wording).
+    error = scheduled_update.last_error(
+        scheduled_update.EXHAUSTED_CODE,
+        f"Update to {NEWER} did not take after "
+        f"{scheduled_update.MAX_ATTEMPTS_PER_TARGET} restarts; "
+        "left for a person to update",
+        at=0.0,
+    )
+    scheduled_update.save_report(scheduled_update.report_path(), NEWER, error)
+    assert await _tick(adapter) == "attempts_exhausted"
+    clock[0] += QUIET
+    assert await _tick(adapter) == "attempts_exhausted"
+    assert [e["code"] for e in _errors(api)] == [scheduled_update.EXHAUSTED_CODE]
 
 
 async def test_update_now_reports_a_pinned_clone(sched):

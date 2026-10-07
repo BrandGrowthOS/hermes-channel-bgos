@@ -39,6 +39,7 @@ def _plan(**overrides) -> ScheduledPlan:
         "auto_update_enabled": True,
         "supervised": True,
         "attempts": {},
+        "pinned": False,
     }
     inputs.update(overrides)
     return decide_scheduled_update(**inputs)
@@ -104,6 +105,44 @@ def _plan(**overrides) -> ScheduledPlan:
         (
             {"latest": "0.30.2", "attempts": {"0.30.1": MAX_ATTEMPTS_PER_TARGET}},
             ScheduledPlan("apply", "newer_available", "0.30.2"),
+        ),
+        # A clone held off main (a pin, a rollback or a branch, finding H1)
+        # is never pulled, however new the source is.
+        ({"latest": "0.31.0", "pinned": True}, ScheduledPlan("none", "pinned")),
+        ({"pinned": True}, ScheduledPlan("none", "pinned")),
+        # The newer install a pin put on disk (`--pin` never restarts) is
+        # restarted onto, past a newer source too: that moves no git ref
+        # (finding F1), and the cap counts that very target.
+        (
+            {"latest": "0.32.0", "pending": "0.31.0", "pinned": True},
+            ScheduledPlan("restart", "staged", "0.31.0"),
+        ),
+        (
+            {
+                "latest": "0.32.0", "pending": "0.31.0", "pinned": True,
+                "attempts": {"0.31.0": MAX_ATTEMPTS_PER_TARGET},
+            },
+            ScheduledPlan("none", "attempts_exhausted", "0.31.0"),
+        ),
+        # A rollback on disk is the operator's restart, never ours.
+        ({"pending": "0.29.0", "pinned": True}, ScheduledPlan("none", "pinned")),
+        # Finding F2: a target exhausted before the pin is no longer one the
+        # apply pursues here, so the plan is the pin, not the exhaustion.
+        (
+            {
+                "latest": "0.31.0", "pinned": True,
+                "attempts": {"0.31.0": MAX_ATTEMPTS_PER_TARGET},
+            },
+            ScheduledPlan("none", "pinned"),
+        ),
+        # The off switches still come first.
+        (
+            {"latest": "0.31.0", "pinned": True, "supervised": False},
+            ScheduledPlan("none", "unsupervised"),
+        ),
+        (
+            {"latest": "0.31.0", "pinned": True, "auto_update_enabled": False},
+            ScheduledPlan("none", "updates_disabled"),
         ),
     ],
 )
