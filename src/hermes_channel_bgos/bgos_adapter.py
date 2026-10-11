@@ -1486,8 +1486,12 @@ class BGOSAdapter(BasePlatformAdapter):
         # consult/dispatch frames (payload.voiceSessionId), never from the
         # agent. Task ids the marker already settled are remembered so the
         # dispatch runner does not report the same task a second time.
-        self._voice_session_by_chat: dict[int, str] = {}
+        self._voice_session_by_chat: dict[int, tuple[str, float]] = {}
         self._marker_settled_tasks: dict[str, None] = {}
+        # Blocks already executed, keyed (chat, kind, body), so a streamed
+        # reply whose preview send() and final edit both carry the block, or
+        # a gateway fallback that re-sends it, runs it once.
+        self._app_control_seen: dict[tuple[int, str, str], float] = {}
         self._doctor_rpc_in_flight: set[str] = set()
         self._doctor_tasks: set[asyncio.Task] = set()
         # Server-dispatched add_profile (one-click new-Hermes-agent).
@@ -1608,6 +1612,49 @@ class BGOSAdapter(BasePlatformAdapter):
         except Exception as exc:  # noqa: BLE001 - never break the reply
             log.warning("call failed unexpectedly: %s", exc)
 
+    _APP_CONTROL_DEDUPE_SECONDS = 120.0
+    _VOICE_SESSION_TTL_SECONDS = 3 * 3600.0
+
+    async def _execute_app_control(
+        self, chat_key: int, text: str,
+    ) -> tuple[str, bool, str | None]:
+        """Strip and run the [[BGOS_UI]] / [[BGOS_TASK]] blocks in `text`.
+
+        Returns `(cleaned_text, had_any_block, task_result_text)`. Never
+        raises. A block already run for this chat in the last
+        _APP_CONTROL_DEDUPE_SECONDS is stripped but not run again.
+        """
+        text, ui_requests, ui_errors = parse_ui_blocks(text)
+        text, task_request, task_errors = parse_task_block(text)
+        had_any = bool(ui_requests or ui_errors or task_request or task_errors)
+        if not had_any:
+            return text, False, None
+        for err in ui_errors + task_errors:
+            log.warning("app control marker not executed: %s (chat=%s)", err, chat_key)
+        now = time.monotonic()
+        for key, seen_at in list(self._app_control_seen.items()):
+            if now - seen_at > self._APP_CONTROL_DEDUPE_SECONDS:
+                del self._app_control_seen[key]
+
+        def _fresh(kind: str, body: str) -> bool:
+            key = (chat_key, kind, body)
+            if key in self._app_control_seen:
+                log.info("app control %s already run for chat %s; skipped", kind, chat_key)
+                return False
+            self._app_control_seen[key] = now
+            return True
+
+        fresh_ui = [
+            r for r in ui_requests if _fresh("ui", f"{r.action}|{r.target or ''}")
+        ]
+        if fresh_ui:
+            await self._run_ui_actions(chat_key, fresh_ui)
+        if task_request is not None and _fresh(
+            "task", json.dumps([task_request.task_id, task_request.result, task_request.failed]),
+        ):
+            await self._report_task_result(task_request)
+        return text, True, (task_request.result if task_request else None)
+
     async def _run_ui_actions(
         self, chat_key: int, requests: list[UiActionRequest],
     ) -> None:
@@ -1616,7 +1663,13 @@ class BGOSAdapter(BasePlatformAdapter):
         frame there is no call to steer, so nothing is sent; the backend
         would drop the frame anyway (it also refuses a session this pairing
         does not own, and one that is no longer live)."""
-        session_id = self._voice_session_by_chat.get(chat_key)
+        entry = self._voice_session_by_chat.get(chat_key)
+        session_id: str | None = None
+        if entry is not None:
+            if time.monotonic() - entry[1] <= self._VOICE_SESSION_TTL_SECONDS:
+                session_id = entry[0]
+            else:
+                del self._voice_session_by_chat[chat_key]
         if session_id is None:
             log.info(
                 "ui action not sent: no live voice session known for chat %s",
@@ -3488,15 +3541,15 @@ class BGOSAdapter(BasePlatformAdapter):
         # Same placement and contract as the call marker: stripped before any
         # other parsing, awaited so a task result lands before the dispatch
         # runner's automatic report, and never able to break the reply.
-        formatted, ui_requests, ui_errors = parse_ui_blocks(formatted)
-        formatted, task_request, task_errors = parse_task_block(formatted)
-        for err in ui_errors + task_errors:
-            log.warning("app control marker not executed: %s (chat=%s)", err, chat_key)
-        if ui_requests:
-            await self._run_ui_actions(chat_key, ui_requests)
-        if task_request is not None:
-            await self._report_task_result(task_request)
-        if (ui_requests or ui_errors or task_request or task_errors) and not formatted:
+        formatted, had_app_control, task_text = await self._execute_app_control(
+            chat_key, formatted,
+        )
+        if had_app_control and not formatted:
+            # A marker-only reply posts no bubble. A task result still feeds
+            # the voice reply capture, so a dispatch whose marker POST failed
+            # reports the agent's result, not an empty turn.
+            if task_text:
+                self._offer_voice_reply(chat_key, task_text)
             return SendResult(success=True)  # type: ignore[call-arg]
         # Agent Boards intercept ([[BGOS_BOARDS]] JSON blocks). Runs BEFORE
         # the status/buttons/media parsing so JSON payload characters are
@@ -3947,11 +4000,17 @@ class BGOSAdapter(BasePlatformAdapter):
                 success=False, error="unknown_chat_target",
             )
 
-        # App control markers execute once, on the final send(); a streamed
-        # preview only hides them.
-        cleaned_text, options, render_mode = _parse_buttons_block(
-            strip_app_control_markers(self.format_message(content))
-        )
+        # App control markers execute on the final text, which a streamed
+        # reply may deliver as this finalize edit rather than a fresh send()
+        # (the gateway only sends fresh when the adapter prefers it or the
+        # preview is old). Interim edits only hide them, including a block
+        # whose close tag has not streamed in yet.
+        edit_text = self.format_message(content)
+        if finalize:
+            edit_text, _, _ = await self._execute_app_control(chat_key, edit_text)
+        else:
+            edit_text = strip_app_control_markers(edit_text, hide_open_tail=True)
+        cleaned_text, options, render_mode = _parse_buttons_block(edit_text)
         mid_int = int(message_id)
         # Backend's UpdateMessageDto requires userId on PATCH (caught live
         # 2026-05-13: missing userId → 400 "userId should not be empty"
@@ -7437,7 +7496,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 and isinstance(voice_session_id, str)
                 and voice_session_id.isdigit()
             ):
-                self._voice_session_by_chat[chat_key] = voice_session_id
+                self._voice_session_by_chat[chat_key] = (
+                    voice_session_id, time.monotonic(),
+                )
         log.info(
             "voice_rpc frame op=%s rpc=%s assistant=%s chat=%s",
             frame.op, frame.rpc_id, frame.assistant_id, frame.chat_id,

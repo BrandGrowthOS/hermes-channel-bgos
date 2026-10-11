@@ -125,6 +125,12 @@ class TestParseUiBlocks:
         text = "Use it like:\n```\n[[BGOS_UI]]open_chat[[/BGOS_UI]]\n```"
         assert parse_ui_blocks(text) == (text, [], [])
 
+    def test_inline_code_span_is_documentation_not_a_call(self):
+        text = "Write `[[BGOS_UI]]open_chat[[/BGOS_UI]]` to peek at the chat."
+        assert parse_ui_blocks(text) == (text, [], [])
+        task = "Like `" + _task({"taskId": "1", "result": "a"}) + "`"
+        assert parse_task_block(task) == (task, None, [])
+
     def test_unclosed_block_is_left_alone(self):
         text = "[[BGOS_UI]]open_chat"
         assert parse_ui_blocks(text) == (text, [], [])
@@ -206,9 +212,25 @@ class TestStripForStreaming:
         text = "Hi [[BGOS_UI]]open_chat[[/BGOS_UI]] there " + _task({"taskId": "1", "result": "a"})
         assert strip_app_control_markers(text) == "Hi  there"
 
-    def test_a_block_still_streaming_is_hidden(self):
-        assert strip_app_control_markers("Opening now [[BGOS_UI]]show_wo") == "Opening now"
-        assert strip_app_control_markers('Ok [[BGOS_TASK]]{"taskId":') == "Ok"
+    def test_a_block_still_streaming_is_hidden_on_interim_edits(self):
+        f = strip_app_control_markers
+        assert f("Opening now [[BGOS_UI]]show_wo", hide_open_tail=True) == "Opening now"
+        assert f('Ok [[BGOS_TASK]]{"taskId":', hide_open_tail=True) == "Ok"
+
+    def test_an_unclosed_tag_in_final_text_is_prose_and_stays(self):
+        text = "Use the [[BGOS_UI]] marker to open panels. Anything else?"
+        assert strip_app_control_markers(text) == text
+
+    def test_tail_hiding_ignores_code(self):
+        text = "Example:\n```\n[[BGOS_UI]]open_chat\n```\nDone."
+        assert strip_app_control_markers(text, hide_open_tail=True) == text
+        inline = "Write `[[BGOS_UI]]` then the action"
+        assert strip_app_control_markers(inline, hide_open_tail=True) == inline
+
+    def test_tail_hiding_leaves_a_closed_last_block_alone(self):
+        assert strip_app_control_markers(
+            "a [[BGOS_UI]]open_chat[[/BGOS_UI]] b", hide_open_tail=True,
+        ) == "a  b"
 
     def test_plain_text_is_untouched(self):
         assert strip_app_control_markers("[[BGOS_BUTTONS]]x | y[[/BGOS_BUTTONS]]") == (
@@ -429,7 +451,7 @@ async def test_malformed_task_marker_posts_nothing(mock_bgos_server):
 
 
 @pytest.mark.asyncio
-async def test_streaming_edit_hides_markers_and_never_executes_them(mock_bgos_server):
+async def test_interim_streaming_edits_hide_markers_and_never_execute_them(mock_bgos_server):
     adapter = await _adapter(mock_bgos_server)
     mock_bgos_server.on("PATCH", "/api/v1/messages/300").respond(200, {"id": 300})
     try:
@@ -445,6 +467,77 @@ async def test_streaming_edit_hides_markers_and_never_executes_them(mock_bgos_se
         for p in patches:
             assert "BGOS_" not in json.dumps(p.json_body)
         assert not [r for r in mock_bgos_server.requests if "ui-action" in r.path or "voice-tasks" in r.path]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_reply_runs_its_markers_on_the_finalize_edit(mock_bgos_server):
+    # Without a fresh-final preference the gateway delivers the final text as
+    # edit_message(finalize=True), never a second send().
+    adapter = await _adapter(mock_bgos_server)
+    mock_bgos_server.on("PATCH", "/api/v1/messages/300").respond(200, {"id": 300})
+    mock_bgos_server.on("POST", UI_PATH.format(31)).respond(201, {"accepted": True})
+    mock_bgos_server.on("POST", TASK_PATH.format(5)).respond(201, {"ok": True})
+    try:
+        await _voice_frame(adapter, "dispatch", "31")
+        await adapter.edit_message(
+            chat_id=11, message_id=300, finalize=True,
+            content="Could not book. [[BGOS_UI]]show_work_stream[[/BGOS_UI]] "
+            + _task({"taskId": "5", "result": "Closed.", "failed": True}),
+        )
+        assert len(_requests(mock_bgos_server, "POST", UI_PATH.format(31))) == 1
+        task = mock_bgos_server.last_request("POST", TASK_PATH.format(5)).json_body
+        assert task["ok"] is False
+        assert adapter._task_settled_by_marker("5")
+        patch = mock_bgos_server.last_request("PATCH", "/api/v1/messages/300").json_body
+        assert patch["text"] == "Could not book."
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_preview_send_then_final_edit_runs_each_block_once(mock_bgos_server):
+    adapter = await _adapter(mock_bgos_server)
+    mock_bgos_server.on("PATCH", "/api/v1/messages/300").respond(200, {"id": 300})
+    mock_bgos_server.on("POST", UI_PATH.format(31)).respond(201, {"accepted": True})
+    try:
+        await _voice_frame(adapter, "consult", "31")
+        block = "[[BGOS_UI]]open_transcript[[/BGOS_UI]]"
+        await adapter.send(chat_id=11, content="Opening. " + block)
+        await adapter.edit_message(
+            chat_id=11, message_id=300, finalize=True, content="Opening. " + block + " Done.",
+        )
+        # A fallback fresh send of the same final text must not re-run it.
+        await adapter.send(chat_id=11, content="Opening. " + block + " Done.")
+        assert len(_requests(mock_bgos_server, "POST", UI_PATH.format(31))) == 1
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_session_is_forgotten(mock_bgos_server):
+    adapter = await _adapter(mock_bgos_server)
+    try:
+        await _voice_frame(adapter, "consult", "31")
+        sid, seen = adapter._voice_session_by_chat[11]
+        adapter._voice_session_by_chat[11] = (sid, seen - adapter._VOICE_SESSION_TTL_SECONDS - 1)
+        await adapter.send(chat_id=11, content="x [[BGOS_UI]]open_chat[[/BGOS_UI]]")
+        assert not [r for r in mock_bgos_server.requests if "ui-action" in r.path]
+        assert 11 not in adapter._voice_session_by_chat
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_marker_only_task_reply_feeds_the_voice_capture(mock_bgos_server):
+    adapter = await _adapter(mock_bgos_server)
+    mock_bgos_server.on("POST", TASK_PATH.format(8)).respond(500, {"error": "down"})
+    offered: list[tuple[int, str]] = []
+    adapter._offer_voice_reply = lambda chat, text: offered.append((chat, text))  # type: ignore[method-assign]
+    try:
+        await adapter.send(chat_id=11, content=_task({"taskId": "8", "result": "Booked for 9am."}))
+        assert offered == [(11, "Booked for 9am.")]
     finally:
         await adapter.disconnect()
 
@@ -518,3 +611,5 @@ async def test_standalone_send_strips_the_markers(tmp_path, monkeypatch):
     )
     assert result["success"] is True
     assert captured["text"] == "Cron ran."
+    await plugin_mod.standalone_send(None, "830", "Use the [[BGOS_UI]] marker on a call.")
+    assert captured["text"] == "Use the [[BGOS_UI]] marker on a call."

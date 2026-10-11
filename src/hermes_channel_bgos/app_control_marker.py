@@ -34,8 +34,8 @@ separate from its spoken summary. The backend keeps the first result for a
 task and ignores the rest, and the adapter skips its automatic report for a
 task the marker already settled.
 
-Blocks inside ``` or ~~~ fences are documentation and stay put, the same rule
-as MEDIA: and [[BGOS_BOARDS]].
+Blocks inside ``` or ~~~ fences, or inside an inline `code span`, are
+documentation and stay put.
 """
 from __future__ import annotations
 
@@ -53,7 +53,9 @@ TASK_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-_CODE_FENCE_RE = re.compile(r"(```.*?```|~~~.*?~~~)", re.DOTALL)
+# Fenced blocks AND inline code spans: these markers have side effects, so an
+# agent explaining the syntax in `backticks` must not fire a real action.
+_CODE_FENCE_RE = re.compile(r"(```.*?```|~~~.*?~~~|`[^`\n]+`)", re.DOTALL)
 
 # Mirror of the backend VOICE_UI_ACTION_KINDS whitelist, in its order.
 UI_ACTION_KINDS = (
@@ -226,20 +228,35 @@ def parse_task_block(content: str) -> tuple[str, TaskResultRequest | None, list[
     return cleaned, request, errors
 
 
-# A block still being streamed: an open tag with no close tag after it.
-_OPEN_TAIL_RE = re.compile(
-    r"\[\[BGOS_(?:UI|TASK)\]\](?:(?!\[\[/BGOS_(?:UI|TASK)\]\]).)*\Z",
-    re.IGNORECASE | re.DOTALL,
-)
+# A block still being streamed: an open tag at the end with no close tag after
+# it, in the last segment outside code.
+_OPEN_TAG_RE = re.compile(r"\[\[BGOS_(?:UI|TASK)\]\]", re.IGNORECASE)
+_CLOSE_TAG_RE = re.compile(r"\[\[/BGOS_(?:UI|TASK)\]\]", re.IGNORECASE)
 
 
-def strip_app_control_markers(content: str) -> str:
-    """Remove both marker kinds without executing them. The streaming edit
-    path uses this so a preview never shows marker syntax, including a block
-    whose close tag has not streamed in yet; execution happens once, on the
-    final send()."""
+def strip_app_control_markers(content: str, *, hide_open_tail: bool = False) -> str:
+    """Remove both marker kinds without executing them.
+
+    Complete blocks outside code are always removed. `hide_open_tail` also
+    hides a block whose close tag has not streamed in yet; only an interim
+    streaming edit sets it, because on final text an unclosed tag is prose
+    (e.g. "use the [[BGOS_UI]] marker") and must stay visible.
+    """
     if not content or "BGOS_" not in content.upper():
         return content
     content, _ = _strip_blocks(content, UI_BLOCK_RE, "BGOS_UI")
     content, _ = _strip_blocks(content, TASK_BLOCK_RE, "BGOS_TASK")
-    return _OPEN_TAIL_RE.sub("", content).rstrip()
+    if not hide_open_tail:
+        return content
+    segments = _CODE_FENCE_RE.split(content)
+    if len(segments) % 2 == 0:
+        return content
+    last = segments[-1]
+    opens = list(_OPEN_TAG_RE.finditer(last))
+    if not opens:
+        return content
+    tail_start = opens[-1].start()
+    if _CLOSE_TAG_RE.search(last, tail_start):
+        return content
+    segments[-1] = last[:tail_start]
+    return "".join(segments).rstrip()
