@@ -905,6 +905,22 @@ class BgosApi:
             "POST", f"/api/v1/integrations/voice-tasks/{task_id}/result", json=body,
         )
 
+    async def post_voice_ui_action(self, session_id: str, body: dict) -> Any:
+        """POST /api/v1/integrations/voice-sessions/{sessionId}/ui-action.
+
+        One whitelisted in-call UI action ({action, target?, agentName?,
+        actionId?, ts?}) fanned to the session owner's devices as a
+        `voice_ui_action` WS event. Dual-auth on the backend; this client
+        uses the pairing lane, and the backend drops (accepted:false, never
+        4xx) a frame for a session this pairing does not own or that is no
+        longer live.
+        """
+        return await self._request(
+            "POST",
+            f"/api/v1/integrations/voice-sessions/{session_id}/ui-action",
+            json=body,
+        )
+
     # -------------------------------------------------------------------------
     # Commands + agent catalog
     # -------------------------------------------------------------------------

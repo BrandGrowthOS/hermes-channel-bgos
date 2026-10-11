@@ -538,6 +538,12 @@ def build_dispatch_turn_text(*, question: str, context: str, task_id: str) -> st
         "summary of the outcome (1-6 sentences, plain prose — it will be "
         "read aloud to your user and posted to their Work Stream)."
     )
+    parts.append(
+        "If the task failed or cannot be done, say so in that summary and "
+        "also mark it failed on the Work Stream with "
+        f'[[BGOS_TASK]]{{"taskId":"{task_id}","result":"<why>","failed":true}}'
+        "[[/BGOS_TASK]]."
+    )
     return "\n\n".join(parts)
 
 
@@ -562,6 +568,9 @@ class VoiceRpcDeps:
     post_voice_task_result: Callable[[str, dict], Awaitable[Any]]
     run_brain_turn: Callable[[int | str, str, float], Awaitable[str]]
     voice_config: Callable[[int | str], VoiceConfig]
+    # True when a [[BGOS_TASK]] marker already settled this task id, so the
+    # detached dispatch runner skips its automatic report.
+    task_already_reported: Callable[[str], bool] | None = None
     # Injectable HTTP POST for tests: (url, headers, json, timeout) →
     # (status_code, decoded_json_or_text). Defaults to httpx.
     http_post_json: (
@@ -902,6 +911,13 @@ class VoiceRpcHandler:
                     "error": {"code": "DISPATCH_FAILED", "message": run_message},
                 }
             )
+            reported = self._deps.task_already_reported
+            if reported is not None and reported(task_id):
+                log.info(
+                    "voice dispatch task=%s already settled by the agent's "
+                    "[[BGOS_TASK]] marker; automatic report skipped", task_id,
+                )
+                return
             try:
                 await self._deps.post_voice_task_result(task_id, body)
             except Exception:
