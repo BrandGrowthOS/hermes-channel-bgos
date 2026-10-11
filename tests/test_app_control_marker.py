@@ -347,8 +347,15 @@ async def test_malformed_ui_marker_is_stripped_and_not_sent(mock_bgos_server):
 
 
 @pytest.mark.asyncio
-async def test_marker_only_reply_posts_no_empty_bubble(mock_bgos_server):
+@pytest.mark.parametrize("style", ["tidy", "everything"])
+async def test_marker_only_reply_posts_no_empty_bubble(mock_bgos_server, style):
+    # "everything" skips the quiet path's own empty-text guard, so this is the
+    # style where the marker's early return is what keeps the bubble out.
+    from hermes_channel_bgos.quiet_mode import EVERYTHING
+
     adapter = await _adapter(mock_bgos_server)
+    if style == "everything":
+        adapter._chat_style_for = lambda chat_key: EVERYTHING  # type: ignore[method-assign]
     mock_bgos_server.on("POST", UI_PATH.format(31)).respond(201, {"accepted": True})
     try:
         await _voice_frame(adapter, "consult", "31")
