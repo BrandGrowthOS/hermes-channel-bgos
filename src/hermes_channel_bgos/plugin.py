@@ -30,6 +30,7 @@ from .bgos_adapter import (
     _parse_event_block,
     _parse_media_markers,
 )
+from .app_control_marker import strip_app_control_markers
 from .bgos_api import BgosApi, BgosApiError
 from .config import BgosConfig, choose_pairing_token, redact_token
 from .hermes_profiles import resolve_hermes_home
@@ -292,6 +293,10 @@ async def standalone_send(
     api = BgosApi(BgosConfig(base_url=base_url, pairing_token=token))
     try:
         chat_key = int(chat_id)
+        # App control and Work Stream markers need a live adapter (the voice
+        # session comes from its consult/dispatch frames), so an
+        # out-of-process send only keeps them out of the visible text.
+        message = strip_app_control_markers(message)
         cleaned_message, marker_paths = _parse_media_markers(message)
         # Event-card marker parity with the live adapter's send(): a
         # [[BGOS_EVENT]]{...}[[/BGOS_EVENT]] block posts messageType="event"
@@ -491,6 +496,12 @@ You can ring the owner in the app, immediately, by embedding a `[[BGOS_CALL]]sho
 Do NOT shell out to `curl` or any terminal command to ring. A terminal call is gated by your HOST's shell approval layer, which is a different gate from BGOS approvals, so the owner sees a confusing generic command prompt instead of a call and nothing rings.
 
 Use this when you genuinely cannot proceed without the owner and a chat message would sit unread. If the owner is already on a call nothing rings; follow up in chat rather than retrying in a loop.
+
+## App control during a live call (the [[BGOS_UI]] marker)
+While your user is on a HOAI voice call with you, you can change what their call screen shows by embedding `[[BGOS_UI]]action[[/BGOS_UI]]` in your reply, or `[[BGOS_UI]]action | target[[/BGOS_UI]]` for a card. Actions: show_work_stream, hide_work_stream (the Work Stream panel of background tasks), open_transcript, close_transcript, expand_card, show_card_steps (target is a word from the card title or the chooser number the user said), open_chat, close_chat. At most 3 per reply. The adapter strips the marker and sends it only to the call you are on; with no live call nothing happens. Always say a few words too, never a marker alone.
+
+## Work Stream results (the [[BGOS_TASK]] marker)
+A [voice dispatch] turn names its voice task id. Your summary reply is posted to the user's Work Stream automatically. To mark the task failed, or to give the Work Stream a different result than your spoken summary, embed `[[BGOS_TASK]]{"taskId":"<id>","result":"<text>","failed":true}[[/BGOS_TASK]]` (failed defaults to false). One per reply; the first result for a task wins.
 
 ## Conversation context
 Each BGOS chat maps to a single Hermes conversation. DMs only — no group threads, no forum topics. The user can wipe context via `/new`. Typing indicators, stickers, reactions, and message editing by the user are not supported."""
