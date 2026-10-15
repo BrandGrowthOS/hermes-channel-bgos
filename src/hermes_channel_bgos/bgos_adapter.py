@@ -518,6 +518,9 @@ def _gateway_runner_turns(runner: Any, cron_jobs: int, own: Any) -> int:
 # so legitimate agent media written anywhere non-sensitive still sends.
 # Bounded memory for the duplicate-delivery guard in _handle_inbound.
 _DISPATCHED_IDS_CAP = 1024
+# Messages kept for a still-unknown assistant: how many, and for how long.
+_DROPPED_UNKNOWN_CAP = 200
+_DROPPED_UNKNOWN_TTL_SECONDS = 600.0
 
 _SENSITIVE_MEDIA_SYSTEM_PREFIXES: tuple[str, ...] = (
     "/etc",
@@ -1341,6 +1344,11 @@ class BGOSAdapter(BasePlatformAdapter):
         )
         # The agents the previous poll start served, to spot one that is back.
         self._previously_known: set[int] | None = None
+        # Messages dropped for a still-unknown assistant, kept to deliver once
+        # it is exposed: (assistant id, message id) -> (payload, first seen).
+        self._dropped_unknown: OrderedDict[tuple[int, int], tuple[dict, float]] = (
+            OrderedDict()
+        )
         # One poll cursor per agent (see cursors.py), not one per gateway.
         self._cursors = AgentCursors(
             self._hermes_home / "bgos_last_ids.json", self._last_id_path()
@@ -5583,6 +5591,7 @@ class BGOSAdapter(BasePlatformAdapter):
                     "assistant_id=%s still unknown after refresh — dropping",
                     assistant_id,
                 )
+                self._remember_dropped_unknown(data)
                 return
 
         # Persist the last-seen message id IMMEDIATELY after we confirm the
@@ -6502,6 +6511,7 @@ class BGOSAdapter(BasePlatformAdapter):
         resume = self._take_intake_resume_cursor()
         if resume is not None:
             last_message_id = min(last_message_id, resume)
+        await self._replay_dropped_unknown()
         if await self._replay_inbound_since(last_message_id):
             # Clicks and callbacks a hold kept are not in this fetch (it
             # returns user message rows only): they are delivered from
@@ -6609,6 +6619,37 @@ class BGOSAdapter(BasePlatformAdapter):
                 log.exception("backfill replay failed for message=%s", msg)
         self._advance_idle_agents(known, polled, len(messages))
         return True
+
+    def _remember_dropped_unknown(self, data: dict) -> None:
+        """Keep a message that was dropped because its assistant is still
+        unknown, so it is delivered once that agent is exposed. The per agent
+        cursors move on past it (an idle agent is carried up to what a poll
+        covered), so a later poll would not return it. In memory, bounded."""
+        aid = self._int_or_none(data.get("assistant_id"))
+        mid = self._int_or_none(data.get("message_id"))
+        if aid is None or mid is None:
+            return
+        key = (aid, mid)
+        if key not in self._dropped_unknown:
+            self._dropped_unknown[key] = (data, self._clock())
+        while len(self._dropped_unknown) > _DROPPED_UNKNOWN_CAP:
+            self._dropped_unknown.popitem(last=False)
+
+    async def _replay_dropped_unknown(self) -> None:
+        """Deliver the remembered messages whose agent is known now; forget
+        the ones that waited too long."""
+        if not self._dropped_unknown:
+            return
+        now = self._clock()
+        for key, (data, since) in list(self._dropped_unknown.items()):
+            if now - since > _DROPPED_UNKNOWN_TTL_SECONDS:
+                self._dropped_unknown.pop(key, None)
+            elif self._state.get_route(key[0]) is not None:
+                self._dropped_unknown.pop(key, None)
+                try:
+                    await self._handle_inbound(data, batchable=False)
+                except Exception:
+                    log.exception("replay of a held message failed: %s", data)
 
     @classmethod
     def _row_assistant_id(cls, msg: dict[str, Any]) -> int | None:

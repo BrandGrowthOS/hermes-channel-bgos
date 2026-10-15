@@ -212,6 +212,51 @@ async def test_boot_with_no_agent_exposed_then_a_stale_agent_exposed_rejoins_at_
     assert got == []
 
 
+async def test_a_first_message_to_a_newly_exposed_agent_is_delivered_when_the_refresh_misses_it() -> None:
+    # Agent 1 is known and idle; agent 9 was just exposed and its first row (90)
+    # is polled before the gateway has learned it (the refresh is rate limited).
+    backend = _Backend([_row(90, 9)], [])
+    adapter, got = _adapter(backend, agents=(1,))
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
+
+    await adapter._run_backfill(adapter._poll_since())
+    assert got == []  # unknown for now; the idle agent was carried past it
+
+    adapter._state.set_route(9, "route_9")  # the gateway learns agent 9
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert got == [(9, 90)]
+
+
+async def test_a_held_message_is_not_delivered_twice_and_expires() -> None:
+    backend = _Backend([_row(90, 9)], [], [])
+    adapter, got = _adapter(backend, agents=(1,))
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    now = [1000.0]
+    adapter._clock = lambda: now[0]  # type: ignore[assignment]
+    adapter._poll_since()
+    await adapter._run_backfill(adapter._poll_since())
+    assert (9, 90) in adapter._dropped_unknown
+
+    now[0] += 601  # waited too long
+    await adapter._run_backfill(adapter._poll_since())
+    assert (9, 90) not in adapter._dropped_unknown
+
+    adapter._state.set_route(9, "route_9")
+    await adapter._run_backfill(adapter._poll_since())
+    assert got == []
+
+
 async def test_a_live_push_during_the_fetch_does_not_hide_an_older_row_of_the_response() -> None:
     adapter, got = _adapter(_Backend())
 
