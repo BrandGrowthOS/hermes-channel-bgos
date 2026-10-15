@@ -15,6 +15,7 @@ from hermes_channel_bgos.bgos_adapter import (
     _format_inbound_files,
 )
 from hermes_channel_bgos.config import BgosConfig
+from tests.conftest import forget_inbound_progress
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +204,7 @@ async def test_rest_backfill_surfaces_files(mock_bgos_server, monkeypatch):
         # fetch, which a real since-cursor backend never does. Reset the
         # duplicate-delivery guard along with the handled list so this
         # test stays about the backfill mechanism, not the dedup.
-        adapter._dispatched_inbound_ids.clear()
+        forget_inbound_progress(adapter)
         await adapter._run_backfill(699)
 
         assert len(handled) == 1

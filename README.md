@@ -398,7 +398,7 @@ Then run `hermes-bgos-doctor` to confirm everything's green.
 | `BGOS_VOICE_VOICE` | `marin` | No | OpenAI Realtime voice name for in-app voice calls. |
 | `BGOS_VOICE_PERSONA` | head of `$HERMES_HOME/SOUL.md` | No | Extra persona text baked into the voice session instructions. Defaults to the first ~4000 chars of the profile's `SOUL.md` when unset. |
 | `BGOS_AUTO_UPDATE` | on | No | Set to `off` (or `0`, `false`, `no`) to stop this plugin updating itself: no scheduled apply at an idle moment, and the app's Update now answers `updates_disabled`. Independent of the HOAI app's Keep agents running switch. See [Updates at idle](#updates-at-idle-0300). |
-| `HERMES_HOME` | `~/.hermes` | No | Root for Hermes config + secrets + the persisted `bgos_last_id` cursor and `bgos_chat_style.json` preferences. **For a named-profile Hermes install, point this at the profile dir** (e.g. `~/.hermes/profiles/david`) so the secrets file, cursor, preferences, and systemd `EnvironmentFile=` all resolve under the same root. |
+| `HERMES_HOME` | `~/.hermes` | No | Root for Hermes config + secrets + the persisted per-agent cursors (`bgos_last_ids.json`) and `bgos_chat_style.json` preferences. **For a named-profile Hermes install, point this at the profile dir** (e.g. `~/.hermes/profiles/david`) so the secrets file, cursor, preferences, and systemd `EnvironmentFile=` all resolve under the same root. |
 
 **Minimum working `.env`:**
 ```bash
@@ -673,7 +673,7 @@ If that exists and is non-empty, the adapter should pick it up automatically.
 
 ### Runtime — message flow
 
-**Every Hermes restart sends duplicate replies forever.** You're on a vendor pkg older than `c571cd6`. The first-connect backfill was hardcoded to `since_message_id=0`, replaying all history on every restart. `git pull` and restart — newer versions persist the cursor to `~/.hermes/bgos_last_id`.
+**Every Hermes restart sends duplicate replies forever.** You're on a vendor pkg older than `c571cd6`. The first-connect backfill was hardcoded to `since_message_id=0`, replaying all history on every restart. `git pull` and restart. Newer versions persist the cursors to `~/.hermes/bgos_last_ids.json` (one per agent; versions before 0.32.0 used a single `~/.hermes/bgos_last_id`).
 
 **Hermes card's agent checklist stays empty.** The adapter on connect logs:
 ```
@@ -734,7 +734,7 @@ Then `systemctl --user daemon-reload && systemctl --user restart hermes-gateway.
 - `BgosWs` (`bgos_ws.py`) — python-socketio client. Handshake with `?pairingToken=…`, joins `pairing:<id>` + `assistant:<id>` rooms, exponential-backoff reconnect, REST backfill hook on reconnect.
 - `BGOSAdapter` (`bgos_adapter.py`) — subclass of `BasePlatformAdapter`. Resolves config from (priority order) BgosConfig → Hermes config attrs → env vars → `~/.hermes/secrets/bgos.json`. Implements the 4 abstract methods + optional `send_image/voice/video/document/animation` + `send_exec_approval` with 4-button Telegram parity.
 - `StateStore` (`state_store.py`) — in-process state: assistant→route map, retry cache, conversation bindings. Not persisted; rebuilt from `whoami()` + REST backfill on reconnect. When inbound arrives for an unknown `assistant_id`, the adapter re-runs `whoami()` and reconciles the map in place (hot-refresh), so agents exposed after startup work without a restart.
-- `bgos_last_id` file (`$HERMES_HOME/bgos_last_id`) — persisted cursor for the last seen message id. Monotonically advances. Prevents history-replay on restart.
+- `bgos_last_ids.json` (`$HERMES_HOME/bgos_last_ids.json`, `cursors.py`): persisted cursor for the last seen message id, ONE PER AGENT (assistant id). Each monotonically advances. Prevents history-replay on restart, and lets two agents on one gateway each receive a message addressed to both. The pre-0.32.0 single `bgos_last_id` is migrated once on first start.
 - `commands_sync.py`: merges Hermes's native slash manifest with the 4 bridge-local commands, then pushes it via `PUT /integrations/assistants/:id/commands`.
 - `agents.py` — shared `route:Display Name` spec parser + env enumeration; the single source of truth used by the adapter's catalog push, the pair CLI's `--agents`, and the doctor.
 - `pair_cli.py` — the `hermes-pair-bgos` console script (`--agents` publishes the catalog at pair time; `--wait-for-exposure` polls until you tick agents).
@@ -787,3 +787,14 @@ Hermes agents can now steer the HOAI call screen and settle Work Stream tasks, t
 - **`[[BGOS_UI]]action[[/BGOS_UI]]`** (or `action | target` for a card) during a live voice call becomes `POST /api/v1/integrations/voice-sessions/:sessionId/ui-action`. Actions are the backend whitelist: `show_work_stream`, `hide_work_stream`, `open_transcript`, `close_transcript`, `expand_card`, `show_card_steps`, `open_chat`, `close_chat`; at most 3 per reply. The session id comes from the backend's own consult and dispatch frames for that chat (`payload.voiceSessionId`), never from the agent, and the backend refuses a session this pairing does not own or that is no longer live. With no call known for the chat nothing is sent.
 - **`[[BGOS_TASK]]{"taskId":"<id>","result":"<text>","failed":false}[[/BGOS_TASK]]`** becomes `POST /api/v1/integrations/voice-tasks/:taskId/result` with the same body the Claude Code `complete_voice_task` tool sends. A dispatch run's reply is still reported automatically; the marker is for marking a task failed or giving the Work Stream its own result, and the automatic report is skipped for a task it settled.
 - Malformed blocks are stripped and logged, never executed. Streaming previews hide the markers; they run once, on the final message (a fresh send or the finalize edit). Blocks in fenced or inline code never run. Out-of-process (cron) sends only strip them.
+
+## Per-agent poll cursors (0.32.0)
+
+The poll cursor is kept per agent (per assistant id), not per gateway. The backend serves a message addressed to several agents as one poll row per agent, all with the same message id, so one shared cursor (and an id-only duplicate guard) let the first agent's row hide the others': dropped as a duplicate in the same poll, or never fetched again after a restart between the two agents' turns. Now:
+
+- The poll starts from the lowest cursor of the agents this gateway serves, and each returned row is kept only past its own agent's cursor. The duplicate guard is per (agent, message).
+- An agent with no row in a poll is carried up to what the poll covered, so an idle agent never pins the window and starves the others.
+- The cursors live in `$HERMES_HOME/bgos_last_ids.json`. On first start under 0.32.0 the old single `bgos_last_id` is migrated: every agent known at the first poll starts from its value, so nothing is replayed and nothing is skipped. An agent exposed later starts at the newest consumed id. The old file is left in place and no longer written; a downgrade resumes from that frozen value (the backfill storm guard fast-forwards past anything beyond its limit).
+- A WS reconnect backfills from the lowest agent cursor, not from the highest id the socket saw.
+- Inbound messages have no separate acknowledgement call: the persisted cursor is the acknowledgement.
+- Unchanged: a row for an assistant that is still unknown after a pairing refresh is dropped, not held.

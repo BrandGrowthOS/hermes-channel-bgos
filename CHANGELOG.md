@@ -2,6 +2,15 @@
 
 Older releases are described in the README sections named after their version.
 
+## 0.32.0 (2026-10-15)
+
+Per agent poll cursors (Channels and Organizations phase 0, PR 0.3e).
+
+- The inbound cursor is now one per agent (assistant id) in `$HERMES_HOME/bgos_last_ids.json`, not one per gateway. A channel message addressed to two agents on one gateway reaches both: before, the first agent's row moved the shared cursor past the id and was the only one the duplicate guard let through, so the second agent lost it (in the same poll, or after a restart between the two turns).
+- The poll starts from the lowest known agent cursor and keeps each row only past its own agent's cursor; the duplicate guard is per (agent, message); an idle agent is carried up to what the poll covered so it cannot pin the window.
+- Migration: the old single `bgos_last_id` seeds every agent known at the first poll, so nothing is replayed and nothing is skipped. An agent exposed later starts at the newest consumed id. The old file is left in place and no longer written.
+- A WS reconnect backfills from the lowest agent cursor.
+
 ## 0.31.0 (2026-10-11)
 
 App control and the Work Stream for Hermes agents (board row 019fc652-952b).

@@ -71,6 +71,7 @@ from .peer_marker import (
     plan_request as plan_peer_request,
 )
 from .config import BgosConfig, choose_pairing_token, redact_token
+from .cursors import AgentCursors, BACKEND_PAGE_SIZE
 from .doctor import run_checks
 from .missions_bridge import MissionLane, classify_goal_line
 from .quiet_mode import (
@@ -1329,11 +1330,19 @@ class BGOSAdapter(BasePlatformAdapter):
         # outside that scope, so path lookups must use this captured value,
         # never re-read the environment.
         self._hermes_home: Path = resolve_hermes_home()
-        # Message ids this adapter already dispatched (bounded FIFO).
-        # Guards against the WS push and the REST poll both delivering
-        # the same message when a poll request is in flight as it
-        # arrives - without this the agent answers twice.
-        self._dispatched_inbound_ids: OrderedDict[int, None] = OrderedDict()
+        # (assistant id, message id) pairs this adapter already dispatched
+        # (bounded FIFO). Guards against the WS push and the REST poll both
+        # delivering the same message when a poll request is in flight as it
+        # arrives - without this the agent answers twice. Keyed per agent: a
+        # message addressed to several agents is one row per agent with the
+        # SAME message id, and each agent must get its own.
+        self._dispatched_inbound_ids: OrderedDict[tuple[int | None, int], None] = (
+            OrderedDict()
+        )
+        # One poll cursor per agent (see cursors.py), not one per gateway.
+        self._cursors = AgentCursors(
+            self._hermes_home / "bgos_last_ids.json", self._last_id_path()
+        )
         self._stt_setup = SttSetupNotifier(
             self._post_stt_setup_event,
             self._edit_stt_setup_event,
@@ -2041,12 +2050,13 @@ class BGOSAdapter(BasePlatformAdapter):
             )
 
         # Replay any messages that arrived while the adapter was down. The
-        # cursor comes from the persisted last-id file ($HERMES_HOME/
-        # bgos_last_id) — WITHOUT persistence every restart would backfill
+        # cursors come from the persisted per-agent file ($HERMES_HOME/
+        # bgos_last_ids.json). WITHOUT persistence every restart would backfill
         # from 0, replaying all history and sending duplicate agent replies
-        # indefinitely. Fresh installs start at 0 (replay once), then the
-        # file auto-advances as messages flow through _handle_inbound.
-        asyncio.create_task(self._run_backfill(self._load_last_id()))
+        # indefinitely. Fresh installs start at 0 (replay once), then each
+        # agent's entry auto-advances as its messages flow through
+        # _handle_inbound. The old single bgos_last_id is migrated on first start.
+        asyncio.create_task(self._run_backfill(self._poll_since()))
 
         # Start the REST poll loop. Server currently doesn't deliver
         # inbound_message over WS to integration sockets — the join-room
@@ -2226,9 +2236,10 @@ class BGOSAdapter(BasePlatformAdapter):
 
     # -------------------------------------------------------------------------
     # Last-seen message-id persistence — prevents duplicate-replay on restart.
-    # Lives at $HERMES_HOME/bgos_last_id. Monotonically advances; never
-    # regresses. Read on connect(), written after every successful inbound
-    # (both WS live and REST backfill).
+    # One cursor PER AGENT at $HERMES_HOME/bgos_last_ids.json (cursors.py).
+    # Monotonically advances; never regresses. Read on connect(), written after
+    # every successful inbound (both WS live and REST backfill). The pre
+    # per-agent single cursor, $HERMES_HOME/bgos_last_id, is migrated once.
     # -------------------------------------------------------------------------
 
     def _seed_home_channel_target(self) -> None:
@@ -2453,24 +2464,31 @@ class BGOSAdapter(BasePlatformAdapter):
             "turn_state": getattr(event, "turn_state", None),
         }
 
+    def _known_assistant_ids(self) -> list[int]:
+        """The agents this gateway serves (bound assistant ids)."""
+        return list(self._state.assistant_route.keys())
+
+    def _poll_since(self) -> int:
+        """Where the REST poll starts: the lowest cursor of the known agents.
+        Each returned row is then kept only past its own agent's cursor."""
+        return self._cursors.since(self._known_assistant_ids())
+
+    def _save_agent_cursor(self, assistant_id: Any, message_id: int) -> None:
+        """Advance one agent's cursor (never regresses)."""
+        aid = self._int_or_none(assistant_id)
+        if aid is not None:
+            self._cursors.save(aid, message_id)
+
     def _load_last_id(self) -> int:
-        try:
-            return int(self._last_id_path().read_text().strip())
-        except (OSError, ValueError):
-            return 0
+        """Gateway-wide view of the cursors (the poll start): the lowest cursor
+        of the known agents. Kept for callers of the single cursor."""
+        return self._poll_since()
 
     def _save_last_id(self, message_id: int) -> None:
-        if not isinstance(message_id, int) or message_id <= 0:
-            return
-        try:
-            path = self._last_id_path()
-            if message_id > self._load_last_id():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(str(message_id))
-        except OSError:
-            # Disk full / read-only / permission denied — don't crash the
-            # connect; worst case we replay on next restart.
-            log.warning("could not persist bgos_last_id=%d", message_id)
+        """Gateway-wide seed: moves the floor and every known agent to
+        `message_id` (never regresses). The inbound path saves per agent with
+        _save_agent_cursor."""
+        self._cursors.seed_all(self._known_assistant_ids(), message_id)
 
     async def _push_agent_catalog_safe(self) -> None:
         if self.pairing_id is None:
@@ -2529,7 +2547,7 @@ class BGOSAdapter(BasePlatformAdapter):
         try:
             while True:
                 await asyncio.sleep(interval)
-                await self._run_backfill(self._load_last_id())
+                await self._run_backfill(self._poll_since())
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -5567,17 +5585,18 @@ class BGOSAdapter(BasePlatformAdapter):
         # reset acks in a row" loop caught 2026-05-15.
         msg_id = data.get("message_id")
         if dedup and isinstance(msg_id, int):
-            if msg_id in self._dispatched_inbound_ids:
+            dedup_key = (self._int_or_none(assistant_id), msg_id)
+            if dedup_key in self._dispatched_inbound_ids:
                 log.info(
                     "dropping duplicate delivery of message_id=%d "
-                    "(ws/poll race)", msg_id,
+                    "assistant_id=%s (ws/poll race)", msg_id, assistant_id,
                 )
                 return
-            self._dispatched_inbound_ids[msg_id] = None
+            self._dispatched_inbound_ids[dedup_key] = None
             while len(self._dispatched_inbound_ids) > _DISPATCHED_IDS_CAP:
                 self._dispatched_inbound_ids.popitem(last=False)
         if isinstance(msg_id, int):
-            self._save_last_id(msg_id)
+            self._save_agent_cursor(assistant_id, msg_id)
 
         # Server-authoritative chat addressing (2026-05-30 hardening).
         # Remember the chat this inbound targeted so later outbound
@@ -6378,7 +6397,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # today — backfill only returns sender='user' messages — but cheap
         # insurance against future changes).
         if isinstance(message_id, int):
-            self._save_last_id(message_id)
+            self._save_agent_cursor(assistant_id, message_id)
 
         # Server-authoritative chat addressing: a button tap is itself an
         # inbound interaction on this chat, so record it as received. Without
@@ -6446,7 +6465,10 @@ class BGOSAdapter(BasePlatformAdapter):
         backfill so messages that arrived while the socket was down are
         replayed through the same translation pipeline. Fire-and-forget — we
         don't want to block the WS connect handler."""
-        asyncio.create_task(self._run_backfill(last_message_id))
+        # Not the highest id the socket saw: that is one gateway-wide number,
+        # and an agent's own cursor can sit below it. Start from the lowest
+        # cursor of the known agents; each row is kept past its own agent's.
+        asyncio.create_task(self._run_backfill(self._poll_since()))
         self._mission_lane.schedule_reconcile()
 
     async def _run_backfill(self, last_message_id: int) -> None:
@@ -6518,6 +6540,21 @@ class BGOSAdapter(BasePlatformAdapter):
         if not normalized:
             return True
 
+        # The poll returns every agent's rows past the LOWEST cursor. A known
+        # agent keeps only the rows past its own cursor (it may be ahead of the
+        # lowest one). A row for an agent not known yet goes to _handle_inbound,
+        # which refreshes the pairing scope and drops it if still unknown.
+        known = self._known_assistant_ids()
+        known_set = set(known)
+        cursor_of = self._cursors.reader()
+        polled = normalized
+        normalized = [
+            m for m in polled
+            if self._row_assistant_id(m) not in known_set
+            or (self._int_or_none(m.get("message_id")) or 0)
+            > cursor_of(self._row_assistant_id(m))
+        ]
+
         # Storm guard (2026-06-28): if the durable cursor is missing/stale,
         # BGOS can return a long historical backlog on gateway startup. Replaying
         # every old peer smoke-test and restart message re-spams the user and can
@@ -6535,7 +6572,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 default=last_message_id,
             )
             if max_id > last_message_id:
-                self._save_last_id(max_id)
+                self._cursors.seed_all(known, max_id)
             log.warning(
                 "BGOS backfill storm guard skipped %d historical messages "
                 "since_message_id=%d and advanced cursor to %d",
@@ -6556,7 +6593,35 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._handle_inbound(msg, batchable=False)
             except Exception:
                 log.exception("backfill replay failed for message=%s", msg)
+        self._advance_idle_agents(known, polled, len(messages))
         return True
+
+    @classmethod
+    def _row_assistant_id(cls, msg: dict[str, Any]) -> int | None:
+        return cls._int_or_none(msg.get("assistant_id", msg.get("assistantId")))
+
+    def _advance_idle_agents(
+        self,
+        known: list[int],
+        polled: list[dict[str, Any]],
+        raw_row_count: int,
+    ) -> None:
+        """Move the cursor of every known agent that had NO row in this poll up
+        to what the poll covered. Every row at or below the watermark is in the
+        response (rows come ASC by id; a full page may have cut the rows of its
+        LAST id, so then the watermark stops one below it). Without this an
+        idle agent would pin the next poll's lowest cursor and the page would
+        never reach new messages."""
+        ids = [self._int_or_none(m.get("message_id")) for m in polled]
+        ids = [i for i in ids if i is not None]
+        if not ids or not known:
+            return
+        with_rows = {self._row_assistant_id(m) for m in polled}
+        last = max(ids)
+        watermark = last if raw_row_count < BACKEND_PAGE_SIZE else last - 1
+        self._cursors.advance_idle(
+            [a for a in known if a not in with_rows], watermark,
+        )
 
     # -------------------------------------------------------------------------
     # Owner-triggered doctor checks (doctor_rpc)
@@ -7004,7 +7069,7 @@ class BGOSAdapter(BasePlatformAdapter):
         if until is None or self._clock() >= until:
             return False
         if self._intake_resume_cursor is None:
-            self._intake_resume_cursor = self._load_last_id()
+            self._intake_resume_cursor = self._poll_since()
         return True
 
     def _take_intake_resume_cursor(self) -> int | None:
