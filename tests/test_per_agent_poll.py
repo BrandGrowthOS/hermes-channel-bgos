@@ -191,3 +191,21 @@ async def test_an_agent_removed_and_exposed_again_rejoins_at_the_head() -> None:
 
     assert backend.since_seen[-1] == 3500
     assert got == [(1, 4000)]
+
+
+async def test_a_poll_start_before_any_agent_is_known_does_not_rebase_anyone_later() -> None:
+    backend = _Backend([_row(500, 2)])
+    adapter, got = _adapter(backend, agents=())
+    # An earlier run left agent 2 behind agent 1.
+    adapter._cursors.since([1, 2])
+    adapter._cursors.save(1, 900)
+    adapter._cursors.save(2, 100)
+
+    adapter._poll_since()  # nothing exposed yet
+    adapter._state.set_route(1, "route_1")
+    adapter._state.set_route(2, "route_2")  # identity loaded
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert backend.since_seen == [100]
+    assert got == [(2, 500)]

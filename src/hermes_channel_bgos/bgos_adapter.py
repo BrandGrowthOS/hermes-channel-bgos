@@ -2474,12 +2474,16 @@ class BGOSAdapter(BasePlatformAdapter):
         """Where the REST poll starts: the lowest cursor of the known agents.
         Each returned row is then kept only past its own agent's cursor."""
         known = self._known_assistant_ids()
-        if self._previously_known is not None:
-            # An agent back after being away rejoins at the head (see cursors.py).
-            self._cursors.rebase_reexposed(
-                a for a in known if a not in self._previously_known
-            )
-        self._previously_known = set(known)
+        # An empty known set (nothing exposed yet) says nothing about who is
+        # away: it must neither rebase anyone nor become the baseline.
+        if known:
+            if self._previously_known is not None:
+                # An agent back after being away rejoins at the head (see
+                # cursors.py).
+                self._cursors.rebase_reexposed(
+                    a for a in known if a not in self._previously_known
+                )
+            self._previously_known = set(known)
         return self._cursors.since(known)
 
     def _save_agent_cursor(self, assistant_id: Any, message_id: int) -> None:
