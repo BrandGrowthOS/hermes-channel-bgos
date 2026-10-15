@@ -50,6 +50,7 @@ BACKEND_PAGE_SIZE = 200
 MAX_PENDING = 50
 PENDING_TTL_SECONDS = 3600.0
 PENDING_TOMBSTONE_SECONDS = 86400.0
+MAX_TOMBSTONES = 200
 
 
 def _is_cursor(value: object) -> bool:
@@ -88,7 +89,6 @@ class AgentCursors:
             return []
         now = time.time()
         out: list[dict] = []
-        stepped_back = False
         for e in raw:
             if (
                 isinstance(e, dict)
@@ -96,17 +96,14 @@ class AgentCursors:
                 and _is_cursor(e.get("assistant_id"))
                 and isinstance(e.get("at"), (int, float))
             ):
-                at = float(e["at"])
-                if at > now:
-                    # A clock that stepped back: count the hold from now, and
-                    # keep it so it ends an hour later instead of sliding.
-                    at = now
-                    stepped_back = True
+                # A clock that reads earlier than a stored time (stepped back, or
+                # not synced yet at boot): count from now, in memory only. The
+                # stored time is never rewritten, or a wrong clock would erase
+                # the records for good.
+                at = min(float(e["at"]), now)
                 if now - at <= PENDING_TOMBSTONE_SECONDS:
                     out.append({"id": e["id"], "assistant_id": e["assistant_id"],
                                 "at": at})
-        if stepped_back:
-            self._write_pending(out)
         return out
 
     def _load_pending(self) -> list[dict]:
@@ -137,15 +134,37 @@ class AgentCursors:
             return
         entries.append({"id": message_id, "assistant_id": assistant_id,
                         "at": time.time()})
-        self._write_pending(entries[-MAX_PENDING:])
+        now = time.time()
+        live = [e for e in entries if now - e["at"] <= PENDING_TTL_SECONDS]
+        for old in live[:-MAX_PENDING]:  # oldest live records beyond the bound
+            entries.remove(old)
+        self._write_pending(entries[-MAX_TOMBSTONES:])
 
     def clear_pending(self, assistant_id: int, message_id: int) -> None:
         """The row was consumed: release the hold it had on the poll window."""
+        self.clear_pending_many([(assistant_id, message_id)])
+
+    def clear_pending_many(self, pairs: Iterable[tuple[int, int]]) -> None:
+        """Release several records with one read."""
+        drop = set(pairs)
+        if not drop:
+            return
         entries = self._read_pending()
-        kept = [e for e in entries
-                if not (e["id"] == message_id and e["assistant_id"] == assistant_id)]
+        if not entries:
+            return
+        kept = [e for e in entries if (e["assistant_id"], e["id"]) not in drop]
         if len(kept) != len(entries):
             self._write_pending(kept)
+
+    def is_expired_pending(self, assistant_id: int, message_id: int) -> bool:
+        """A record of this row exists and its hold has ended: the row was
+        given up on, so nothing may be held back for it any more."""
+        now = time.time()
+        return any(
+            e["id"] == message_id and e["assistant_id"] == assistant_id
+            and now - e["at"] > PENDING_TTL_SECONDS
+            for e in self._read_pending()
+        )
 
     def lowest_pending(self, assistant_id: int | None = None) -> int | None:
         """The lowest pending row id (of one agent, or of any)."""

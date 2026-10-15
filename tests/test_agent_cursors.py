@@ -240,17 +240,42 @@ def test_an_expired_record_is_not_renewed_by_the_same_row_being_served_again(
     assert cursors.since([1]) == 300  # not a new hour for the same row
 
 
-def test_a_clock_that_stepped_back_does_not_extend_a_hold(
+def test_a_wrong_clock_at_boot_does_not_erase_the_records(
     cursors: AgentCursors, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import time as _time
 
     real = _time.time()
-    (tmp_path / "bgos_pending_unknown.json").write_text(
-        json.dumps([{"id": 150, "assistant_id": 9, "at": real + 100000}])
-    )
-    now = [real + 3700]
-    monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: now[0])
-    assert cursors.lowest_pending() == 150  # held, counted from "now", not from the future
-    now[0] += 3700
-    assert cursors.lowest_pending() is None  # and it still ends after an hour
+    cursors.record_pending(9, 150)
+    before = (tmp_path / "bgos_pending_unknown.json").read_text()
+
+    # The host boots with its clock at 1970, before it is synced.
+    monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: 1000.0)
+    assert cursors.lowest_pending() == 150
+    assert (tmp_path / "bgos_pending_unknown.json").read_text() == before  # untouched
+
+    # The clock is right again: the record is still there.
+    monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: real + 5)
+    assert cursors.lowest_pending() == 150
+
+
+def test_an_expired_record_is_reported_so_nothing_is_held_for_it(
+    cursors: AgentCursors, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time as _time
+
+    cursors.record_pending(9, 150)
+    assert cursors.is_expired_pending(9, 150) is False
+    real = _time.time()
+    monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: real + 3700)
+    assert cursors.is_expired_pending(9, 150) is True
+    assert cursors.is_expired_pending(9, 151) is False  # never recorded
+
+
+def test_clear_pending_many_releases_several_records_with_one_read(
+    cursors: AgentCursors,
+) -> None:
+    cursors.record_pending(9, 150)
+    cursors.record_pending(8, 160)
+    cursors.clear_pending_many([(9, 150), (8, 160)])
+    assert cursors.lowest_pending() is None
