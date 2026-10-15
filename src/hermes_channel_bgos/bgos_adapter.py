@@ -5584,7 +5584,13 @@ class BGOSAdapter(BasePlatformAdapter):
                 "inbound for unknown assistant_id=%s — refreshing pairing scope",
                 assistant_id,
             )
-            await self._refresh_pairing_scope()
+            try:
+                await self._refresh_pairing_scope()
+            except Exception:
+                # A failed refresh leaves the agent unknown: the row is kept
+                # below, not lost.
+                log.exception("pairing refresh failed for assistant_id=%s",
+                              assistant_id)
             route = self._state.get_route(assistant_id)
             if route is None:
                 log.warning(
@@ -6662,7 +6668,10 @@ class BGOSAdapter(BasePlatformAdapter):
             self._state.get_route(aid) is None
             for aid, _mid in self._dropped_unknown
         ):
-            await self._refresh_pairing_scope()
+            try:
+                await self._refresh_pairing_scope()
+            except Exception:
+                log.exception("pairing refresh failed while replaying held messages")
         for key in list(self._dropped_unknown):
             if self._intake_held():
                 # A restart is committed: leave the rest remembered for later.

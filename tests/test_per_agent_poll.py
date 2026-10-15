@@ -269,24 +269,29 @@ async def test_a_restart_hold_that_starts_during_the_replay_keeps_the_rest_for_l
     assert backend.since_seen == [0]  # nothing was fetched after the hold began
 
 
-async def test_a_failing_pairing_refresh_during_the_replay_does_not_kill_the_poll() -> None:
+async def test_a_failing_pairing_refresh_neither_kills_the_poll_nor_loses_the_row() -> None:
     backend = _Backend([_row(90, 9)], [], [])
     adapter, got = _adapter(backend, agents=(1,))
-
-    async def no_refresh() -> None:
-        return None
-
-    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
-    adapter._poll_since()
-    await adapter._run_backfill(adapter._poll_since())
 
     async def broken_refresh() -> None:
         raise AttributeError("whoami returned an empty body")
 
     adapter._refresh_pairing_scope = broken_refresh  # type: ignore[method-assign]
-    await adapter._run_backfill(adapter._poll_since())  # must not raise
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
 
-    assert backend.since_seen[-1] is not None and len(backend.since_seen) == 2
+    await adapter._run_backfill(adapter._poll_since())  # the row's own refresh raises
+    assert (9, 90) in adapter._dropped_unknown  # remembered, not lost
+    await adapter._run_backfill(adapter._poll_since())  # the replay's refresh raises: no crash
+    assert len(backend.since_seen) == 2
+
+    async def learn_agent_9() -> None:
+        adapter._state.set_route(9, "route_9")
+
+    adapter._refresh_pairing_scope = learn_agent_9  # type: ignore[method-assign]
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert got == [(9, 90)]
 
 
 async def test_rows_held_by_a_restart_are_not_carried_past() -> None:
