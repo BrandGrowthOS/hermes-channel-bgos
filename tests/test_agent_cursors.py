@@ -143,7 +143,7 @@ def test_migration_a_poll_with_no_known_agents_keeps_the_old_cursor_for_the_agen
     assert cursors.since([1, 2]) == 3000
 
 
-def test_a_pending_row_clamps_every_cursor_and_the_head_below_it(
+def test_a_pending_row_does_not_clamp_known_agents_or_the_head(
     cursors: AgentCursors,
 ) -> None:
     cursors.since([1, 2])
@@ -151,11 +151,15 @@ def test_a_pending_row_clamps_every_cursor_and_the_head_below_it(
 
     cursors.save(1, 300)  # a sibling consumes a later row
     cursors.advance_idle([2], 300)
-    cursors.seed_all([1, 2], 400)
 
-    assert cursors.get(1) == 149
-    assert cursors.get(2) == 149
-    assert cursors.head() == 149
+    # Live cursors and the head move on: rows above the hole that known agents
+    # consumed are filtered by their own cursors, so the hole cannot become a storm.
+    assert cursors.get(1) == 300
+    assert cursors.get(2) == 300
+    assert cursors.head() == 300
+    # Only the poll window reaches back, and the unknown agent starts below its row.
+    assert cursors.since([1, 2]) == 149
+    assert cursors.get(9) == 149
 
 
 def test_the_poll_window_reaches_back_to_a_pending_row(cursors: AgentCursors) -> None:
@@ -179,16 +183,15 @@ def test_an_agent_bound_later_starts_below_its_own_pending_row(
     assert cursors.since([1, 9]) == 149
 
 
-def test_clearing_a_pending_row_releases_the_clamp(cursors: AgentCursors) -> None:
+def test_clearing_a_pending_row_releases_the_window(cursors: AgentCursors) -> None:
     cursors.since([1])
     cursors.record_pending(9, 150)
     cursors.save(1, 300)
-    assert cursors.get(1) == 149
+    assert cursors.since([1]) == 149
 
     cursors.clear_pending(9, 150)
-    cursors.save(1, 300)
 
-    assert cursors.get(1) == 300
+    assert cursors.since([1]) == 300
 
 
 def test_pending_rows_survive_a_restart_and_age_out(
@@ -218,3 +221,36 @@ def test_the_transient_hole_keys_never_reach_the_cursor_file(
     cursors.since([1])
     cursors.save(1, 10)
     assert set(_file(tmp_path)) <= {"version", "head", "agents", "migrating"}
+
+
+def test_an_expired_record_is_not_renewed_by_the_same_row_being_served_again(
+    cursors: AgentCursors, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time as _time
+
+    cursors.since([1])
+    cursors.save(1, 300)
+    cursors.record_pending(9, 150)
+    real = _time.time()
+    monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: real + 3700)
+    assert cursors.since([1]) == 300  # expired: the window is released
+
+    cursors.record_pending(9, 150)  # the poll serves the same row again
+
+    assert cursors.since([1]) == 300  # not a new hour for the same row
+
+
+def test_a_clock_that_stepped_back_does_not_extend_a_hold(
+    cursors: AgentCursors, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time as _time
+
+    real = _time.time()
+    (tmp_path / "bgos_pending_unknown.json").write_text(
+        json.dumps([{"id": 150, "assistant_id": 9, "at": real + 100000}])
+    )
+    now = [real + 3700]
+    monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: now[0])
+    assert cursors.lowest_pending() == 150  # held, counted from "now", not from the future
+    now[0] += 3700
+    assert cursors.lowest_pending() is None  # and it still ends after an hour

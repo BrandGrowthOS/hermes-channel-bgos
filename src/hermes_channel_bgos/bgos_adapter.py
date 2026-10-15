@@ -5628,6 +5628,13 @@ class BGOSAdapter(BasePlatformAdapter):
         # re-dispatching them — producing the live-server "50 conversation
         # reset acks in a row" loop caught 2026-05-15.
         msg_id = data.get("message_id")
+        if isinstance(msg_id, int):
+            # The agent is known and this row is now consumed (or was, when it is
+            # a duplicate): release the hold a pending record of it had on the
+            # poll window.
+            aid_int = self._int_or_none(assistant_id)
+            if aid_int is not None:
+                self._cursors.clear_pending(aid_int, msg_id)
         if dedup and isinstance(msg_id, int):
             dedup_key = (self._int_or_none(assistant_id), msg_id)
             if dedup_key in self._dispatched_inbound_ids:
@@ -5640,11 +5647,6 @@ class BGOSAdapter(BasePlatformAdapter):
             while len(self._dispatched_inbound_ids) > _DISPATCHED_IDS_CAP:
                 self._dispatched_inbound_ids.popitem(last=False)
         if isinstance(msg_id, int):
-            # Consumed: release the clamp a pending record of it held, then move
-            # this agent's cursor (clear first, or the clamp would hold it back).
-            aid_int = self._int_or_none(assistant_id)
-            if aid_int is not None:
-                self._cursors.clear_pending(aid_int, msg_id)
             self._save_agent_cursor(assistant_id, msg_id)
 
         # Server-authoritative chat addressing (2026-05-30 hardening).
@@ -6679,8 +6681,9 @@ class BGOSAdapter(BasePlatformAdapter):
         if aid is None or mid is None:
             return
         key = (aid, mid)
-        # Persisted too: every cursor stays below this row, and the poll window
-        # reaches back to it, so a restart before the agent is bound re-fetches it.
+        # Persisted too: the poll window reaches back to it and an agent bound
+        # later starts below it, so a restart before the agent is bound
+        # re-fetches it.
         self._cursors.record_pending(aid, mid)
         if key not in self._dropped_unknown:
             self._dropped_unknown[key] = (data, self._clock())

@@ -533,3 +533,65 @@ async def test_a_live_row_for_a_known_agent_cannot_carry_the_cursors_past_a_held
     await second._run_backfill(second._poll_since())
 
     assert (9, 150) in second_got
+
+
+async def test_rows_above_a_held_row_that_known_agents_consumed_are_not_a_storm_after_a_restart() -> None:
+    backend = _SinceBackend([_row(150, 9)])
+    first, _first_got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    first._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    first._poll_since()
+    first._cursors.save(1, 80)
+    await first._run_backfill(first._poll_since())  # holds agent 9's row 150
+
+    # Agent 1 then consumes 30 rows above it (live pushes; the backend has them).
+    for i in range(30):
+        row = _row(151 + i, 1)
+        backend.rows.append(row)
+        await first._handle_inbound(row, batchable=False)
+    assert first._cursors.get(1) == 180
+
+    # Restart; agent 9 is bound now. The window (from 149) holds 31 rows, but the
+    # 30 agent 1 already consumed are filtered by its own cursor: not a storm.
+    second, second_got = _adapter(backend, agents=(1, 9))  # type: ignore[arg-type]
+    await second._run_backfill(second._poll_since())
+
+    assert second_got == [(9, 150)]
+
+
+async def test_a_row_served_again_after_the_hold_expired_does_not_start_a_new_hour(monkeypatch) -> None:
+    import time as _time
+
+    backend = _SinceBackend([_row(150, 9)])
+    adapter, _got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
+    await adapter._run_backfill(adapter._poll_since())  # served and held
+    adapter._cursors.save(1, 300)
+    assert adapter._cursors.since([1]) == 149
+
+    real = _time.time()
+    monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: real + 3700)
+    await adapter._run_backfill(adapter._poll_since())  # served again, hold expired
+
+    assert adapter._cursors.since([1]) == 300  # released, not renewed
+
+
+async def test_a_duplicate_of_a_consumed_row_releases_its_pending_record() -> None:
+    adapter, got = _adapter(_Backend(), agents=(1, 9))
+    adapter._cursors.record_pending(9, 150)
+    await adapter._handle_inbound(_row(150, 9), batchable=False)  # delivered
+    adapter._cursors.record_pending(9, 150)  # a late push records it again
+    # (record_pending ignores a row already recorded, so release is observable)
+    await adapter._handle_inbound(_row(150, 9), batchable=False)  # duplicate
+
+    assert got == [(9, 150)]
+    assert adapter._cursors.lowest_pending() is None

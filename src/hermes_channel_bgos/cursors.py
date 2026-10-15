@@ -44,11 +44,12 @@ log = logging.getLogger(__name__)
 # Rows the backend returns per inbound poll (its ``LIMIT 200``).
 BACKEND_PAGE_SIZE = 200
 
-# Pending-unknown records (see AgentCursors): how many are kept (drop oldest)
-# and for how long, so an agent that is never bound cannot pin every cursor
-# forever.
+# Pending-unknown records (see AgentCursors): how many are kept (drop oldest),
+# how long one holds the poll window back, and how long an expired one is
+# remembered so the same row does not start a new hour on every poll.
 MAX_PENDING = 50
 PENDING_TTL_SECONDS = 3600.0
+PENDING_TOMBSTONE_SECONDS = 86400.0
 
 
 def _is_cursor(value: object) -> bool:
@@ -68,12 +69,17 @@ class AgentCursors:
     # -- pending unknown ------------------------------------------------------
     #
     # A row served for an agent this gateway does not know yet is held in memory
-    # by the adapter. Cursors must not move past it, or after a restart the agent
-    # (bound by then) starts at the head and the row is lost. So the id is
-    # persisted here, every cursor and the head are clamped below the lowest one,
-    # and the poll window reaches back to it until the row is delivered.
+    # by the adapter. After a restart the agent (bound by then) would start at
+    # the head and the row would be lost. So the id is persisted here, the poll
+    # window reaches back to it until the row is delivered, and an agent bound
+    # later starts below its own pending row. Known agents' cursors and the head
+    # are NOT clamped: rows above the hole that they already consumed are
+    # filtered by their own cursors, so the hole never turns into a storm.
+    # A record holds for PENDING_TTL_SECONDS. An expired one stays as a
+    # tombstone (not counted) so the poll cannot start a new hour for the same
+    # row every time it is served again.
 
-    def _load_pending(self) -> list[dict]:
+    def _read_pending(self) -> list[dict]:
         try:
             raw = json.loads(self._pending_path.read_text())
         except (OSError, ValueError):
@@ -82,17 +88,32 @@ class AgentCursors:
             return []
         now = time.time()
         out: list[dict] = []
+        stepped_back = False
         for e in raw:
             if (
                 isinstance(e, dict)
                 and _is_cursor(e.get("id")) and e["id"] > 0
                 and _is_cursor(e.get("assistant_id"))
                 and isinstance(e.get("at"), (int, float))
-                and now - e["at"] <= PENDING_TTL_SECONDS
             ):
-                out.append({"id": e["id"], "assistant_id": e["assistant_id"],
-                            "at": e["at"]})
+                at = float(e["at"])
+                if at > now:
+                    # A clock that stepped back: count the hold from now, and
+                    # keep it so it ends an hour later instead of sliding.
+                    at = now
+                    stepped_back = True
+                if now - at <= PENDING_TOMBSTONE_SECONDS:
+                    out.append({"id": e["id"], "assistant_id": e["assistant_id"],
+                                "at": at})
+        if stepped_back:
+            self._write_pending(out)
         return out
+
+    def _load_pending(self) -> list[dict]:
+        """The records that still hold (not expired)."""
+        now = time.time()
+        return [e for e in self._read_pending()
+                if now - e["at"] <= PENDING_TTL_SECONDS]
 
     def _write_pending(self, entries: list[dict]) -> None:
         try:
@@ -106,10 +127,11 @@ class AgentCursors:
             log.warning("could not persist bgos_pending_unknown.json")
 
     def record_pending(self, assistant_id: int, message_id: int) -> None:
-        """Remember a row left unconsumed because its agent is not known yet."""
+        """Remember a row left unconsumed because its agent is not known yet.
+        A row already recorded (held or expired) is not recorded again."""
         if not _is_cursor(message_id) or message_id <= 0:
             return
-        entries = self._load_pending()
+        entries = self._read_pending()
         if any(e["id"] == message_id and e["assistant_id"] == assistant_id
                for e in entries):
             return
@@ -118,8 +140,8 @@ class AgentCursors:
         self._write_pending(entries[-MAX_PENDING:])
 
     def clear_pending(self, assistant_id: int, message_id: int) -> None:
-        """The row was consumed: release the clamp it held."""
-        entries = self._load_pending()
+        """The row was consumed: release the hold it had on the poll window."""
+        entries = self._read_pending()
         kept = [e for e in entries
                 if not (e["id"] == message_id and e["assistant_id"] == assistant_id)]
         if len(kept) != len(entries):
@@ -309,11 +331,6 @@ class AgentCursors:
             return
         state = self._load()
         changed = False
-        # Never past a row still pending for an unknown agent (see above).
-        if state["lowest_hole"] is not None and message_id >= state["lowest_hole"]:
-            message_id = state["lowest_hole"] - 1
-            if message_id <= 0:
-                return
         for aid in assistant_ids:
             if message_id > self._effective(state, aid):
                 state["agents"][str(aid)] = message_id
