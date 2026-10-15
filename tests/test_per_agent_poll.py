@@ -228,10 +228,44 @@ async def test_a_first_message_to_a_newly_exposed_agent_is_delivered_when_the_re
     await adapter._run_backfill(adapter._poll_since())
     assert got == []  # unknown for now; the idle agent was carried past it
 
-    adapter._state.set_route(9, "route_9")  # the gateway learns agent 9
+    # The next poll no longer returns the row, so the replay itself has to ask
+    # the pairing again; this time the refresh learns agent 9.
+    async def learn_agent_9() -> None:
+        adapter._state.set_route(9, "route_9")
+
+    adapter._refresh_pairing_scope = learn_agent_9  # type: ignore[method-assign]
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert backend.since_seen == [80, 90]  # the row was not fetched again
+    assert got == [(9, 90)]
+
+
+async def test_a_restart_hold_that_starts_during_the_replay_keeps_the_rest_for_later() -> None:
+    backend = _Backend([_row(90, 9), _row(91, 9)], [], [])
+    adapter, got = _adapter(backend, agents=(1,))
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    await adapter._run_backfill(adapter._poll_since())
+    assert {(9, 90), (9, 91)} == set(adapter._dropped_unknown)
+
+    adapter._state.set_route(9, "route_9")
+    held = [False]
+    original = adapter._handle_inbound
+
+    async def hold_after_first(data: dict, **kw: Any) -> None:
+        await original(data, **kw)
+        held[0] = True
+
+    adapter._handle_inbound = hold_after_first  # type: ignore[method-assign]
+    adapter._intake_held = lambda: held[0]  # type: ignore[method-assign]
     await adapter._run_backfill(adapter._poll_since())
 
     assert got == [(9, 90)]
+    assert list(adapter._dropped_unknown) == [(9, 91)]  # kept, not lost
 
 
 async def test_a_held_message_is_not_delivered_twice_and_expires() -> None:

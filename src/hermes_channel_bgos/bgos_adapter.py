@@ -6637,19 +6637,32 @@ class BGOSAdapter(BasePlatformAdapter):
 
     async def _replay_dropped_unknown(self) -> None:
         """Deliver the remembered messages whose agent is known now; forget
-        the ones that waited too long."""
+        the ones that waited too long. While one still waits for its agent the
+        pairing is refreshed (cooldown limited), because the poll no longer
+        returns the row that would trigger it."""
         if not self._dropped_unknown:
             return
         now = self._clock()
-        for key, (data, since) in list(self._dropped_unknown.items()):
+        for key, (_data, since) in list(self._dropped_unknown.items()):
             if now - since > _DROPPED_UNKNOWN_TTL_SECONDS:
                 self._dropped_unknown.pop(key, None)
-            elif self._state.get_route(key[0]) is not None:
-                self._dropped_unknown.pop(key, None)
-                try:
-                    await self._handle_inbound(data, batchable=False)
-                except Exception:
-                    log.exception("replay of a held message failed: %s", data)
+        if any(
+            self._state.get_route(aid) is None
+            for aid, _mid in self._dropped_unknown
+        ):
+            await self._refresh_pairing_scope()
+        for key in list(self._dropped_unknown):
+            if self._intake_held():
+                # A restart is committed: leave the rest remembered for later.
+                return
+            entry = self._dropped_unknown.get(key)
+            if entry is None or self._state.get_route(key[0]) is None:
+                continue
+            self._dropped_unknown.pop(key, None)
+            try:
+                await self._handle_inbound(entry[0], batchable=False)
+            except Exception:
+                log.exception("replay of a held message failed: %s", entry[0])
 
     @classmethod
     def _row_assistant_id(cls, msg: dict[str, Any]) -> int | None:
