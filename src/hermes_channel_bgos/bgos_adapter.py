@@ -518,6 +518,8 @@ def _gateway_runner_turns(runner: Any, cron_jobs: int, own: Any) -> int:
 # so legitimate agent media written anywhere non-sensitive still sends.
 # Bounded memory for the duplicate-delivery guard in _handle_inbound.
 _DISPATCHED_IDS_CAP = 1024
+# How many polls a row for a still-unknown agent holds the idle carry back.
+_UNKNOWN_ROW_HOLD_POLLS = 12
 
 _SENSITIVE_MEDIA_SYSTEM_PREFIXES: tuple[str, ...] = (
     "/etc",
@@ -1339,6 +1341,9 @@ class BGOSAdapter(BasePlatformAdapter):
         self._dispatched_inbound_ids: OrderedDict[tuple[int | None, int], None] = (
             OrderedDict()
         )
+        # Polls each still-unknown agent's row has been held for (see
+        # _advance_idle_agents).
+        self._unknown_row_polls: dict[int, int] = {}
         # The agents the previous poll start served, to spot one that is back.
         self._previously_known: set[int] | None = None
         # One poll cursor per agent (see cursors.py), not one per gateway.
@@ -2474,16 +2479,15 @@ class BGOSAdapter(BasePlatformAdapter):
         """Where the REST poll starts: the lowest cursor of the known agents.
         Each returned row is then kept only past its own agent's cursor."""
         known = self._known_assistant_ids()
-        # An empty known set (nothing exposed yet) says nothing about who is
-        # away: it must neither rebase anyone nor become the baseline.
-        if known:
-            if self._previously_known is not None:
-                # An agent back after being away rejoins at the head (see
-                # cursors.py).
-                self._cursors.rebase_reexposed(
-                    a for a in known if a not in self._previously_known
-                )
-            self._previously_known = set(known)
+        # The route map is real from the first call on (connect loads whoami
+        # before it polls), so an empty set means nothing is exposed.
+        if self._previously_known is not None:
+            # An agent back after being away rejoins at the head (see
+            # cursors.py).
+            self._cursors.rebase_reexposed(
+                a for a in known if a not in self._previously_known
+            )
+        self._previously_known = set(known)
         return self._cursors.since(known)
 
     def _save_agent_cursor(self, assistant_id: Any, message_id: int) -> None:
@@ -6526,6 +6530,9 @@ class BGOSAdapter(BasePlatformAdapter):
         """The fetch and replay _run_backfill describes, from
         `last_message_id`, with the held clicks in their place. False only
         when the fetch failed."""
+        # Cursors as they were when this fetch was asked for: a live push that
+        # lands during the round trip must not hide an older row of the response.
+        cursor_of = self._cursors.reader()
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -6559,7 +6566,6 @@ class BGOSAdapter(BasePlatformAdapter):
         # which refreshes the pairing scope and drops it if still unknown.
         known = self._known_assistant_ids()
         known_set = set(known)
-        cursor_of = self._cursors.reader()
         polled = normalized
         normalized = [
             m for m in polled
@@ -6632,8 +6638,22 @@ class BGOSAdapter(BasePlatformAdapter):
         with_rows = {self._row_assistant_id(m) for m in polled}
         last = max(ids)
         watermark = last if raw_row_count < BACKEND_PAGE_SIZE else last - 1
+        # A row for an agent still unknown after the replay was dropped. Do not
+        # carry anyone past it for a while: the next polls fetch it again and
+        # deliver it once the agent is exposed. The hold is bounded so an agent
+        # that never resolves cannot pin the window for everyone else.
+        known_now = set(self._known_assistant_ids())
+        counts: dict[int, int] = {}
+        for m in polled:
+            mid = self._int_or_none(m.get("message_id"))
+            if mid is not None and self._row_assistant_id(m) not in known_now:
+                counts[mid] = self._unknown_row_polls.get(mid, 0) + 1
+        self._unknown_row_polls = counts
+        held = [mid for mid, n in counts.items() if n <= _UNKNOWN_ROW_HOLD_POLLS]
+        if held:
+            watermark = min(watermark, min(held) - 1)
         self._cursors.advance_idle(
-            [a for a in known if a not in with_rows], watermark,
+            [a for a in known_now if a not in with_rows], watermark,
         )
 
     # -------------------------------------------------------------------------

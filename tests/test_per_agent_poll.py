@@ -193,19 +193,80 @@ async def test_an_agent_removed_and_exposed_again_rejoins_at_the_head() -> None:
     assert got == [(1, 4000)]
 
 
-async def test_a_poll_start_before_any_agent_is_known_does_not_rebase_anyone_later() -> None:
-    backend = _Backend([_row(500, 2)])
+async def test_boot_with_no_agent_exposed_then_a_stale_agent_exposed_rejoins_at_the_head() -> None:
+    old = [_row(200 + i, 2) for i in range(30)]
+    backend = _Backend(old)
     adapter, got = _adapter(backend, agents=())
     # An earlier run left agent 2 behind agent 1.
     adapter._cursors.since([1, 2])
     adapter._cursors.save(1, 900)
     adapter._cursors.save(2, 100)
 
-    adapter._poll_since()  # nothing exposed yet
+    adapter._poll_since()  # nothing exposed at boot
     adapter._state.set_route(1, "route_1")
-    adapter._state.set_route(2, "route_2")  # identity loaded
+    adapter._state.set_route(2, "route_2")  # exposed while running
 
     await adapter._run_backfill(adapter._poll_since())
 
-    assert backend.since_seen == [100]
-    assert got == [(2, 500)]
+    assert backend.since_seen == [900]
+    assert got == []
+
+
+async def test_a_dropped_unknown_agent_row_is_held_not_carried_past_and_retried() -> None:
+    backend = _Backend([_row(150, 9)], [_row(150, 9)])
+    adapter, got = _adapter(backend, agents=(1,))
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 100)
+
+    await adapter._run_backfill(adapter._poll_since())
+    assert adapter._cursors.get(1) == 149  # carried up to, not past, the dropped row
+
+    adapter._state.set_route(9, "route_9")  # agent 9 is exposed
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert backend.since_seen == [100, 149]
+    assert got == [(9, 150)]
+
+
+async def test_the_unknown_row_hold_is_bounded() -> None:
+    backend = _Backend(*([[_row(150, 9)]] * 20))
+    adapter, _got = _adapter(backend, agents=(1,))
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 100)
+
+    for _ in range(20):
+        await adapter._run_backfill(adapter._poll_since())
+
+    # After the hold runs out the idle carry is released, so one agent that
+    # never resolves cannot pin the window for everyone else.
+    assert adapter._cursors.get(1) == 150
+
+
+async def test_a_live_push_during_the_fetch_does_not_hide_an_older_row_of_the_response() -> None:
+    adapter, got = _adapter(_Backend())
+
+    class _RacyBackend:
+        since_seen: list[int] = []
+
+        async def fetch_inbound_since(self, since_message_id: int) -> dict[str, Any]:
+            # A live push for agent 1 lands while the fetch is in flight.
+            adapter._cursors.save(1, 500)
+            return {"messages": [_row(300, 1)]}
+
+    adapter._api = _RacyBackend()  # type: ignore[assignment]
+    adapter._poll_since()
+    adapter._cursors.save(1, 100)
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert got == [(1, 300)]
