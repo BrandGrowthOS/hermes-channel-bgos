@@ -743,3 +743,27 @@ async def test_a_row_with_no_assistant_id_cannot_pin_the_window(monkeypatch) -> 
         await adapter._run_backfill(adapter._poll_since())
 
     assert len([g for g in got if g[0] == 1]) == 250
+
+
+async def test_an_agent_exposed_with_a_backlog_of_held_rows_is_not_a_storm_loop(monkeypatch) -> None:
+    held = [_row(100 + i, 9) for i in range(30)]
+    backend = _SinceBackend(held)
+    first, _first_got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    first._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    first._poll_since()
+    first._cursors.save(1, 80)
+    await first._run_backfill(first._poll_since())  # holds 30 rows of agent 9
+    assert first._cursors.lowest_pending() == 100
+
+    # Restart (the memory copy is gone); agent 9 is exposed now, and agent 1 has
+    # new rows. 30 held plus 3 new is over the storm limit of 25.
+    backend.rows += [_row(500 + i, 1) for i in range(3)]
+    second, second_got = _adapter(backend, agents=(1, 9))  # type: ignore[arg-type]
+    await second._run_backfill(second._poll_since())
+
+    assert sorted(g for g in second_got if g[0] == 9) == [(9, 100 + i) for i in range(30)]
+    assert sorted(g for g in second_got if g[0] == 1) == [(1, 500), (1, 501), (1, 502)]

@@ -6654,8 +6654,15 @@ class BGOSAdapter(BasePlatformAdapter):
         # protects against, and are held until their agent is bound: they do not
         # count, and a storm skip records them so a restart still fetches them.
         # With no agent known at all, every row is backlog: the guard applies to all.
-        storm_rows = [m for m in normalized
-                      if not known_set or self._row_assistant_id(m) in known_set]
+        # Rows with a live record are held rows (at most 50), not stale history:
+        # they are always handed over, never skipped, or an agent exposed with a
+        # backlog of them would set the guard off on every poll for an hour.
+        storm_rows = [
+            m for m in normalized
+            if (not known_set or self._row_assistant_id(m) in known_set)
+            and (self._row_assistant_id(m),
+                 self._int_or_none(m.get("message_id"))) not in live_pending
+        ]
         if storm_limit > 0 and len(storm_rows) > storm_limit:
             for m in normalized:
                 u_aid = self._row_assistant_id(m)
