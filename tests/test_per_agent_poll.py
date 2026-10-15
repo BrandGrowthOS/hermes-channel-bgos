@@ -355,3 +355,17 @@ async def test_a_live_push_during_the_fetch_does_not_hide_an_older_row_of_the_re
     await adapter._run_backfill(adapter._poll_since())
 
     assert got == [(1, 300)]
+
+
+async def test_a_newly_exposed_agent_is_not_rebased_past_its_own_unconsumed_row() -> None:
+    backend = _Backend([])
+    adapter, _got = _adapter(backend, agents=(1,))
+    adapter._poll_since()  # agent 1 known; baseline recorded
+
+    adapter._state.set_route(2, "route_2")  # agent 2 newly exposed, never away
+    adapter._cursors.save(2, 300)  # it consumed row 300; row 301 is still pending
+    adapter._cursors.save(1, 301)  # a sibling moved the head on
+
+    adapter._poll_since()
+
+    assert adapter._cursors.get(2) == 300

@@ -1344,6 +1344,8 @@ class BGOSAdapter(BasePlatformAdapter):
         )
         # The agents the previous poll start served, to spot one that is back.
         self._previously_known: set[int] | None = None
+        # Agents seen leaving the known set, until they come back.
+        self._away_agents: set[int] = set()
         # Messages dropped for a still-unknown assistant, kept to deliver once
         # it is exposed: (assistant id, message id) -> (payload, first seen).
         self._dropped_unknown: OrderedDict[tuple[int, int], tuple[dict, float]] = (
@@ -2486,13 +2488,21 @@ class BGOSAdapter(BasePlatformAdapter):
         known = self._known_assistant_ids()
         # The route map is real from the first call on (connect loads whoami
         # before it polls), so an empty set means nothing is exposed.
-        if self._previously_known is not None:
-            # An agent back after being away rejoins at the head (see
-            # cursors.py).
-            self._cursors.rebase_reexposed(
-                a for a in known if a not in self._previously_known
-            )
-        self._previously_known = set(known)
+        known_set = set(known)
+        if self._previously_known is None:
+            # First call of this process: an agent with a cursor from an earlier
+            # run that is not exposed now was away (a restart while unexposed).
+            self._away_agents |= self._cursors.agent_ids() - known_set
+        else:
+            self._away_agents |= self._previously_known - known_set
+        # Only an agent seen LEAVING and now back is rebased (see cursors.py):
+        # one that is merely new to the set may hold a row at or below the head
+        # that it has not consumed yet.
+        returning = self._away_agents & known_set
+        if returning:
+            self._away_agents -= returning
+            self._cursors.rebase_reexposed(returning)
+        self._previously_known = known_set
         return self._cursors.since(known)
 
     def _save_agent_cursor(self, assistant_id: Any, message_id: int) -> None:

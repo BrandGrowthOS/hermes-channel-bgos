@@ -121,6 +121,10 @@ class AgentCursors:
         """One agent's cursor."""
         return self._effective(self._load(), assistant_id)
 
+    def agent_ids(self) -> set[int]:
+        """The agents that have a cursor of their own."""
+        return {int(k) for k in self._load()["agents"]}
+
     def reader(self):
         """A snapshot reader: read the file once, answer for many rows."""
         state = self._load()
