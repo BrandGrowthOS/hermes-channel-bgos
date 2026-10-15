@@ -6511,7 +6511,15 @@ class BGOSAdapter(BasePlatformAdapter):
         resume = self._take_intake_resume_cursor()
         if resume is not None:
             last_message_id = min(last_message_id, resume)
-        await self._replay_dropped_unknown()
+        try:
+            await self._replay_dropped_unknown()
+        except Exception:
+            # The poll is the only inbound path: a failed refresh here must not
+            # take the poll loop down with it.
+            log.exception("replay of held messages failed")
+        if self._intake_held():
+            # A restart began while they were replayed: nothing is fetched.
+            return
         if await self._replay_inbound_since(last_message_id):
             # Clicks and callbacks a hold kept are not in this fetch (it
             # returns user message rows only): they are delivered from
@@ -6617,6 +6625,10 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._handle_inbound(msg, batchable=False)
             except Exception:
                 log.exception("backfill replay failed for message=%s", msg)
+        if self._intake_held():
+            # A restart began during the replay: rows it held were left
+            # unconsumed, so no cursor may be carried past them.
+            return True
         self._advance_idle_agents(known, polled, len(messages))
         return True
 

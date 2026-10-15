@@ -266,6 +266,47 @@ async def test_a_restart_hold_that_starts_during_the_replay_keeps_the_rest_for_l
 
     assert got == [(9, 90)]
     assert list(adapter._dropped_unknown) == [(9, 91)]  # kept, not lost
+    assert backend.since_seen == [0]  # nothing was fetched after the hold began
+
+
+async def test_a_failing_pairing_refresh_during_the_replay_does_not_kill_the_poll() -> None:
+    backend = _Backend([_row(90, 9)], [], [])
+    adapter, got = _adapter(backend, agents=(1,))
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    await adapter._run_backfill(adapter._poll_since())
+
+    async def broken_refresh() -> None:
+        raise AttributeError("whoami returned an empty body")
+
+    adapter._refresh_pairing_scope = broken_refresh  # type: ignore[method-assign]
+    await adapter._run_backfill(adapter._poll_since())  # must not raise
+
+    assert backend.since_seen[-1] is not None and len(backend.since_seen) == 2
+
+
+async def test_rows_held_by_a_restart_are_not_carried_past() -> None:
+    backend = _Backend([_row(100, 8)])
+    adapter, _got = _adapter(backend, agents=(1,))
+    adapter._poll_since()
+    adapter._cursors.save(1, 50)
+    original = adapter._handle_inbound
+    held = [False]
+
+    async def hold_on_row(data: dict, **kw: Any) -> None:
+        held[0] = True  # the restart is committed as the row is handled
+        await original(data, **kw)
+
+    adapter._handle_inbound = hold_on_row  # type: ignore[method-assign]
+    adapter._intake_held = lambda: held[0]  # type: ignore[method-assign]
+
+    await adapter._replay_inbound_since(adapter._poll_since())
+
+    assert adapter._cursors.get(1) == 50  # not carried past the held row
 
 
 async def test_a_held_message_is_not_delivered_twice_and_expires() -> None:
