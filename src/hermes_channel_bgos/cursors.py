@@ -66,6 +66,10 @@ class AgentCursors:
         self._pending_path = pending_path or path.with_name(
             "bgos_pending_unknown.json"
         )
+        # Pending rows this process holds in memory (the adapter replays them
+        # itself once their agent is bound). Only the others, which a previous
+        # process left on disk, need the poll window to reach back to them.
+        self._held_in_memory: set[tuple[int, int]] = set()
 
     # -- pending unknown ------------------------------------------------------
     #
@@ -148,11 +152,21 @@ class AgentCursors:
         """The row was consumed: release the hold it had on the poll window."""
         self.clear_pending_many([(assistant_id, message_id)])
 
+    def mark_held(self, assistant_id: int, message_id: int) -> None:
+        """This process now holds the row in memory: the poll window need not
+        reach back to it (a restart finds the record on disk and does)."""
+        self._held_in_memory.add((assistant_id, message_id))
+
+    def release_held(self, assistant_id: int, message_id: int) -> None:
+        """The memory copy is gone: the window reaches back to the record again."""
+        self._held_in_memory.discard((assistant_id, message_id))
+
     def clear_pending_many(self, pairs: Iterable[tuple[int, int]]) -> None:
         """Release several records with one read."""
         drop = set(pairs)
         if not drop:
             return
+        self._held_in_memory -= drop
         entries = self._read_pending()
         if not entries:
             return
@@ -235,12 +249,15 @@ class AgentCursors:
         """Attach the pending-unknown lowest ids (never written to the cursor
         file): per agent, and across all agents."""
         holes: dict[str, int] = {}
+        window: list[int] = []
         for e in self._load_pending():
             key = str(e["assistant_id"])
             if key not in holes or e["id"] < holes[key]:
                 holes[key] = e["id"]
-        state["holes"] = holes
-        state["lowest_hole"] = min(holes.values()) if holes else None
+            if (e["assistant_id"], e["id"]) not in self._held_in_memory:
+                window.append(e["id"])
+        state["holes"] = holes  # where an agent bound later starts
+        state["lowest_hole"] = min(window) if window else None  # window reach-back
         return state
 
     @staticmethod

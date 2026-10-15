@@ -331,7 +331,7 @@ async def test_a_held_message_is_not_delivered_twice_and_expires() -> None:
     await adapter._run_backfill(adapter._poll_since())
     assert (9, 90) in adapter._dropped_unknown
 
-    now[0] += 601  # waited too long
+    now[0] += 3601  # waited too long
     await adapter._run_backfill(adapter._poll_since())
     assert (9, 90) not in adapter._dropped_unknown
 
@@ -468,7 +468,7 @@ class _SinceBackend:
         return {"messages": sorted(
             (r for r in self.rows if r["message_id"] > since_message_id),
             key=lambda r: r["message_id"],
-        )}
+        )[:200]}  # the real backend's LIMIT 200
 
 
 async def test_a_row_held_for_an_unknown_agent_survives_a_restart_before_it_is_bound() -> None:
@@ -573,14 +573,16 @@ async def test_a_row_served_again_after_the_hold_expired_does_not_start_a_new_ho
     adapter._poll_since()
     adapter._cursors.save(1, 80)
     await adapter._run_backfill(adapter._poll_since())  # served and held
-    adapter._cursors.save(1, 300)
-    assert adapter._cursors.since([1]) == 149
+    assert adapter._cursors.lowest_pending() == 150
 
     real = _time.time()
     monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: real + 3700)
+    adapter._cursors.release_held(9, 150)  # (the memory copy is gone too)
+    adapter._cursors.save(1, 300)
     await adapter._run_backfill(adapter._poll_since())  # served again, hold expired
 
-    assert adapter._cursors.since([1]) == 300  # released, not renewed
+    assert adapter._cursors.lowest_pending() is None  # not a new hour
+    assert adapter._cursors.since([1]) == 300  # the window is released
 
 
 async def test_a_duplicate_of_a_consumed_row_releases_its_pending_record() -> None:
@@ -767,3 +769,28 @@ async def test_an_agent_exposed_with_a_backlog_of_held_rows_is_not_a_storm_loop(
 
     assert sorted(g for g in second_got if g[0] == 9) == [(9, 100 + i) for i in range(30)]
     assert sorted(g for g in second_got if g[0] == 1) == [(1, 500), (1, 501), (1, 502)]
+
+
+async def test_a_held_row_does_not_anchor_the_poll_window_while_this_process_holds_it(monkeypatch) -> None:
+    monkeypatch.setenv("BGOS_BACKFILL_STORM_LIMIT", "0")
+    rows = [_row(100, 9)] + [_row(101 + i, 1) for i in range(450)]
+    backend = _SinceBackend(rows)
+    adapter, got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+
+    for _ in range(5):
+        await adapter._run_backfill(adapter._poll_since())
+
+    # All 450 rows of the known agent arrive: the poll is not stuck behind the
+    # first 200 rows above the held one. The row stays held (and recorded) for
+    # a restart, which reaches back to it.
+    assert len([g for g in got if g[0] == 1]) == 450
+    assert adapter._cursors.lowest_pending() == 100
+    restarted, _restarted_got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+    assert restarted._cursors.since([1]) == 99

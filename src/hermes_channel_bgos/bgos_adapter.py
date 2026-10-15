@@ -520,7 +520,7 @@ def _gateway_runner_turns(runner: Any, cron_jobs: int, own: Any) -> int:
 _DISPATCHED_IDS_CAP = 1024
 # Messages kept for a still-unknown assistant: how many, and for how long.
 _DROPPED_UNKNOWN_CAP = 200
-_DROPPED_UNKNOWN_TTL_SECONDS = 600.0
+_DROPPED_UNKNOWN_TTL_SECONDS = 3600.0  # as long as a pending record holds
 
 _SENSITIVE_MEDIA_SYSTEM_PREFIXES: tuple[str, ...] = (
     "/etc",
@@ -6719,8 +6719,13 @@ class BGOSAdapter(BasePlatformAdapter):
         self._cursors.record_pending(aid, mid)
         if key not in self._dropped_unknown:
             self._dropped_unknown[key] = (data, self._clock())
+        # This process holds the row now: the poll window need not stay anchored
+        # at it (that would stall the poll for the hold, and a restart finds the
+        # record on disk and reaches back to it).
+        self._cursors.mark_held(aid, mid)
         while len(self._dropped_unknown) > _DROPPED_UNKNOWN_CAP:
-            self._dropped_unknown.popitem(last=False)
+            old_key, _entry = self._dropped_unknown.popitem(last=False)
+            self._cursors.release_held(*old_key)
 
     async def _replay_dropped_unknown(self) -> None:
         """Deliver the remembered messages whose agent is known now; forget
@@ -6733,6 +6738,7 @@ class BGOSAdapter(BasePlatformAdapter):
         for key, (_data, since) in list(self._dropped_unknown.items()):
             if now - since > _DROPPED_UNKNOWN_TTL_SECONDS:
                 self._dropped_unknown.pop(key, None)
+                self._cursors.release_held(*key)
         if any(
             self._state.get_route(aid) is None
             for aid, _mid in self._dropped_unknown
