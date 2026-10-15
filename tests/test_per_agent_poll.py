@@ -993,3 +993,44 @@ async def test_an_empty_list_body_does_not_release_the_records_either() -> None:
     await adapter._run_backfill(adapter._poll_since())
 
     assert adapter._cursors.lowest_pending() == 100
+
+
+async def test_a_list_of_non_dict_items_does_not_release_the_records() -> None:
+    class _Junk:
+        async def fetch_inbound_since(self, since_message_id: int) -> Any:
+            return {"messages": [1, 2]}
+
+    adapter, _got = _adapter(_Junk(), agents=(1,))  # type: ignore[arg-type]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.record_pending(9, 100)
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert adapter._cursors.lowest_pending() == 100
+
+
+async def test_a_record_is_held_from_the_moment_it_is_written_so_a_concurrent_poll_keeps_it() -> None:
+    adapter, _got = _adapter(_Backend(), agents=(1,))
+    seen: list[set] = []
+
+    async def inspecting_refresh() -> None:
+        seen.append(adapter._cursors.unheld_pending_set())  # during the refresh await
+
+    adapter._refresh_pairing_scope = inspecting_refresh  # type: ignore[method-assign]
+
+    await adapter._handle_inbound(_row(100, 9), batchable=False)
+
+    assert seen == [set()]  # recorded, and already held: not open to a stale release
+
+
+async def test_a_storm_skip_on_a_full_page_stops_below_the_last_id_so_a_cut_sibling_row_stays_reachable() -> None:
+    rows = [_row(101 + i, 1) for i in range(199)] + [_row(300, 1), _row(300, 9)]
+    backend = _SinceBackend(rows)  # the real LIMIT 200 cuts (9, 300)
+    adapter, _got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+    adapter._poll_since()
+    adapter._cursors.save(1, 100)
+
+    await adapter._run_backfill(adapter._poll_since())  # 200 known rows: a storm
+
+    assert adapter._cursors.get(1) == 299  # not 300: the next poll still fetches id 300

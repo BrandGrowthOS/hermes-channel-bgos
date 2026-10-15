@@ -5621,6 +5621,9 @@ class BGOSAdapter(BasePlatformAdapter):
             _early_aid = self._int_or_none(assistant_id)
             if _early_mid is not None and _early_aid is not None:
                 self._cursors.record_pending(_early_aid, _early_mid)
+                # (held from here on, so a concurrent poll that never saw the row
+                # does not take its record for one the backend stopped serving)
+                self._cursors.mark_held(_early_aid, _early_mid)
             try:
                 await self._refresh_pairing_scope()
             except Exception:
@@ -6618,7 +6621,7 @@ class BGOSAdapter(BasePlatformAdapter):
         if resp is NOT_MODIFIED:
             return True
         messages = resp.get("messages") if isinstance(resp, dict) else None
-        if isinstance(messages, list) and messages:
+        if isinstance(messages, list) and any(isinstance(m, dict) for m in messages):
             # Only a well formed, non-empty body proves what the backend serves
             # around a row: an empty or malformed one proves nothing (a transient
             # empty answer must not erase the records).
@@ -6698,6 +6701,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 u_mid = self._int_or_none(m.get("message_id"))
                 if u_aid is not None and u_mid is not None and u_aid not in known_set:
                     self._cursors.record_pending(u_aid, u_mid)
+                    self._cursors.mark_held(u_aid, u_mid)
             # The records just written are live: the storm filter below must see
             # them, or a storm skip on the poll that first sees a row would drop it.
             live_pending = self._cursors.live_pending_set()
@@ -6706,6 +6710,15 @@ class BGOSAdapter(BasePlatformAdapter):
                 (mid for mid in (self._int_or_none(m.get("message_id")) for m in storm_rows) if mid is not None),
                 default=last_message_id,
             )
+            if len(messages) >= BACKEND_PAGE_SIZE:
+                # A full page may have cut the rows of its last id (a sibling row
+                # of another agent): stop one below it, as the idle carry does.
+                page_last = max(
+                    (i for i in (self._int_or_none(m.get("message_id")) for m in polled)
+                     if i is not None),
+                    default=max_id,
+                )
+                max_id = min(max_id, page_last - 1)
             if max_id > last_message_id:
                 self._cursors.seed_all(known, max_id)
             log.warning(
