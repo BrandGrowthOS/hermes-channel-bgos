@@ -6569,6 +6569,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # Cursors as they were when this fetch was asked for: a live push that
         # lands during the round trip must not hide an older row of the response.
         cursor_of = self._cursors.reader()
+        has_cursor = self._cursors.agent_ids()
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -6603,7 +6604,6 @@ class BGOSAdapter(BasePlatformAdapter):
         known = self._known_assistant_ids()
         known_set = set(known)
         polled = normalized
-        has_cursor = self._cursors.agent_ids()
 
         def _keep(m: dict[str, Any]) -> bool:
             aid = self._row_assistant_id(m)

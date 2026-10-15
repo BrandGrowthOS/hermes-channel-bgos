@@ -430,3 +430,24 @@ async def test_an_agent_exposed_while_running_is_pinned_to_its_own_cursor_at_onc
 
     adapter._cursors.save(1, 12)  # a sibling's live message moves the head on
     assert adapter._cursors.get(2) == 10  # pinned, not following the head
+
+
+async def test_an_agent_pinned_while_the_fetch_is_in_flight_does_not_lose_its_row() -> None:
+    adapter, got = _adapter(_Backend(), agents=(1,))
+    adapter._poll_since()
+    adapter._cursors.save(1, 100)
+
+    class _SlowBackend:
+        async def fetch_inbound_since(self, since_message_id: int) -> dict[str, Any]:
+            # While the request is in flight: a sibling consumes a later id (head
+            # 200) and agent 2 becomes known and is pinned at the head.
+            adapter._cursors.save(1, 200)
+            adapter._state.set_route(2, "route_2")
+            adapter._cursors.since(adapter._known_assistant_ids())
+            return {"messages": [_row(150, 2)]}
+
+    adapter._api = _SlowBackend()  # type: ignore[assignment]
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert got == [(2, 150)]
