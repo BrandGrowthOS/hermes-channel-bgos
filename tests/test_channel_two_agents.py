@@ -97,3 +97,17 @@ async def test_the_second_agent_still_gets_it_when_the_gateway_restarts_between_
 
     # B gets it; A is not handed the same message a second time.
     assert second_got == [("route_b", 500)]
+
+
+async def test_the_live_push_of_one_message_to_two_agents_reaches_both() -> None:
+    """The WS push is one event per agent, back to back, with batching on: the
+    two must not coalesce into one dispatch (the second agent lost its copy)."""
+    adapter, got = _gateway(_PollBackend([]))
+    adapter._text_batch_window = 0.01
+
+    await adapter._handle_inbound(_row(500, AGENT_A))
+    await adapter._handle_inbound(_row(500, AGENT_B))
+    import asyncio
+    await asyncio.sleep(0.2)
+
+    assert sorted(got) == [("route_a", 500), ("route_b", 500)]

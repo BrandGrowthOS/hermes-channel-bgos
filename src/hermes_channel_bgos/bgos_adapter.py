@@ -1470,8 +1470,10 @@ class BGOSAdapter(BasePlatformAdapter):
         # gateway/platforms/telegram.py:3803-3859 for the upstream pattern.
         # Window adapts to the LAST chunk's length (see _enqueue_text_batch).
         self._text_batch_window: float = 0.6
-        self._pending_text_batches: dict[int, dict[str, Any]] = {}
-        self._pending_text_tasks: dict[int, asyncio.Task] = {}
+        # Keyed by (chat id, assistant id): a message addressed to two agents in
+        # one chat arrives as one event per agent, and each must be its own batch.
+        self._pending_text_batches: dict[tuple[int, int | None], dict[str, Any]] = {}
+        self._pending_text_tasks: dict[tuple[int, int | None], asyncio.Task] = {}
         # Hard cap for a single outbound message body. Messages longer
         # than this get split into multiple chunks with `(i/N)`
         # continuation suffixes (mirrors Telegram parity at
@@ -5853,7 +5855,7 @@ class BGOSAdapter(BasePlatformAdapter):
           else → configured _text_batch_window (default 0.6s)
         Mirrors gateway/platforms/telegram.py:3803-3859.
         """
-        chat_key = event.chat_id
+        chat_key = (event.chat_id, getattr(event, "assistant_id", None))
         batch = self._pending_text_batches.get(chat_key)
         if batch is None:
             batch = {
@@ -5892,7 +5894,9 @@ class BGOSAdapter(BasePlatformAdapter):
             self._flush_text_batch(chat_key, window)
         )
 
-    async def _flush_text_batch(self, chat_key: int, window: float) -> None:
+    async def _flush_text_batch(
+        self, chat_key: tuple[int, int | None], window: float,
+    ) -> None:
         try:
             await asyncio.sleep(window)
         except asyncio.CancelledError:

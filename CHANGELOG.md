@@ -10,6 +10,9 @@ Per agent poll cursors (Channels and Organizations phase 0, PR 0.3e).
 - The poll starts from the lowest known agent cursor and keeps each row only past its own agent's cursor; the duplicate guard is per (agent, message); an idle agent is carried up to what the poll covered so it cannot pin the window.
 - Migration: the old single `bgos_last_id` seeds every agent known at the first poll, so nothing is replayed and nothing is skipped. An agent exposed later starts at the newest consumed id. The old file is left in place and no longer written.
 - A WS reconnect backfills from the lowest agent cursor.
+- Live WS pushes batch text per (chat, agent), so the two events of a message addressed to two agents are not merged into one dispatch.
+- An agent removed from the pairing and exposed again while the gateway runs rejoins at the newest consumed id instead of replaying what arrived while it was away.
+- A message dropped because its assistant is not known yet is kept in memory (200 messages, 10 minutes, not across a restart) and delivered once the agent is exposed; each poll asks the pairing again while one waits.
 
 ## 0.31.0 (2026-10-11)
 

@@ -730,8 +730,8 @@ async def test_disconnect_cancels_pending_text_batches():
         "files": [],
         "message_type": "standard",
     })
-    assert 42 in adapter._pending_text_tasks
-    pending = adapter._pending_text_tasks[42]
+    assert (42, 7) in adapter._pending_text_tasks
+    pending = adapter._pending_text_tasks[(42, 7)]
     assert not pending.done()
     await adapter.disconnect()
     assert pending.done()
