@@ -80,7 +80,15 @@ class AgentCursors:
     # tombstone (not counted) so the poll cannot start a new hour for the same
     # row every time it is served again.
 
+    @staticmethod
+    def _age(e: dict, now: float) -> float:
+        """How long a record has been held. A stored time later than the clock
+        (the clock stepped back, or is not synced yet at boot) counts as now.
+        The stored time itself is never rewritten with that clamp."""
+        return now - min(e["at"], now)
+
     def _read_pending(self) -> list[dict]:
+        """Every record not yet pruned, with its stored time as written."""
         try:
             raw = json.loads(self._pending_path.read_text())
         except (OSError, ValueError):
@@ -96,21 +104,17 @@ class AgentCursors:
                 and _is_cursor(e.get("assistant_id"))
                 and isinstance(e.get("at"), (int, float))
             ):
-                # A clock that reads earlier than a stored time (stepped back, or
-                # not synced yet at boot): count from now, in memory only. The
-                # stored time is never rewritten, or a wrong clock would erase
-                # the records for good.
-                at = min(float(e["at"]), now)
-                if now - at <= PENDING_TOMBSTONE_SECONDS:
-                    out.append({"id": e["id"], "assistant_id": e["assistant_id"],
-                                "at": at})
+                rec = {"id": e["id"], "assistant_id": e["assistant_id"],
+                       "at": float(e["at"])}
+                if self._age(rec, now) <= PENDING_TOMBSTONE_SECONDS:
+                    out.append(rec)
         return out
 
     def _load_pending(self) -> list[dict]:
         """The records that still hold (not expired)."""
         now = time.time()
         return [e for e in self._read_pending()
-                if now - e["at"] <= PENDING_TTL_SECONDS]
+                if self._age(e, now) <= PENDING_TTL_SECONDS]
 
     def _write_pending(self, entries: list[dict]) -> None:
         try:
@@ -135,7 +139,7 @@ class AgentCursors:
         entries.append({"id": message_id, "assistant_id": assistant_id,
                         "at": time.time()})
         now = time.time()
-        live = [e for e in entries if now - e["at"] <= PENDING_TTL_SECONDS]
+        live = [e for e in entries if self._age(e, now) <= PENDING_TTL_SECONDS]
         for old in live[:-MAX_PENDING]:  # oldest live records beyond the bound
             entries.remove(old)
         self._write_pending(entries[-MAX_TOMBSTONES:])
@@ -162,9 +166,13 @@ class AgentCursors:
         now = time.time()
         return any(
             e["id"] == message_id and e["assistant_id"] == assistant_id
-            and now - e["at"] > PENDING_TTL_SECONDS
+            and self._age(e, now) > PENDING_TTL_SECONDS
             for e in self._read_pending()
         )
+
+    def live_pending_set(self) -> set[tuple[int, int]]:
+        """(assistant id, message id) of every record that still holds."""
+        return {(e["assistant_id"], e["id"]) for e in self._load_pending()}
 
     def lowest_pending(self, assistant_id: int | None = None) -> int | None:
         """The lowest pending row id (of one agent, or of any)."""

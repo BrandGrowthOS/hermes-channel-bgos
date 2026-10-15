@@ -254,9 +254,16 @@ def test_a_wrong_clock_at_boot_does_not_erase_the_records(
     assert cursors.lowest_pending() == 150
     assert (tmp_path / "bgos_pending_unknown.json").read_text() == before  # untouched
 
-    # The clock is right again: the record is still there.
+    # A WRITE made while the clock is wrong must not rewrite the others' time.
+    cursors.record_pending(8, 160)
+    cursors.clear_pending(8, 160)
+    assert cursors.lowest_pending() == 150
+
+    # The clock is right again: the record is still there, with its own time.
     monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: real + 5)
     assert cursors.lowest_pending() == 150
+    stored = json.loads((tmp_path / "bgos_pending_unknown.json").read_text())
+    assert stored[0]["at"] == pytest.approx(real, abs=1)
 
 
 def test_an_expired_record_is_reported_so_nothing_is_held_for_it(

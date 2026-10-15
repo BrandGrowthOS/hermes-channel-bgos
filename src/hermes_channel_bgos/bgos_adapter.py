@@ -6585,6 +6585,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # lands during the round trip must not hide an older row of the response.
         cursor_of = self._cursors.reader()
         has_cursor = self._cursors.agent_ids()
+        live_pending = self._cursors.live_pending_set()
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -6623,6 +6624,12 @@ class BGOSAdapter(BasePlatformAdapter):
         def _keep(m: dict[str, Any]) -> bool:
             aid = self._row_assistant_id(m)
             mid = self._int_or_none(m.get("message_id")) or 0
+            if (aid, mid) in live_pending:
+                # Left unconsumed for an agent that was not known: it has not
+                # been delivered, whatever the agent's cursor says now (a later
+                # row may have moved it before this one was). The handler
+                # delivers it, or releases the record if it already was.
+                return True
             if aid in known_set:
                 return mid > cursor_of(aid)
             # Not known (yet): the handler decides whether it can be served, but
@@ -6631,14 +6638,6 @@ class BGOSAdapter(BasePlatformAdapter):
             return aid not in has_cursor or mid > cursor_of(aid)
 
         normalized = [m for m in polled if _keep(m)]
-        # A row dropped as already consumed also releases a pending record of it
-        # (it was consumed another way, a live push for instance).
-        kept_ids = {id(m) for m in normalized}
-        self._cursors.clear_pending_many(
-            (a, mid) for m in polled if id(m) not in kept_ids
-            if (a := self._row_assistant_id(m)) is not None
-            and (mid := self._int_or_none(m.get("message_id"))) is not None
-        )
 
         # Storm guard (2026-06-28): if the durable cursor is missing/stale,
         # BGOS can return a long historical backlog on gateway startup. Replaying
@@ -6776,13 +6775,16 @@ class BGOSAdapter(BasePlatformAdapter):
         # was left unconsumed (and recorded as pending), and an idle agent or the
         # head moving past it would lose it, above all across a restart.
         known_now = set(self._known_assistant_ids())
-        # A record that has expired no longer holds anything back (the row was
-        # given up on), or the carry would stay capped below it for ever.
+        # Only a row with a LIVE record holds the carry back. The handler records
+        # it before this runs; a row with none (expired, evicted past the bound,
+        # no assistant id, a failed write) has nothing to hold, or the carry
+        # would stay capped below it for ever.
+        live_now = self._cursors.live_pending_set()
         unknown_rows = [
             mid for m in kept
             if (aid := self._row_assistant_id(m)) not in known_now
             and (mid := self._int_or_none(m.get("message_id"))) is not None
-            and not (aid is not None and self._cursors.is_expired_pending(aid, mid))
+            and (aid, mid) in live_now
         ]
         if unknown_rows:
             watermark = min(watermark, min(unknown_rows) - 1)

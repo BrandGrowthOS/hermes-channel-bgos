@@ -503,8 +503,6 @@ async def test_the_idle_carry_stops_below_a_kept_row_of_an_unknown_agent() -> No
         return None
 
     adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
-    # Even if nothing recorded the row as pending, the carry must not pass it.
-    adapter._remember_dropped_unknown = lambda data: None  # type: ignore[method-assign]
     adapter._poll_since()
     adapter._cursors.save(1, 80)
 
@@ -671,9 +669,9 @@ async def test_a_held_row_served_again_is_not_new_activity_for_the_self_update()
     assert noted[0] == 0
 
 
-async def test_a_row_consumed_another_way_releases_its_pending_record() -> None:
-    backend = _SinceBackend([_row(100, 9)])
-    adapter, _got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+async def test_a_held_row_is_delivered_even_if_a_later_row_moved_the_agents_cursor_first() -> None:
+    backend = _SinceBackend([_row(100, 9), _row(120, 9)])
+    adapter, got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
 
     async def no_refresh() -> None:
         return None
@@ -681,15 +679,67 @@ async def test_a_row_consumed_another_way_releases_its_pending_record() -> None:
     adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
     adapter._poll_since()
     adapter._cursors.save(1, 80)
-    await adapter._run_backfill(adapter._poll_since())
+    backend.rows = [_row(100, 9)]
+    await adapter._run_backfill(adapter._poll_since())  # holds 100
     assert adapter._cursors.lowest_pending() == 100
 
-    # Agent 9 is bound and consumes a LATER row through a live push first, so its
-    # cursor is past the held row, which the poll then drops as consumed.
+    # Agent 9 is bound and a LATER row (120) is consumed by a live push first.
     adapter._state.set_route(9, "route_9")
     adapter._cursors.since(adapter._known_assistant_ids())
-    adapter._cursors.save(9, 120)
-    adapter._dropped_unknown.clear()  # (no memory replay: only the poll can release it)
-    await adapter._run_backfill(adapter._poll_since())
+    await adapter._handle_inbound(_row(120, 9), batchable=False)
+    assert adapter._cursors.get(9) == 120
+    adapter._dropped_unknown.clear()  # the process dies before the memory replay
 
-    assert adapter._cursors.lowest_pending() is None
+    # After the restart the poll still hands over row 100 (its record is live) and
+    # it is delivered, though agent 9's cursor is past it.
+    second, second_got = _adapter(backend, agents=(1, 9))  # type: ignore[arg-type]
+    await second._run_backfill(second._poll_since())
+
+    assert (9, 100) in second_got
+    assert second._cursors.lowest_pending() is None
+
+
+async def test_more_unknown_rows_than_the_record_bound_do_not_stall_the_poll(monkeypatch) -> None:
+    import time as _time
+
+    held = [_row(100 + i, 9) for i in range(60)]  # more than the 50 records kept
+    rest = [_row(200 + i, 1) for i in range(300)]
+    backend = _SinceBackend(held + rest)
+    adapter, got = _adapter(backend, agents=(1, 2))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    monkeypatch.setenv("BGOS_BACKFILL_STORM_LIMIT", "0")
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.save(2, 99)
+
+    real = _time.time()
+    for hour in range(4):
+        monkeypatch.setattr(
+            "hermes_channel_bgos.cursors.time.time", lambda h=hour: real + 3700 * h,
+        )
+        for _ in range(4):
+            await adapter._run_backfill(adapter._poll_since())
+
+    # Every row of agent 1 got through and the idle agent was carried on.
+    assert len([g for g in got if g[0] == 1]) == 300
+    assert adapter._cursors.get(2) > 200
+
+
+async def test_a_row_with_no_assistant_id_cannot_pin_the_window(monkeypatch) -> None:
+    monkeypatch.setenv("BGOS_BACKFILL_STORM_LIMIT", "0")
+    backend = _SinceBackend(
+        [{**_row(100, 9), "assistant_id": None}] + [_row(101 + i, 1) for i in range(250)]
+    )
+    adapter, got = _adapter(backend, agents=(1, 2))  # type: ignore[arg-type]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.save(2, 99)
+
+    for _ in range(4):
+        await adapter._run_backfill(adapter._poll_since())
+
+    assert len([g for g in got if g[0] == 1]) == 250
