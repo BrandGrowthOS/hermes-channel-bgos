@@ -977,3 +977,18 @@ async def test_a_storm_skip_on_the_poll_that_first_sees_an_unknown_agents_row_st
     adapter._state.set_route(9, "route_9")
     await adapter._run_backfill(adapter._poll_since())
     assert (9, 200) in got
+
+
+async def test_an_empty_list_body_does_not_release_the_records_either() -> None:
+    class _EmptyList:
+        async def fetch_inbound_since(self, since_message_id: int) -> Any:
+            return {"messages": []}
+
+    adapter, _got = _adapter(_EmptyList(), agents=(1,))  # type: ignore[arg-type]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.record_pending(9, 100)  # an earlier process left it
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert adapter._cursors.lowest_pending() == 100

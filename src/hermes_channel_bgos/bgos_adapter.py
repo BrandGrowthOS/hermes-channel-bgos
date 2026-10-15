@@ -6618,9 +6618,10 @@ class BGOSAdapter(BasePlatformAdapter):
         if resp is NOT_MODIFIED:
             return True
         messages = resp.get("messages") if isinstance(resp, dict) else None
-        if isinstance(messages, list):
-            # Only a well formed body proves what the backend serves: an empty
-            # or malformed one proves nothing.
+        if isinstance(messages, list) and messages:
+            # Only a well formed, non-empty body proves what the backend serves
+            # around a row: an empty or malformed one proves nothing (a transient
+            # empty answer must not erase the records).
             self._release_unserved_records(last_message_id, messages)
         if not messages:
             return True
