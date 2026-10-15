@@ -369,3 +369,19 @@ async def test_a_newly_exposed_agent_is_not_rebased_past_its_own_unconsumed_row(
     adapter._poll_since()
 
     assert adapter._cursors.get(2) == 300
+
+
+async def test_a_row_an_unknown_agent_already_consumed_is_not_delivered_again() -> None:
+    # Agent 4 consumed message 13 earlier, then was unexposed across a restart;
+    # agent 2's cursor still lags, so the poll starts at 12 and returns (13, 4).
+    backend = _Backend([_row(13, 4)])
+    adapter, got = _adapter(backend, agents=(2,))
+    adapter._cursors.since([2, 4])
+    adapter._cursors.save(2, 12)
+    adapter._cursors.save(4, 13)
+    adapter._state.remove_assistant(4)
+    adapter._state.set_route(4, "route_4")  # exposed again
+
+    await adapter._run_backfill(12)
+
+    assert got == []

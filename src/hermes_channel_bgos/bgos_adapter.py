@@ -6600,12 +6600,19 @@ class BGOSAdapter(BasePlatformAdapter):
         known = self._known_assistant_ids()
         known_set = set(known)
         polled = normalized
-        normalized = [
-            m for m in polled
-            if self._row_assistant_id(m) not in known_set
-            or (self._int_or_none(m.get("message_id")) or 0)
-            > cursor_of(self._row_assistant_id(m))
-        ]
+        has_cursor = self._cursors.agent_ids()
+
+        def _keep(m: dict[str, Any]) -> bool:
+            aid = self._row_assistant_id(m)
+            mid = self._int_or_none(m.get("message_id")) or 0
+            if aid in known_set:
+                return mid > cursor_of(aid)
+            # Not known (yet): the handler decides whether it can be served, but
+            # an agent with a cursor of its own already consumed what is at or
+            # below it (consumed before a restart, before it left).
+            return aid not in has_cursor or mid > cursor_of(aid)
+
+        normalized = [m for m in polled if _keep(m)]
 
         # Storm guard (2026-06-28): if the durable cursor is missing/stale,
         # BGOS can return a long historical backlog on gateway startup. Replaying
