@@ -389,3 +389,21 @@ async def test_a_row_an_unknown_agent_already_consumed_is_not_delivered_again() 
     await adapter._run_backfill(12)
 
     assert got == []
+
+
+async def test_a_row_above_an_unknown_agents_own_cursor_still_reaches_the_handler() -> None:
+    backend = _Backend([_row(14, 4)])
+    adapter, got = _adapter(backend, agents=(2,))
+    adapter._cursors.since([2, 4])
+    adapter._cursors.save(2, 12)
+    adapter._cursors.save(4, 13)
+    adapter._state.remove_assistant(4)
+
+    async def learn_agent_4() -> None:
+        adapter._state.set_route(4, "route_4")
+
+    adapter._refresh_pairing_scope = learn_agent_4  # type: ignore[method-assign]
+
+    await adapter._run_backfill(12)
+
+    assert got == [(4, 14)]
