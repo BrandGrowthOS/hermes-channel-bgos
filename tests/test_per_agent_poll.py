@@ -955,3 +955,25 @@ async def test_an_empty_or_malformed_body_does_not_release_the_records() -> None
     await adapter._run_backfill(adapter._poll_since())
 
     assert adapter._cursors.lowest_pending() == 100
+
+
+async def test_a_storm_skip_on_the_poll_that_first_sees_an_unknown_agents_row_still_holds_it() -> None:
+    rows = [_row(100 + i, 1) for i in range(30)] + [_row(200, 9)]
+    backend = _SinceBackend(rows)
+    adapter, got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
+
+    await adapter._run_backfill(adapter._poll_since())  # 30 known rows: a storm
+
+    # The row recorded on this very poll is handed to the handler (held in memory)
+    # and not skipped with the backlog.
+    assert (9, 200) in adapter._dropped_unknown
+    adapter._state.set_route(9, "route_9")
+    await adapter._run_backfill(adapter._poll_since())
+    assert (9, 200) in got

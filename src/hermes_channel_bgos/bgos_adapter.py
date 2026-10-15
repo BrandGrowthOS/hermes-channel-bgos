@@ -6697,6 +6697,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 u_mid = self._int_or_none(m.get("message_id"))
                 if u_aid is not None and u_mid is not None and u_aid not in known_set:
                     self._cursors.record_pending(u_aid, u_mid)
+            # The records just written are live: the storm filter below must see
+            # them, or a storm skip on the poll that first sees a row would drop it.
+            live_pending = self._cursors.live_pending_set()
         if storm_limit > 0 and len(storm_rows) > storm_limit:
             max_id = max(
                 (mid for mid in (self._int_or_none(m.get("message_id")) for m in storm_rows) if mid is not None),
