@@ -131,3 +131,13 @@ def test_the_reader_answers_from_one_read(cursors: AgentCursors) -> None:
 def test_the_write_is_atomic_no_tempfile_left(cursors: AgentCursors, tmp_path: Path) -> None:
     cursors.save(1, 5)
     assert [p.name for p in tmp_path.iterdir()] == ["bgos_last_ids.json"]
+
+
+def test_migration_a_poll_with_no_known_agents_keeps_the_old_cursor_for_the_agents_that_come(
+    cursors: AgentCursors, tmp_path: Path,
+) -> None:
+    (tmp_path / "bgos_last_id").write_text("3000")
+    assert cursors.since([]) == 3000  # nothing exposed yet
+    cursors.save(1, 3500)  # a live message moves the head past it
+    assert cursors.get(2) == 3000
+    assert cursors.since([1, 2]) == 3000

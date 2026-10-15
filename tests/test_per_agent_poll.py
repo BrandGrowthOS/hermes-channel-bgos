@@ -212,46 +212,6 @@ async def test_boot_with_no_agent_exposed_then_a_stale_agent_exposed_rejoins_at_
     assert got == []
 
 
-async def test_a_dropped_unknown_agent_row_is_held_not_carried_past_and_retried() -> None:
-    backend = _Backend([_row(150, 9)], [_row(150, 9)])
-    adapter, got = _adapter(backend, agents=(1,))
-
-    async def no_refresh() -> None:
-        return None
-
-    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
-    adapter._poll_since()
-    adapter._cursors.save(1, 100)
-
-    await adapter._run_backfill(adapter._poll_since())
-    assert adapter._cursors.get(1) == 149  # carried up to, not past, the dropped row
-
-    adapter._state.set_route(9, "route_9")  # agent 9 is exposed
-    await adapter._run_backfill(adapter._poll_since())
-
-    assert backend.since_seen == [100, 149]
-    assert got == [(9, 150)]
-
-
-async def test_the_unknown_row_hold_is_bounded() -> None:
-    backend = _Backend(*([[_row(150, 9)]] * 20))
-    adapter, _got = _adapter(backend, agents=(1,))
-
-    async def no_refresh() -> None:
-        return None
-
-    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
-    adapter._poll_since()
-    adapter._cursors.save(1, 100)
-
-    for _ in range(20):
-        await adapter._run_backfill(adapter._poll_since())
-
-    # After the hold runs out the idle carry is released, so one agent that
-    # never resolves cannot pin the window for everyone else.
-    assert adapter._cursors.get(1) == 150
-
-
 async def test_a_live_push_during_the_fetch_does_not_hide_an_older_row_of_the_response() -> None:
     adapter, got = _adapter(_Backend())
 

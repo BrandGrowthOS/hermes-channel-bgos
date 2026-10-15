@@ -142,7 +142,10 @@ class AgentCursors:
             if str(aid) not in state["agents"]:
                 state["agents"][str(aid)] = self._effective(state, aid)
                 changed = True
-        if "migrating" in state:
+        # Only a poll that serves agents hands the migrated value over: one with
+        # none known keeps it for the agents that come, or a live message could
+        # move the head past it first.
+        if "migrating" in state and ids:
             del state["migrating"]
             changed = True
         if changed:
