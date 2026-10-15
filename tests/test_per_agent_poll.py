@@ -511,6 +511,7 @@ async def test_the_idle_carry_stops_below_a_kept_row_of_an_unknown_agent() -> No
     await adapter._run_backfill(adapter._poll_since())
 
     assert adapter._cursors.get(1) == 149
+    assert adapter._cursors.head() == 149  # the head is capped below the row too
 
 
 async def test_a_live_row_for_a_known_agent_cannot_carry_the_cursors_past_a_held_row_across_a_restart() -> None:
