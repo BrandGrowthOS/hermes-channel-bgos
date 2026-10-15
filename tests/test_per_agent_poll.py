@@ -1034,3 +1034,37 @@ async def test_a_storm_skip_on_a_full_page_stops_below_the_last_id_so_a_cut_sibl
     await adapter._run_backfill(adapter._poll_since())  # 200 known rows: a storm
 
     assert adapter._cursors.get(1) == 299  # not 300: the next poll still fetches id 300
+
+
+async def test_rows_recorded_before_the_dispatch_loop_are_not_marked_held_until_a_handler_reaches_them() -> None:
+    backend = _SinceBackend([_row(100, 9), _row(101, 8)])
+    adapter, _got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+    seen: list[set] = []
+
+    async def spy(data: dict, **_k: Any) -> None:
+        seen.append(adapter._cursors.unheld_pending_set())
+
+    adapter._handle_inbound = spy  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    # When the first handler runs, both rows are recorded and still reachable by a
+    # restart (and by the intake resume), not hidden behind a mark with no memory copy.
+    assert seen[0] == {(9, 100), (8, 101)}
+
+
+async def test_a_dict_row_without_an_id_does_not_release_the_records() -> None:
+    class _NoId:
+        async def fetch_inbound_since(self, since_message_id: int) -> Any:
+            return {"messages": [{"foo": 1}]}
+
+    adapter, _got = _adapter(_NoId(), agents=(1,))  # type: ignore[arg-type]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.record_pending(9, 100)
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert adapter._cursors.lowest_pending() == 100

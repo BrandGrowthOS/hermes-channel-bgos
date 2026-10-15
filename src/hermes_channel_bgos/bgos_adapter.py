@@ -6621,7 +6621,11 @@ class BGOSAdapter(BasePlatformAdapter):
         if resp is NOT_MODIFIED:
             return True
         messages = resp.get("messages") if isinstance(resp, dict) else None
-        if isinstance(messages, list) and any(isinstance(m, dict) for m in messages):
+        if isinstance(messages, list) and any(
+            isinstance(m, dict)
+            and self._int_or_none(m.get("message_id", m.get("id"))) is not None
+            for m in messages
+        ):
             # Only a well formed, non-empty body proves what the backend serves
             # around a row: an empty or malformed one proves nothing (a transient
             # empty answer must not erase the records).
@@ -6701,7 +6705,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 u_mid = self._int_or_none(m.get("message_id"))
                 if u_aid is not None and u_mid is not None and u_aid not in known_set:
                     self._cursors.record_pending(u_aid, u_mid)
-                    self._cursors.mark_held(u_aid, u_mid)
+            # (Not marked held here: the handler does that for each row when it
+            # reaches it. A mark without a memory copy would switch off the window
+            # reach-back, for instance when a restart hold interrupts the replay.)
             # The records just written are live: the storm filter below must see
             # them, or a storm skip on the poll that first sees a row would drop it.
             live_pending = self._cursors.live_pending_set()
