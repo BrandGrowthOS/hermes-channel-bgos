@@ -5577,6 +5577,13 @@ class BGOSAdapter(BasePlatformAdapter):
             if held_id is not None:
                 # A click held from here on came after this message (F3).
                 self._held_message_high = max(self._held_message_high, held_id)
+                # A row of an agent this gateway does not know leaves nothing
+                # behind when it is only "left unconsumed": record it, or the
+                # restart (or the intake reopening) would not fetch it again.
+                held_aid = self._int_or_none(
+                    data.get("assistant_id", data.get("assistantId")))
+                if held_aid is not None and self._state.get_route(held_aid) is None:
+                    self._cursors.record_pending(held_aid, held_id)
             return
         resume = self._take_intake_resume_cursor()
         if resume is not None:
@@ -5607,6 +5614,13 @@ class BGOSAdapter(BasePlatformAdapter):
                 "inbound for unknown assistant_id=%s — refreshing pairing scope",
                 assistant_id,
             )
+            # Recorded BEFORE the refresh awaits: a process that stops during it
+            # must still find the row on disk. If the refresh learns the agent
+            # the row is consumed below and the record cleared.
+            _early_mid = self._int_or_none(data.get("message_id"))
+            _early_aid = self._int_or_none(assistant_id)
+            if _early_mid is not None and _early_aid is not None:
+                self._cursors.record_pending(_early_aid, _early_mid)
             try:
                 await self._refresh_pairing_scope()
             except Exception:
@@ -6604,7 +6618,10 @@ class BGOSAdapter(BasePlatformAdapter):
         if resp is NOT_MODIFIED:
             return True
         messages = resp.get("messages") if isinstance(resp, dict) else None
-        self._release_unserved_records(last_message_id, messages or [])
+        if isinstance(messages, list):
+            # Only a well formed body proves what the backend serves: an empty
+            # or malformed one proves nothing.
+            self._release_unserved_records(last_message_id, messages)
         if not messages:
             return True
 
@@ -6670,13 +6687,17 @@ class BGOSAdapter(BasePlatformAdapter):
             and (self._row_assistant_id(m),
                  self._int_or_none(m.get("message_id"))) not in live_pending
         ]
-        if storm_limit > 0 and len(storm_rows) > storm_limit:
+        # Every kept row of an agent not known yet is recorded BEFORE anything is
+        # dispatched: a process that stops while an earlier row is handled (a
+        # message to a known and an unknown agent is two rows with one id) must
+        # still find it on disk.
+        if known_set:
             for m in normalized:
                 u_aid = self._row_assistant_id(m)
                 u_mid = self._int_or_none(m.get("message_id"))
-                if (u_aid is not None and u_mid is not None
-                        and known_set and u_aid not in known_set):
+                if u_aid is not None and u_mid is not None and u_aid not in known_set:
                     self._cursors.record_pending(u_aid, u_mid)
+        if storm_limit > 0 and len(storm_rows) > storm_limit:
             max_id = max(
                 (mid for mid in (self._int_or_none(m.get("message_id")) for m in storm_rows) if mid is not None),
                 default=last_message_id,
@@ -6688,7 +6709,15 @@ class BGOSAdapter(BasePlatformAdapter):
                 "since_message_id=%d and advanced cursor to %d",
                 len(storm_rows), last_message_id, max_id,
             )
-            return True
+            # Held rows (a live record) are not the backlog the guard skips: they
+            # are still handed over. Nothing else is dispatched.
+            normalized = [
+                m for m in normalized
+                if (self._row_assistant_id(m),
+                    self._int_or_none(m.get("message_id"))) in live_pending
+            ]
+            if not normalized:
+                return True
 
         for msg in normalized:
             replayed_id = self._int_or_none(msg.get("message_id"))

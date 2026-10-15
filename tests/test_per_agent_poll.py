@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter
 from hermes_channel_bgos.config import BgosConfig
 
@@ -881,3 +883,75 @@ async def test_a_failed_replay_makes_the_window_reach_back_to_the_record_again()
     await adapter._replay_dropped_unknown()  # pops the memory copy, the call fails
 
     assert adapter._cursors.since([1]) == 149  # reaches back to the record again
+
+
+class _Killed(BaseException):
+    """The process stops here (not an Exception: nothing in the adapter catches it)."""
+
+
+async def test_a_row_of_an_unknown_agent_survives_a_kill_during_the_pairing_refresh() -> None:
+    # One message addressed to known agent 1 and unknown agent 9: two rows, one id.
+    backend = _SinceBackend([_row(100, 1), _row(100, 9)])
+    first, _first_got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def killed_refresh() -> None:
+        raise _Killed()
+
+    first._refresh_pairing_scope = killed_refresh  # type: ignore[method-assign]
+    first._poll_since()
+    first._cursors.save(1, 80)
+    with pytest.raises(_Killed):
+        await first._run_backfill(first._poll_since())
+    assert first._cursors.get(1) == 100  # agent 1's row was consumed first
+
+    # The new process has agent 9 bound; its row must still be fetched.
+    second, second_got = _adapter(backend, agents=(1, 9))  # type: ignore[arg-type]
+    await second._run_backfill(second._poll_since())
+
+    assert second_got == [(9, 100)]
+
+
+async def test_a_push_for_an_unknown_agent_is_recorded_while_a_restart_holds_intake() -> None:
+    adapter, got = _adapter(_Backend(), agents=(1,))
+    adapter._intake_held = lambda: True  # type: ignore[method-assign]
+
+    await adapter._handle_inbound(_row(100, 9), batchable=False)
+
+    assert got == []
+    assert adapter._cursors.lowest_pending() == 100  # the restart will find it
+
+
+async def test_a_storm_skip_still_hands_over_a_bound_agents_held_row() -> None:
+    backend = _SinceBackend([_row(100, 9)])
+    first, _first_got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    first._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    first._poll_since()
+    first._cursors.save(1, 80)
+    await first._run_backfill(first._poll_since())  # holds (9, 100)
+
+    # Downtime: agent 1 has a backlog of 30 rows, and agent 9 is bound now.
+    backend.rows += [_row(101 + i, 1) for i in range(30)]
+    second, second_got = _adapter(backend, agents=(1, 9))  # type: ignore[arg-type]
+    await second._run_backfill(second._poll_since())
+
+    assert second_got == [(9, 100)]  # the backlog is skipped, the held row is not
+    assert second._cursors.lowest_pending() is None
+
+
+async def test_an_empty_or_malformed_body_does_not_release_the_records() -> None:
+    class _BadBody:
+        async def fetch_inbound_since(self, since_message_id: int) -> Any:
+            return None  # a 200 with an empty body
+
+    adapter, _got = _adapter(_BadBody(), agents=(1,))  # type: ignore[arg-type]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.record_pending(9, 100)  # an earlier process left it
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert adapter._cursors.lowest_pending() == 100
