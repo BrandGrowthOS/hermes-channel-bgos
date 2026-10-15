@@ -379,8 +379,12 @@ async def test_a_row_an_unknown_agent_already_consumed_is_not_delivered_again() 
     adapter._cursors.since([2, 4])
     adapter._cursors.save(2, 12)
     adapter._cursors.save(4, 13)
-    adapter._state.remove_assistant(4)
-    adapter._state.set_route(4, "route_4")  # exposed again
+    adapter._state.remove_assistant(4)  # not known when the poll's rows are filtered
+
+    async def learn_agent_4() -> None:
+        adapter._state.set_route(4, "route_4")  # the row's own refresh learns it
+
+    adapter._refresh_pairing_scope = learn_agent_4  # type: ignore[method-assign]
 
     await adapter._run_backfill(12)
 
