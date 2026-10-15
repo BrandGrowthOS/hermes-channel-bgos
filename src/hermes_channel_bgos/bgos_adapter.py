@@ -1339,6 +1339,8 @@ class BGOSAdapter(BasePlatformAdapter):
         self._dispatched_inbound_ids: OrderedDict[tuple[int | None, int], None] = (
             OrderedDict()
         )
+        # The agents the previous poll start served, to spot one that is back.
+        self._previously_known: set[int] | None = None
         # One poll cursor per agent (see cursors.py), not one per gateway.
         self._cursors = AgentCursors(
             self._hermes_home / "bgos_last_ids.json", self._last_id_path()
@@ -2471,7 +2473,14 @@ class BGOSAdapter(BasePlatformAdapter):
     def _poll_since(self) -> int:
         """Where the REST poll starts: the lowest cursor of the known agents.
         Each returned row is then kept only past its own agent's cursor."""
-        return self._cursors.since(self._known_assistant_ids())
+        known = self._known_assistant_ids()
+        if self._previously_known is not None:
+            # An agent back after being away rejoins at the head (see cursors.py).
+            self._cursors.rebase_reexposed(
+                a for a in known if a not in self._previously_known
+            )
+        self._previously_known = set(known)
+        return self._cursors.since(known)
 
     def _save_agent_cursor(self, assistant_id: Any, message_id: int) -> None:
         """Advance one agent's cursor (never regresses)."""

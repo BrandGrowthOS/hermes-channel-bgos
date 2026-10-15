@@ -153,6 +153,22 @@ class AgentCursors:
 
     # -- writes ---------------------------------------------------------------
 
+    def rebase_reexposed(self, assistant_ids: Iterable[int]) -> None:
+        """Agents that were absent from the known set and are back (removed
+        from the pairing, then exposed again while this gateway ran) rejoin at
+        the head like an agent seen for the first time: what arrived for them
+        while away is history they were not part of, not a backlog to replay or
+        a storm to trip over. Never moves a cursor down."""
+        state = self._load()
+        changed = False
+        for aid in assistant_ids:
+            own = state["agents"].get(str(aid))
+            if own is not None and state["head"] > own:
+                state["agents"][str(aid)] = state["head"]
+                changed = True
+        if changed:
+            self._write(state)
+
     def save(self, assistant_id: int, message_id: int) -> None:
         """Advance ONE agent's cursor. Never regresses; ignores non-positive
         or non-integer ids."""

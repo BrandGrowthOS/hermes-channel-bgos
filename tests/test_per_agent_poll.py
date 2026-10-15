@@ -169,3 +169,25 @@ async def test_an_upgraded_gateway_resumes_every_agent_from_the_old_single_curso
     # (480, agent 1) is the old cursor itself: already consumed. Nothing newer
     # is skipped for either agent.
     assert sorted(got) == [(1, 482), (2, 481), (2, 482)]
+
+
+async def test_an_agent_removed_and_exposed_again_rejoins_at_the_head() -> None:
+    old = [_row(3100 + i, 2) for i in range(30)]
+    backend = _Backend([], [], old + [_row(4000, 1)])
+    adapter, got = _adapter(backend)
+    adapter._poll_since()
+    adapter._cursors.save(1, 100)
+    adapter._cursors.save(2, 100)
+    await adapter._run_backfill(adapter._poll_since())
+
+    # Agent 2 is away while agent 1 moves on to 3500.
+    adapter._state.remove_assistant(2)
+    adapter._cursors.save(1, 3500)
+    await adapter._run_backfill(adapter._poll_since())
+
+    # Agent 2 is back; 30 messages arrived for it while away, plus a new one for agent 1.
+    adapter._state.set_route(2, "route_2")
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert backend.since_seen[-1] == 3500
+    assert got == [(1, 4000)]
