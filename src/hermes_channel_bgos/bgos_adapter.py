@@ -2230,6 +2230,9 @@ class BGOSAdapter(BasePlatformAdapter):
 
             for aid in added:
                 self._state.set_route(aid, new_routes[aid])
+            # Pin each new agent's own cursor now, not at the next poll start:
+            # until it has one it follows the shared head.
+            self._cursors.since(self._known_assistant_ids())
             for aid in removed:
                 self._state.remove_assistant(aid)
                 if self._ws is not None:

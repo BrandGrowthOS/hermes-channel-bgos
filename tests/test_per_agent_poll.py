@@ -407,3 +407,26 @@ async def test_a_row_above_an_unknown_agents_own_cursor_still_reaches_the_handle
     await adapter._run_backfill(12)
 
     assert got == [(4, 14)]
+
+
+async def test_an_agent_exposed_while_running_is_pinned_to_its_own_cursor_at_once() -> None:
+    adapter, _got = _adapter(_Backend(), agents=(1,))
+    adapter._poll_since()
+    adapter._cursors.save(1, 10)  # head is 10
+
+    async def whoami() -> dict[str, Any]:
+        return {"assistants": [
+            {"assistant_id": 1, "agent_route": "route_1"},
+            {"assistant_id": 2, "agent_route": "route_2"},
+        ]}
+
+    async def no_sync(_aid: int) -> None:
+        return None
+
+    adapter._api.whoami = whoami  # type: ignore[method-assign]
+    adapter.sync_commands_for = no_sync  # type: ignore[method-assign]
+
+    assert await adapter._refresh_pairing_scope() is True
+
+    adapter._cursors.save(1, 12)  # a sibling's live message moves the head on
+    assert adapter._cursors.get(2) == 10  # pinned, not following the head
