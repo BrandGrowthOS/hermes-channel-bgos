@@ -5634,16 +5634,13 @@ class BGOSAdapter(BasePlatformAdapter):
         # re-dispatching them — producing the live-server "50 conversation
         # reset acks in a row" loop caught 2026-05-15.
         msg_id = data.get("message_id")
-        if isinstance(msg_id, int):
-            # The agent is known and this row is now consumed (or was, when it is
-            # a duplicate): release the hold a pending record of it had on the
-            # poll window.
-            aid_int = self._int_or_none(assistant_id)
-            if aid_int is not None:
-                self._cursors.clear_pending(aid_int, msg_id)
+        aid_int = self._int_or_none(assistant_id)
         if dedup and isinstance(msg_id, int):
             dedup_key = (self._int_or_none(assistant_id), msg_id)
             if dedup_key in self._dispatched_inbound_ids:
+                # Delivered already: release any pending record of it.
+                if aid_int is not None:
+                    self._cursors.clear_pending(aid_int, msg_id)
                 log.info(
                     "dropping duplicate delivery of message_id=%d "
                     "assistant_id=%s (ws/poll race)", msg_id, assistant_id,
@@ -5654,6 +5651,11 @@ class BGOSAdapter(BasePlatformAdapter):
                 self._dispatched_inbound_ids.popitem(last=False)
         if isinstance(msg_id, int):
             self._save_agent_cursor(assistant_id, msg_id)
+            # Consumed: release the hold a pending record of it had. After the
+            # cursor save, so a crash between the two re-fetches the row instead
+            # of losing it.
+            if aid_int is not None:
+                self._cursors.clear_pending(aid_int, msg_id)
 
         # Server-authoritative chat addressing (2026-05-30 hardening).
         # Remember the chat this inbound targeted so later outbound
@@ -6586,6 +6588,10 @@ class BGOSAdapter(BasePlatformAdapter):
         cursor_of = self._cursors.reader()
         has_cursor = self._cursors.agent_ids()
         live_pending = self._cursors.live_pending_set()
+        # Rows this process already holds in memory before this poll's replay: the
+        # idle carry is held back below a row only on the poll that first holds
+        # it, or a row served again on every poll would anchor the window.
+        held_before = set(self._dropped_unknown)
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -6598,6 +6604,7 @@ class BGOSAdapter(BasePlatformAdapter):
         if resp is NOT_MODIFIED:
             return True
         messages = resp.get("messages") if isinstance(resp, dict) else None
+        self._release_unserved_records(last_message_id, messages or [])
         if not messages:
             return True
 
@@ -6700,8 +6707,36 @@ class BGOSAdapter(BasePlatformAdapter):
             # A restart began during the replay: rows it held were left
             # unconsumed, so no cursor may be carried past them.
             return True
-        self._advance_idle_agents(known, polled, normalized, len(messages))
+        self._advance_idle_agents(
+            known, polled, normalized, len(messages), held_before,
+        )
         return True
+
+    def _release_unserved_records(
+        self, since: int, messages: list[Any],
+    ) -> None:
+        """A pending record an earlier process left on disk makes the poll window
+        reach back to its row. If a fetch that spans the row's id does not return
+        it, the backend no longer serves it (deleted, agent left): stop reaching
+        back, or the window would stay anchored for the hour."""
+        unheld = self._cursors.unheld_pending_set()
+        if not unheld:
+            return
+        served: set[tuple[int | None, int | None]] = set()
+        max_served = 0
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            mid = self._int_or_none(m.get("message_id", m.get("id")))
+            served.add((self._row_assistant_id(m), mid))
+            if mid is not None:
+                max_served = max(max_served, mid)
+        full = len(messages) >= BACKEND_PAGE_SIZE
+        gone = [
+            (a, m) for (a, m) in unheld
+            if m > since and (a, m) not in served and (not full or m < max_served)
+        ]
+        self._cursors.clear_pending_many(gone)
 
     def _remember_dropped_unknown(self, data: dict) -> None:
         """Keep a message that was dropped because its assistant is still
@@ -6759,6 +6794,10 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._handle_inbound(entry[0], batchable=False)
             except Exception:
                 log.exception("replay of a held message failed: %s", entry[0])
+            finally:
+                # Delivered, the record is cleared; if the call failed before
+                # that, the window reaches back to the record again.
+                self._cursors.release_held(*key)
 
     @classmethod
     def _row_assistant_id(cls, msg: dict[str, Any]) -> int | None:
@@ -6770,6 +6809,7 @@ class BGOSAdapter(BasePlatformAdapter):
         polled: list[dict[str, Any]],
         kept: list[dict[str, Any]],
         raw_row_count: int,
+        held_before: set[tuple[int, int]] = frozenset(),  # type: ignore[assignment]
     ) -> None:
         """Move the cursor of every known agent that had NO row in this poll up
         to what the poll covered. Every row at or below the watermark is in the
@@ -6798,6 +6838,7 @@ class BGOSAdapter(BasePlatformAdapter):
             if (aid := self._row_assistant_id(m)) not in known_now
             and (mid := self._int_or_none(m.get("message_id"))) is not None
             and (aid, mid) in live_now
+            and (aid, mid) not in held_before
         ]
         if unknown_rows:
             watermark = min(watermark, min(unknown_rows) - 1)

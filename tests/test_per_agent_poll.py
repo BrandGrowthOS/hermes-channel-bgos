@@ -794,3 +794,90 @@ async def test_a_held_row_does_not_anchor_the_poll_window_while_this_process_hol
     assert adapter._cursors.lowest_pending() == 100
     restarted, _restarted_got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
     assert restarted._cursors.since([1]) == 99
+
+
+async def test_an_idle_known_agent_does_not_keep_the_window_anchored_at_a_held_row(monkeypatch) -> None:
+    # Agent 1 is busy, agent 2 is idle, agent 9 (never exposed) has one row.
+    monkeypatch.setenv("BGOS_BACKFILL_STORM_LIMIT", "0")
+    rows = [_row(100, 9)] + [_row(101 + i, 1) for i in range(450)]
+    backend = _SinceBackend(rows)
+    adapter, got = _adapter(backend, agents=(1, 2))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.save(2, 99)
+
+    for _ in range(6):
+        await adapter._run_backfill(adapter._poll_since())
+
+    assert len([g for g in got if g[0] == 1]) == 450  # nothing stuck behind 200 rows
+    assert adapter._cursors.get(2) > 400  # the idle agent moved on too
+
+
+async def test_a_record_left_by_an_earlier_process_for_a_row_no_longer_served_stops_anchoring() -> None:
+    backend = _SinceBackend([_row(300 + i, 1) for i in range(10)])  # row (9, 100) is gone
+    adapter, _got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.record_pending(9, 100)  # an earlier process left it on disk
+    assert adapter._cursors.since([1]) == 99
+
+    await adapter._run_backfill(adapter._poll_since())  # the fetch spans id 100
+
+    assert adapter._cursors.lowest_pending() is None
+    assert adapter._cursors.since([1]) > 100
+
+
+async def test_a_record_for_a_row_cut_off_by_the_page_limit_is_kept() -> None:
+    backend = _SinceBackend([_row(150 + i, 1) for i in range(300)])
+    adapter, _got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+    adapter._poll_since()
+    adapter._cursors.save(1, 99)
+    adapter._cursors.record_pending(9, 400)  # beyond what a full page of 200 reaches
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert adapter._cursors.lowest_pending() == 400  # not proven gone
+
+
+async def test_the_cursor_is_saved_before_the_pending_record_is_cleared() -> None:
+    adapter, _got = _adapter(_Backend(), agents=(1, 9))
+    adapter._cursors.record_pending(9, 150)
+    order: list[str] = []
+    real_save = adapter._cursors.save
+    real_clear = adapter._cursors.clear_pending
+    adapter._cursors.save = lambda a, m: (order.append("save"), real_save(a, m))[1]  # type: ignore[method-assign]
+    adapter._cursors.clear_pending = lambda a, m: (order.append("clear"), real_clear(a, m))[1]  # type: ignore[method-assign]
+
+    await adapter._handle_inbound(_row(150, 9), batchable=False)
+
+    assert order == ["save", "clear"]
+
+
+async def test_a_failed_replay_makes_the_window_reach_back_to_the_record_again() -> None:
+    backend = _SinceBackend([_row(150, 9)])
+    adapter, _got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
+    await adapter._run_backfill(adapter._poll_since())  # held in memory and recorded
+    adapter._cursors.save(1, 300)
+    assert adapter._cursors.since([1]) == 300  # this process holds it: no anchor
+
+    adapter._state.set_route(9, "route_9")
+
+    async def boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("dispatch failed before the record was cleared")
+
+    adapter._handle_inbound = boom  # type: ignore[method-assign]
+    await adapter._replay_dropped_unknown()  # pops the memory copy, the call fails
+
+    assert adapter._cursors.since([1]) == 149  # reaches back to the record again

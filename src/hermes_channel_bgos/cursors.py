@@ -184,6 +184,11 @@ class AgentCursors:
             for e in self._read_pending()
         )
 
+    def unheld_pending_set(self) -> set[tuple[int, int]]:
+        """Live records this process does not hold in memory (an earlier process
+        left them): the ones the poll window reaches back to."""
+        return self.live_pending_set() - self._held_in_memory
+
     def live_pending_set(self) -> set[tuple[int, int]]:
         """(assistant id, message id) of every record that still holds."""
         return {(e["assistant_id"], e["id"]) for e in self._load_pending()}
