@@ -12,7 +12,7 @@ Per agent poll cursors (Channels and Organizations phase 0, PR 0.3e).
 - A WS reconnect backfills from the lowest agent cursor.
 - Live WS pushes batch text per (chat, agent), so the two events of a message addressed to two agents are not merged into one dispatch.
 - An agent removed from the pairing and exposed again while the gateway runs rejoins at the newest consumed id instead of replaying what arrived while it was away.
-- A message dropped because its assistant is not known yet is kept in memory (200 messages, 10 minutes, not across a restart) and delivered once the agent is exposed; each poll asks the pairing again while one waits.
+- A message dropped because its assistant is not known yet is kept in memory (200 messages, 10 minutes) and delivered once the agent is exposed; each poll asks the pairing again while one waits. Its id is also persisted in `$HERMES_HOME/bgos_pending_unknown.json` (50 records, one hour): every cursor and the head stay below it, and the poll window reaches back to it, so a restart before the agent is bound fetches it again instead of losing it.
 
 ## 0.31.0 (2026-10-11)
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -43,15 +44,92 @@ log = logging.getLogger(__name__)
 # Rows the backend returns per inbound poll (its ``LIMIT 200``).
 BACKEND_PAGE_SIZE = 200
 
+# Pending-unknown records (see AgentCursors): how many are kept (drop oldest)
+# and for how long, so an agent that is never bound cannot pin every cursor
+# forever.
+MAX_PENDING = 50
+PENDING_TTL_SECONDS = 3600.0
+
 
 def _is_cursor(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 class AgentCursors:
-    def __init__(self, path: Path, legacy_path: Path) -> None:
+    def __init__(
+        self, path: Path, legacy_path: Path, pending_path: Path | None = None,
+    ) -> None:
         self._path = path
         self._legacy_path = legacy_path
+        self._pending_path = pending_path or path.with_name(
+            "bgos_pending_unknown.json"
+        )
+
+    # -- pending unknown ------------------------------------------------------
+    #
+    # A row served for an agent this gateway does not know yet is held in memory
+    # by the adapter. Cursors must not move past it, or after a restart the agent
+    # (bound by then) starts at the head and the row is lost. So the id is
+    # persisted here, every cursor and the head are clamped below the lowest one,
+    # and the poll window reaches back to it until the row is delivered.
+
+    def _load_pending(self) -> list[dict]:
+        try:
+            raw = json.loads(self._pending_path.read_text())
+        except (OSError, ValueError):
+            return []
+        if not isinstance(raw, list):
+            return []
+        now = time.time()
+        out: list[dict] = []
+        for e in raw:
+            if (
+                isinstance(e, dict)
+                and _is_cursor(e.get("id")) and e["id"] > 0
+                and _is_cursor(e.get("assistant_id"))
+                and isinstance(e.get("at"), (int, float))
+                and now - e["at"] <= PENDING_TTL_SECONDS
+            ):
+                out.append({"id": e["id"], "assistant_id": e["assistant_id"],
+                            "at": e["at"]})
+        return out
+
+    def _write_pending(self, entries: list[dict]) -> None:
+        try:
+            self._pending_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._pending_path.with_name(
+                f"{self._pending_path.name}.{os.getpid()}.tmp"
+            )
+            tmp.write_text(json.dumps(entries))
+            os.replace(tmp, self._pending_path)
+        except OSError:
+            log.warning("could not persist bgos_pending_unknown.json")
+
+    def record_pending(self, assistant_id: int, message_id: int) -> None:
+        """Remember a row left unconsumed because its agent is not known yet."""
+        if not _is_cursor(message_id) or message_id <= 0:
+            return
+        entries = self._load_pending()
+        if any(e["id"] == message_id and e["assistant_id"] == assistant_id
+               for e in entries):
+            return
+        entries.append({"id": message_id, "assistant_id": assistant_id,
+                        "at": time.time()})
+        self._write_pending(entries[-MAX_PENDING:])
+
+    def clear_pending(self, assistant_id: int, message_id: int) -> None:
+        """The row was consumed: release the clamp it held."""
+        entries = self._load_pending()
+        kept = [e for e in entries
+                if not (e["id"] == message_id and e["assistant_id"] == assistant_id)]
+        if len(kept) != len(entries):
+            self._write_pending(kept)
+
+    def lowest_pending(self, assistant_id: int | None = None) -> int | None:
+        """The lowest pending row id (of one agent, or of any)."""
+        ids = [e["id"] for e in self._load_pending()
+               if assistant_id is None or e["assistant_id"] == assistant_id]
+        return min(ids) if ids else None
 
     # -- persistence ----------------------------------------------------------
 
@@ -66,7 +144,9 @@ class AgentCursors:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(state))
+            persisted = {k: v for k, v in state.items()
+                         if k not in ("holes", "lowest_hole")}
+            tmp.write_text(json.dumps(persisted))
             os.replace(tmp, self._path)
         except OSError:
             # Disk full / read-only / permission denied: do not crash; worst
@@ -94,12 +174,24 @@ class AgentCursors:
             state: dict = {"version": 1, "head": raw["head"], "agents": agents}
             if _is_cursor(raw.get("migrating")):
                 state["migrating"] = raw["migrating"]
-            return state
+            return self._with_holes(state)
         legacy = self._read_legacy()
         state = {"version": 1, "head": legacy, "agents": {}}
         if legacy > 0:
             state["migrating"] = legacy
             self._write(state)
+        return self._with_holes(state)
+
+    def _with_holes(self, state: dict) -> dict:
+        """Attach the pending-unknown lowest ids (never written to the cursor
+        file): per agent, and across all agents."""
+        holes: dict[str, int] = {}
+        for e in self._load_pending():
+            key = str(e["assistant_id"])
+            if key not in holes or e["id"] < holes[key]:
+                holes[key] = e["id"]
+        state["holes"] = holes
+        state["lowest_hole"] = min(holes.values()) if holes else None
         return state
 
     @staticmethod
@@ -110,7 +202,10 @@ class AgentCursors:
         own = state["agents"].get(str(assistant_id))
         if own is not None:
             return own
-        return state.get("migrating", state["head"])
+        base = state.get("migrating", state["head"])
+        # An agent whose own row is still pending starts below it.
+        hole = state["holes"].get(str(assistant_id))
+        return min(base, max(0, hole - 1)) if hole is not None else base
 
     # -- reads ----------------------------------------------------------------
 
@@ -154,9 +249,13 @@ class AgentCursors:
             changed = True
         if changed:
             self._write(state)
-        if not ids:
-            return state["head"]
-        return min(self._effective(state, a) for a in ids)
+        since = (min(self._effective(state, a) for a in ids)
+                 if ids else state["head"])
+        # Reach back to the lowest row still pending for an unknown agent, so it
+        # is fetched again once that agent is bound (also after a restart).
+        if state["lowest_hole"] is not None:
+            since = min(since, max(0, state["lowest_hole"] - 1))
+        return since
 
     # -- writes ---------------------------------------------------------------
 
@@ -170,8 +269,10 @@ class AgentCursors:
         changed = False
         for aid in assistant_ids:
             own = state["agents"].get(str(aid))
-            if own is not None and state["head"] > own:
-                state["agents"][str(aid)] = state["head"]
+            hole = state["holes"].get(str(aid))
+            target = state["head"] if hole is None else min(state["head"], hole - 1)
+            if own is not None and target > own:
+                state["agents"][str(aid)] = target
                 changed = True
         if changed:
             self._write(state)
@@ -208,6 +309,11 @@ class AgentCursors:
             return
         state = self._load()
         changed = False
+        # Never past a row still pending for an unknown agent (see above).
+        if state["lowest_hole"] is not None and message_id >= state["lowest_hole"]:
+            message_id = state["lowest_hole"] - 1
+            if message_id <= 0:
+                return
         for aid in assistant_ids:
             if message_id > self._effective(state, aid):
                 state["agents"][str(aid)] = message_id

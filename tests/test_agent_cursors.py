@@ -141,3 +141,80 @@ def test_migration_a_poll_with_no_known_agents_keeps_the_old_cursor_for_the_agen
     cursors.save(1, 3500)  # a live message moves the head past it
     assert cursors.get(2) == 3000
     assert cursors.since([1, 2]) == 3000
+
+
+def test_a_pending_row_clamps_every_cursor_and_the_head_below_it(
+    cursors: AgentCursors,
+) -> None:
+    cursors.since([1, 2])
+    cursors.record_pending(9, 150)
+
+    cursors.save(1, 300)  # a sibling consumes a later row
+    cursors.advance_idle([2], 300)
+    cursors.seed_all([1, 2], 400)
+
+    assert cursors.get(1) == 149
+    assert cursors.get(2) == 149
+    assert cursors.head() == 149
+
+
+def test_the_poll_window_reaches_back_to_a_pending_row(cursors: AgentCursors) -> None:
+    cursors.since([1])
+    cursors.save(1, 80)
+    cursors.record_pending(9, 150)
+    assert cursors.since([1]) == 80  # already below
+    cursors.save(1, 90)
+    assert cursors.since([1]) == 90
+    cursors.record_pending(9, 60)
+    assert cursors.since([1]) == 59
+
+
+def test_an_agent_bound_later_starts_below_its_own_pending_row(
+    cursors: AgentCursors,
+) -> None:
+    cursors.since([1])
+    cursors.save(1, 200)  # head 200
+    cursors.record_pending(9, 150)
+    assert cursors.get(9) == 149  # not the head
+    assert cursors.since([1, 9]) == 149
+
+
+def test_clearing_a_pending_row_releases_the_clamp(cursors: AgentCursors) -> None:
+    cursors.since([1])
+    cursors.record_pending(9, 150)
+    cursors.save(1, 300)
+    assert cursors.get(1) == 149
+
+    cursors.clear_pending(9, 150)
+    cursors.save(1, 300)
+
+    assert cursors.get(1) == 300
+
+
+def test_pending_rows_survive_a_restart_and_age_out(
+    cursors: AgentCursors, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time as _time
+
+    cursors.record_pending(9, 150)
+    again = AgentCursors(tmp_path / "bgos_last_ids.json", tmp_path / "bgos_last_id")
+    assert again.lowest_pending() == 150  # a new process still sees it
+
+    real = _time.time()
+    monkeypatch.setattr("hermes_channel_bgos.cursors.time.time", lambda: real + 7200)
+    assert again.lowest_pending() is None  # an agent never bound cannot pin forever
+
+
+def test_the_pending_list_is_bounded(cursors: AgentCursors) -> None:
+    for i in range(1, 61):
+        cursors.record_pending(9, i)
+    assert cursors.lowest_pending() == 11  # the oldest 10 were dropped
+
+
+def test_the_transient_hole_keys_never_reach_the_cursor_file(
+    cursors: AgentCursors, tmp_path: Path,
+) -> None:
+    cursors.record_pending(9, 150)
+    cursors.since([1])
+    cursors.save(1, 10)
+    assert set(_file(tmp_path)) <= {"version", "head", "agents", "migrating"}

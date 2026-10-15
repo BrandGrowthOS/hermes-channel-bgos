@@ -1353,7 +1353,9 @@ class BGOSAdapter(BasePlatformAdapter):
         )
         # One poll cursor per agent (see cursors.py), not one per gateway.
         self._cursors = AgentCursors(
-            self._hermes_home / "bgos_last_ids.json", self._last_id_path()
+            self._hermes_home / "bgos_last_ids.json",
+            self._last_id_path(),
+            self._hermes_home / "bgos_pending_unknown.json",
         )
         self._stt_setup = SttSetupNotifier(
             self._post_stt_setup_event,
@@ -5638,6 +5640,11 @@ class BGOSAdapter(BasePlatformAdapter):
             while len(self._dispatched_inbound_ids) > _DISPATCHED_IDS_CAP:
                 self._dispatched_inbound_ids.popitem(last=False)
         if isinstance(msg_id, int):
+            # Consumed: release the clamp a pending record of it held, then move
+            # this agent's cursor (clear first, or the clamp would hold it back).
+            aid_int = self._int_or_none(assistant_id)
+            if aid_int is not None:
+                self._cursors.clear_pending(aid_int, msg_id)
             self._save_agent_cursor(assistant_id, msg_id)
 
         # Server-authoritative chat addressing (2026-05-30 hardening).
@@ -6659,7 +6666,7 @@ class BGOSAdapter(BasePlatformAdapter):
             # A restart began during the replay: rows it held were left
             # unconsumed, so no cursor may be carried past them.
             return True
-        self._advance_idle_agents(known, polled, len(messages))
+        self._advance_idle_agents(known, polled, normalized, len(messages))
         return True
 
     def _remember_dropped_unknown(self, data: dict) -> None:
@@ -6672,6 +6679,9 @@ class BGOSAdapter(BasePlatformAdapter):
         if aid is None or mid is None:
             return
         key = (aid, mid)
+        # Persisted too: every cursor stays below this row, and the poll window
+        # reaches back to it, so a restart before the agent is bound re-fetches it.
+        self._cursors.record_pending(aid, mid)
         if key not in self._dropped_unknown:
             self._dropped_unknown[key] = (data, self._clock())
         while len(self._dropped_unknown) > _DROPPED_UNKNOWN_CAP:
@@ -6717,6 +6727,7 @@ class BGOSAdapter(BasePlatformAdapter):
         self,
         known: list[int],
         polled: list[dict[str, Any]],
+        kept: list[dict[str, Any]],
         raw_row_count: int,
     ) -> None:
         """Move the cursor of every known agent that had NO row in this poll up
@@ -6732,6 +6743,17 @@ class BGOSAdapter(BasePlatformAdapter):
         with_rows = {self._row_assistant_id(m) for m in polled}
         last = max(ids)
         watermark = last if raw_row_count < BACKEND_PAGE_SIZE else last - 1
+        # Never past a kept row of an agent still unknown after the replay: it
+        # was left unconsumed (and recorded as pending), and an idle agent or the
+        # head moving past it would lose it, above all across a restart.
+        known_now = set(self._known_assistant_ids())
+        unknown_rows = [
+            mid for m in kept
+            if self._row_assistant_id(m) not in known_now
+            and (mid := self._int_or_none(m.get("message_id"))) is not None
+        ]
+        if unknown_rows:
+            watermark = min(watermark, min(unknown_rows) - 1)
         self._cursors.advance_idle(
             [a for a in known if a not in with_rows], watermark,
         )

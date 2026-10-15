@@ -236,7 +236,10 @@ async def test_a_first_message_to_a_newly_exposed_agent_is_delivered_when_the_re
     adapter._refresh_pairing_scope = learn_agent_9  # type: ignore[method-assign]
     await adapter._run_backfill(adapter._poll_since())
 
-    assert backend.since_seen == [80, 90]  # the row was not fetched again
+    # The window reaches back to the held row (one below it), and the replay has
+    # already delivered it, so the fetch returns it once more and it is not
+    # delivered twice.
+    assert backend.since_seen == [80, 89]
     assert got == [(9, 90)]
 
 
@@ -451,3 +454,82 @@ async def test_an_agent_pinned_while_the_fetch_is_in_flight_does_not_lose_its_ro
     await adapter._run_backfill(adapter._poll_since())
 
     assert got == [(2, 150)]
+
+
+class _SinceBackend:
+    """A poll that honours since_message_id, like the real backend."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+        self.since_seen: list[int] = []
+
+    async def fetch_inbound_since(self, since_message_id: int) -> dict[str, Any]:
+        self.since_seen.append(since_message_id)
+        return {"messages": sorted(
+            (r for r in self.rows if r["message_id"] > since_message_id),
+            key=lambda r: r["message_id"],
+        )}
+
+
+async def test_a_row_held_for_an_unknown_agent_survives_a_restart_before_it_is_bound() -> None:
+    backend = _SinceBackend([_row(150, 9)])
+
+    # Process 1: agent 1 is known and idle; agent 9's first row arrives before
+    # the gateway knows agent 9 (the pairing refresh is on cooldown).
+    first, first_got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    first._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    first._poll_since()
+    first._cursors.save(1, 80)
+    await first._run_backfill(first._poll_since())
+    assert first_got == []  # held, not delivered
+
+    # The gateway restarts before agent 9 is bound; the new process shares the
+    # state directory. Agent 9 is bound this time.
+    second, second_got = _adapter(backend, agents=(1, 9))  # type: ignore[arg-type]
+    await second._run_backfill(second._poll_since())
+
+    assert second_got == [(9, 150)]
+
+
+async def test_the_idle_carry_stops_below_a_kept_row_of_an_unknown_agent() -> None:
+    backend = _SinceBackend([_row(150, 9)])
+    adapter, _got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    # Even if nothing recorded the row as pending, the carry must not pass it.
+    adapter._remember_dropped_unknown = lambda data: None  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
+
+    await adapter._run_backfill(adapter._poll_since())
+
+    assert adapter._cursors.get(1) == 149
+
+
+async def test_a_live_row_for_a_known_agent_cannot_carry_the_cursors_past_a_held_row_across_a_restart() -> None:
+    backend = _SinceBackend([_row(150, 9), _row(200, 1)])
+    first, first_got = _adapter(backend, agents=(1,))  # type: ignore[arg-type]
+
+    async def no_refresh() -> None:
+        return None
+
+    first._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    first._poll_since()
+    first._cursors.save(1, 80)
+    # Agent 9's row (150) is polled and held; agent 1 then gets a live push (200).
+    await first._run_backfill(first._poll_since())
+    await first._handle_inbound(_row(200, 1), batchable=False)
+    assert (1, 200) in first_got
+
+    # Restart before agent 9 is bound.
+    second, second_got = _adapter(backend, agents=(1, 9))  # type: ignore[arg-type]
+    await second._run_backfill(second._poll_since())
+
+    assert (9, 150) in second_got
