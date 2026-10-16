@@ -2,6 +2,18 @@
 
 Older releases are described in the README sections named after their version.
 
+## 0.32.0 (2026-10-15)
+
+Per agent poll cursors (Channels and Organizations phase 0, PR 0.3e).
+
+- The inbound cursor is now one per agent (assistant id) in `$HERMES_HOME/bgos_last_ids.json`, not one per gateway. A channel message addressed to two agents on one gateway reaches both: before, the first agent's row moved the shared cursor past the id and was the only one the duplicate guard let through, so the second agent lost it (in the same poll, or after a restart between the two turns).
+- The poll starts from the lowest known agent cursor and keeps each row only past its own agent's cursor; the duplicate guard is per (agent, message); an idle agent is carried up to what the poll covered so it cannot pin the window.
+- Migration: the old single `bgos_last_id` seeds every agent known at the first poll, so nothing is replayed and nothing is skipped. An agent exposed later starts at the newest consumed id. The old file is left in place and no longer written.
+- A WS reconnect backfills from the lowest agent cursor.
+- Live WS pushes batch text per (chat, agent), so the two events of a message addressed to two agents are not merged into one dispatch.
+- An agent removed from the pairing and exposed again while the gateway runs rejoins at the newest consumed id instead of replaying what arrived while it was away.
+- A message dropped because its assistant is not known yet is kept in memory (200 messages, one hour) and delivered once the agent is exposed; each poll asks the pairing again while one waits. Its id is also persisted in `$HERMES_HOME/bgos_pending_unknown.json` (50 live records held one hour; an expired one is remembered for a day so the same row does not start a new hour): the poll window reaches back to it, an agent bound later starts below it and the idle carry stops below it, so a restart before the agent is bound fetches the row again instead of losing it. The memory copy now lasts as long as the record (one hour), and while this process holds a row the poll window is not anchored at it. Held rows do not count toward `BGOS_BACKFILL_STORM_LIMIT`, and a record is released when its row is consumed.
+
 ## 0.31.0 (2026-10-11)
 
 App control and the Work Stream for Hermes agents (board row 019fc652-952b).

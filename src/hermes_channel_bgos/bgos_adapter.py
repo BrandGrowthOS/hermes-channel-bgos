@@ -71,6 +71,7 @@ from .peer_marker import (
     plan_request as plan_peer_request,
 )
 from .config import BgosConfig, choose_pairing_token, redact_token
+from .cursors import AgentCursors, BACKEND_PAGE_SIZE
 from .doctor import run_checks
 from .missions_bridge import MissionLane, classify_goal_line
 from .quiet_mode import (
@@ -517,6 +518,9 @@ def _gateway_runner_turns(runner: Any, cron_jobs: int, own: Any) -> int:
 # so legitimate agent media written anywhere non-sensitive still sends.
 # Bounded memory for the duplicate-delivery guard in _handle_inbound.
 _DISPATCHED_IDS_CAP = 1024
+# Messages kept for a still-unknown assistant: how many, and for how long.
+_DROPPED_UNKNOWN_CAP = 200
+_DROPPED_UNKNOWN_TTL_SECONDS = 3600.0  # as long as a pending record holds
 
 _SENSITIVE_MEDIA_SYSTEM_PREFIXES: tuple[str, ...] = (
     "/etc",
@@ -1329,11 +1333,30 @@ class BGOSAdapter(BasePlatformAdapter):
         # outside that scope, so path lookups must use this captured value,
         # never re-read the environment.
         self._hermes_home: Path = resolve_hermes_home()
-        # Message ids this adapter already dispatched (bounded FIFO).
-        # Guards against the WS push and the REST poll both delivering
-        # the same message when a poll request is in flight as it
-        # arrives - without this the agent answers twice.
-        self._dispatched_inbound_ids: OrderedDict[int, None] = OrderedDict()
+        # (assistant id, message id) pairs this adapter already dispatched
+        # (bounded FIFO). Guards against the WS push and the REST poll both
+        # delivering the same message when a poll request is in flight as it
+        # arrives - without this the agent answers twice. Keyed per agent: a
+        # message addressed to several agents is one row per agent with the
+        # SAME message id, and each agent must get its own.
+        self._dispatched_inbound_ids: OrderedDict[tuple[int | None, int], None] = (
+            OrderedDict()
+        )
+        # The agents the previous poll start served, to spot one that is back.
+        self._previously_known: set[int] | None = None
+        # Agents seen leaving the known set, until they come back.
+        self._away_agents: set[int] = set()
+        # Messages dropped for a still-unknown assistant, kept to deliver once
+        # it is exposed: (assistant id, message id) -> (payload, first seen).
+        self._dropped_unknown: OrderedDict[tuple[int, int], tuple[dict, float]] = (
+            OrderedDict()
+        )
+        # One poll cursor per agent (see cursors.py), not one per gateway.
+        self._cursors = AgentCursors(
+            self._hermes_home / "bgos_last_ids.json",
+            self._last_id_path(),
+            self._hermes_home / "bgos_pending_unknown.json",
+        )
         self._stt_setup = SttSetupNotifier(
             self._post_stt_setup_event,
             self._edit_stt_setup_event,
@@ -1451,8 +1474,10 @@ class BGOSAdapter(BasePlatformAdapter):
         # gateway/platforms/telegram.py:3803-3859 for the upstream pattern.
         # Window adapts to the LAST chunk's length (see _enqueue_text_batch).
         self._text_batch_window: float = 0.6
-        self._pending_text_batches: dict[int, dict[str, Any]] = {}
-        self._pending_text_tasks: dict[int, asyncio.Task] = {}
+        # Keyed by (chat id, assistant id): a message addressed to two agents in
+        # one chat arrives as one event per agent, and each must be its own batch.
+        self._pending_text_batches: dict[tuple[int, int | None], dict[str, Any]] = {}
+        self._pending_text_tasks: dict[tuple[int, int | None], asyncio.Task] = {}
         # Hard cap for a single outbound message body. Messages longer
         # than this get split into multiple chunks with `(i/N)`
         # continuation suffixes (mirrors Telegram parity at
@@ -2041,12 +2066,13 @@ class BGOSAdapter(BasePlatformAdapter):
             )
 
         # Replay any messages that arrived while the adapter was down. The
-        # cursor comes from the persisted last-id file ($HERMES_HOME/
-        # bgos_last_id) — WITHOUT persistence every restart would backfill
+        # cursors come from the persisted per-agent file ($HERMES_HOME/
+        # bgos_last_ids.json). WITHOUT persistence every restart would backfill
         # from 0, replaying all history and sending duplicate agent replies
-        # indefinitely. Fresh installs start at 0 (replay once), then the
-        # file auto-advances as messages flow through _handle_inbound.
-        asyncio.create_task(self._run_backfill(self._load_last_id()))
+        # indefinitely. Fresh installs start at 0 (replay once), then each
+        # agent's entry auto-advances as its messages flow through
+        # _handle_inbound. The old single bgos_last_id is migrated on first start.
+        asyncio.create_task(self._run_backfill(self._poll_since()))
 
         # Start the REST poll loop. Server currently doesn't deliver
         # inbound_message over WS to integration sockets — the join-room
@@ -2206,6 +2232,9 @@ class BGOSAdapter(BasePlatformAdapter):
 
             for aid in added:
                 self._state.set_route(aid, new_routes[aid])
+            # Pin each new agent's own cursor now, not at the next poll start:
+            # until it has one it follows the shared head.
+            self._cursors.since(self._known_assistant_ids())
             for aid in removed:
                 self._state.remove_assistant(aid)
                 if self._ws is not None:
@@ -2226,9 +2255,10 @@ class BGOSAdapter(BasePlatformAdapter):
 
     # -------------------------------------------------------------------------
     # Last-seen message-id persistence — prevents duplicate-replay on restart.
-    # Lives at $HERMES_HOME/bgos_last_id. Monotonically advances; never
-    # regresses. Read on connect(), written after every successful inbound
-    # (both WS live and REST backfill).
+    # One cursor PER AGENT at $HERMES_HOME/bgos_last_ids.json (cursors.py).
+    # Monotonically advances; never regresses. Read on connect(), written after
+    # every successful inbound (both WS live and REST backfill). The pre
+    # per-agent single cursor, $HERMES_HOME/bgos_last_id, is migrated once.
     # -------------------------------------------------------------------------
 
     def _seed_home_channel_target(self) -> None:
@@ -2453,24 +2483,49 @@ class BGOSAdapter(BasePlatformAdapter):
             "turn_state": getattr(event, "turn_state", None),
         }
 
+    def _known_assistant_ids(self) -> list[int]:
+        """The agents this gateway serves (bound assistant ids)."""
+        return list(self._state.assistant_route.keys())
+
+    def _poll_since(self) -> int:
+        """Where the REST poll starts: the lowest cursor of the known agents.
+        Each returned row is then kept only past its own agent's cursor."""
+        known = self._known_assistant_ids()
+        # The route map is real from the first call on (connect loads whoami
+        # before it polls), so an empty set means nothing is exposed.
+        known_set = set(known)
+        if self._previously_known is None:
+            # First call of this process: an agent with a cursor from an earlier
+            # run that is not exposed now was away (a restart while unexposed).
+            self._away_agents |= self._cursors.agent_ids() - known_set
+        else:
+            self._away_agents |= self._previously_known - known_set
+        # Only an agent seen LEAVING and now back is rebased (see cursors.py):
+        # one that is merely new to the set may hold a row at or below the head
+        # that it has not consumed yet.
+        returning = self._away_agents & known_set
+        if returning:
+            self._away_agents -= returning
+            self._cursors.rebase_reexposed(returning)
+        self._previously_known = known_set
+        return self._cursors.since(known)
+
+    def _save_agent_cursor(self, assistant_id: Any, message_id: int) -> None:
+        """Advance one agent's cursor (never regresses)."""
+        aid = self._int_or_none(assistant_id)
+        if aid is not None:
+            self._cursors.save(aid, message_id)
+
     def _load_last_id(self) -> int:
-        try:
-            return int(self._last_id_path().read_text().strip())
-        except (OSError, ValueError):
-            return 0
+        """Gateway-wide view of the cursors (the poll start): the lowest cursor
+        of the known agents. Kept for callers of the single cursor."""
+        return self._poll_since()
 
     def _save_last_id(self, message_id: int) -> None:
-        if not isinstance(message_id, int) or message_id <= 0:
-            return
-        try:
-            path = self._last_id_path()
-            if message_id > self._load_last_id():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(str(message_id))
-        except OSError:
-            # Disk full / read-only / permission denied — don't crash the
-            # connect; worst case we replay on next restart.
-            log.warning("could not persist bgos_last_id=%d", message_id)
+        """Gateway-wide seed: moves the floor and every known agent to
+        `message_id` (never regresses). The inbound path saves per agent with
+        _save_agent_cursor."""
+        self._cursors.seed_all(self._known_assistant_ids(), message_id)
 
     async def _push_agent_catalog_safe(self) -> None:
         if self.pairing_id is None:
@@ -2529,7 +2584,7 @@ class BGOSAdapter(BasePlatformAdapter):
         try:
             while True:
                 await asyncio.sleep(interval)
-                await self._run_backfill(self._load_last_id())
+                await self._run_backfill(self._poll_since())
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -5522,6 +5577,13 @@ class BGOSAdapter(BasePlatformAdapter):
             if held_id is not None:
                 # A click held from here on came after this message (F3).
                 self._held_message_high = max(self._held_message_high, held_id)
+                # A row of an agent this gateway does not know leaves nothing
+                # behind when it is only "left unconsumed": record it, or the
+                # restart (or the intake reopening) would not fetch it again.
+                held_aid = self._int_or_none(
+                    data.get("assistant_id", data.get("assistantId")))
+                if held_aid is not None and self._state.get_route(held_aid) is None:
+                    self._cursors.record_pending(held_aid, held_id)
             return
         resume = self._take_intake_resume_cursor()
         if resume is not None:
@@ -5529,8 +5591,14 @@ class BGOSAdapter(BasePlatformAdapter):
             # newer message can move the cursor past it (dedup drops this
             # one below when the fetch already delivered it).
             await self._run_backfill(resume)
-        self._note_inbound_message()
         data = _normalize_inbound_payload(data)
+        _held_key = (self._int_or_none(data.get("assistant_id")),
+                     self._int_or_none(data.get("message_id")))
+        _reserved = _held_key in self._dropped_unknown
+        if not _reserved:
+            # A held row served again on every poll is not new activity: it must
+            # not keep the gateway "busy" for the self-update decision.
+            self._note_inbound_message()
         assistant_id = data.get("assistant_id")
         if assistant_id is None:
             log.debug("inbound missing assistant_id: %s", data)
@@ -5546,13 +5614,37 @@ class BGOSAdapter(BasePlatformAdapter):
                 "inbound for unknown assistant_id=%s — refreshing pairing scope",
                 assistant_id,
             )
-            await self._refresh_pairing_scope()
+            # Recorded BEFORE the refresh awaits: a process that stops during it
+            # must still find the row on disk. If the refresh learns the agent
+            # the row is consumed below and the record cleared.
+            _early_mid = self._int_or_none(data.get("message_id"))
+            _early_aid = self._int_or_none(assistant_id)
+            if _early_mid is not None and _early_aid is not None:
+                self._cursors.record_pending(_early_aid, _early_mid)
+                # (held from here on, so a concurrent poll that never saw the row
+                # does not take its record for one the backend stopped serving)
+                self._cursors.mark_held(_early_aid, _early_mid)
+            try:
+                await self._refresh_pairing_scope()
+            except asyncio.CancelledError:
+                # Cancelled mid refresh (a disconnect): nothing holds the row in
+                # memory, so the window must reach back to its record again.
+                if (_early_mid is not None and _early_aid is not None
+                        and (_early_aid, _early_mid) not in self._dropped_unknown):
+                    self._cursors.release_held(_early_aid, _early_mid)
+                raise
+            except Exception:
+                # A failed refresh leaves the agent unknown: the row is kept
+                # below, not lost.
+                log.exception("pairing refresh failed for assistant_id=%s",
+                              assistant_id)
             route = self._state.get_route(assistant_id)
             if route is None:
-                log.warning(
+                (log.debug if _reserved else log.warning)(
                     "assistant_id=%s still unknown after refresh — dropping",
                     assistant_id,
                 )
+                self._remember_dropped_unknown(data)
                 return
 
         # Persist the last-seen message id IMMEDIATELY after we confirm the
@@ -5566,18 +5658,28 @@ class BGOSAdapter(BasePlatformAdapter):
         # re-dispatching them — producing the live-server "50 conversation
         # reset acks in a row" loop caught 2026-05-15.
         msg_id = data.get("message_id")
+        aid_int = self._int_or_none(assistant_id)
         if dedup and isinstance(msg_id, int):
-            if msg_id in self._dispatched_inbound_ids:
+            dedup_key = (self._int_or_none(assistant_id), msg_id)
+            if dedup_key in self._dispatched_inbound_ids:
+                # Delivered already: release any pending record of it.
+                if aid_int is not None:
+                    self._cursors.clear_pending(aid_int, msg_id)
                 log.info(
                     "dropping duplicate delivery of message_id=%d "
-                    "(ws/poll race)", msg_id,
+                    "assistant_id=%s (ws/poll race)", msg_id, assistant_id,
                 )
                 return
-            self._dispatched_inbound_ids[msg_id] = None
+            self._dispatched_inbound_ids[dedup_key] = None
             while len(self._dispatched_inbound_ids) > _DISPATCHED_IDS_CAP:
                 self._dispatched_inbound_ids.popitem(last=False)
         if isinstance(msg_id, int):
-            self._save_last_id(msg_id)
+            self._save_agent_cursor(assistant_id, msg_id)
+            # Consumed: release the hold a pending record of it had. After the
+            # cursor save, so a crash between the two re-fetches the row instead
+            # of losing it.
+            if aid_int is not None:
+                self._cursors.clear_pending(aid_int, msg_id)
 
         # Server-authoritative chat addressing (2026-05-30 hardening).
         # Remember the chat this inbound targeted so later outbound
@@ -5807,7 +5909,7 @@ class BGOSAdapter(BasePlatformAdapter):
           else → configured _text_batch_window (default 0.6s)
         Mirrors gateway/platforms/telegram.py:3803-3859.
         """
-        chat_key = event.chat_id
+        chat_key = (event.chat_id, getattr(event, "assistant_id", None))
         batch = self._pending_text_batches.get(chat_key)
         if batch is None:
             batch = {
@@ -5846,7 +5948,9 @@ class BGOSAdapter(BasePlatformAdapter):
             self._flush_text_batch(chat_key, window)
         )
 
-    async def _flush_text_batch(self, chat_key: int, window: float) -> None:
+    async def _flush_text_batch(
+        self, chat_key: tuple[int, int | None], window: float,
+    ) -> None:
         try:
             await asyncio.sleep(window)
         except asyncio.CancelledError:
@@ -6378,7 +6482,7 @@ class BGOSAdapter(BasePlatformAdapter):
         # today — backfill only returns sender='user' messages — but cheap
         # insurance against future changes).
         if isinstance(message_id, int):
-            self._save_last_id(message_id)
+            self._save_agent_cursor(assistant_id, message_id)
 
         # Server-authoritative chat addressing: a button tap is itself an
         # inbound interaction on this chat, so record it as received. Without
@@ -6446,7 +6550,10 @@ class BGOSAdapter(BasePlatformAdapter):
         backfill so messages that arrived while the socket was down are
         replayed through the same translation pipeline. Fire-and-forget — we
         don't want to block the WS connect handler."""
-        asyncio.create_task(self._run_backfill(last_message_id))
+        # Not the highest id the socket saw: that is one gateway-wide number,
+        # and an agent's own cursor can sit below it. Start from the lowest
+        # cursor of the known agents; each row is kept past its own agent's.
+        asyncio.create_task(self._run_backfill(self._poll_since()))
         self._mission_lane.schedule_reconcile()
 
     async def _run_backfill(self, last_message_id: int) -> None:
@@ -6468,6 +6575,15 @@ class BGOSAdapter(BasePlatformAdapter):
         resume = self._take_intake_resume_cursor()
         if resume is not None:
             last_message_id = min(last_message_id, resume)
+        try:
+            await self._replay_dropped_unknown()
+        except Exception:
+            # The poll is the only inbound path: a failed refresh here must not
+            # take the poll loop down with it.
+            log.exception("replay of held messages failed")
+        if self._intake_held():
+            # A restart began while they were replayed: nothing is fetched.
+            return
         if await self._replay_inbound_since(last_message_id):
             # Clicks and callbacks a hold kept are not in this fetch (it
             # returns user message rows only): they are delivered from
@@ -6491,6 +6607,15 @@ class BGOSAdapter(BasePlatformAdapter):
         """The fetch and replay _run_backfill describes, from
         `last_message_id`, with the held clicks in their place. False only
         when the fetch failed."""
+        # Cursors as they were when this fetch was asked for: a live push that
+        # lands during the round trip must not hide an older row of the response.
+        cursor_of = self._cursors.reader()
+        has_cursor = self._cursors.agent_ids()
+        live_pending = self._cursors.live_pending_set()
+        # Rows this process already holds in memory before this poll's replay: the
+        # idle carry is held back below a row only on the poll that first holds
+        # it, or a row served again on every poll would anchor the window.
+        held_before = set(self._dropped_unknown)
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
         except Exception:
@@ -6503,6 +6628,15 @@ class BGOSAdapter(BasePlatformAdapter):
         if resp is NOT_MODIFIED:
             return True
         messages = resp.get("messages") if isinstance(resp, dict) else None
+        if isinstance(messages, list) and any(
+            isinstance(m, dict)
+            and self._int_or_none(m.get("message_id", m.get("id"))) is not None
+            for m in messages
+        ):
+            # Only a well formed, non-empty body proves what the backend serves
+            # around a row: an empty or malformed one proves nothing (a transient
+            # empty answer must not erase the records).
+            self._release_unserved_records(last_message_id, messages)
         if not messages:
             return True
 
@@ -6518,6 +6652,32 @@ class BGOSAdapter(BasePlatformAdapter):
         if not normalized:
             return True
 
+        # The poll returns every agent's rows past the LOWEST cursor. A known
+        # agent keeps only the rows past its own cursor (it may be ahead of the
+        # lowest one). A row for an agent not known yet goes to _handle_inbound,
+        # which refreshes the pairing scope and drops it if still unknown.
+        known = self._known_assistant_ids()
+        known_set = set(known)
+        polled = normalized
+
+        def _keep(m: dict[str, Any]) -> bool:
+            aid = self._row_assistant_id(m)
+            mid = self._int_or_none(m.get("message_id")) or 0
+            if (aid, mid) in live_pending:
+                # Left unconsumed for an agent that was not known: it has not
+                # been delivered, whatever the agent's cursor says now (a later
+                # row may have moved it before this one was). The handler
+                # delivers it, or releases the record if it already was.
+                return True
+            if aid in known_set:
+                return mid > cursor_of(aid)
+            # Not known (yet): the handler decides whether it can be served, but
+            # an agent with a cursor of its own already consumed what is at or
+            # below it (consumed before a restart, before it left).
+            return aid not in has_cursor or mid > cursor_of(aid)
+
+        normalized = [m for m in polled if _keep(m)]
+
         # Storm guard (2026-06-28): if the durable cursor is missing/stale,
         # BGOS can return a long historical backlog on gateway startup. Replaying
         # every old peer smoke-test and restart message re-spams the user and can
@@ -6529,19 +6689,65 @@ class BGOSAdapter(BasePlatformAdapter):
             storm_limit = int(os.environ.get("BGOS_BACKFILL_STORM_LIMIT", "25"))
         except ValueError:
             storm_limit = 25
-        if storm_limit > 0 and len(normalized) > storm_limit:
+        # Rows of agents not known yet are not part of the backlog the guard
+        # protects against, and are held until their agent is bound: they do not
+        # count, and a storm skip records them so a restart still fetches them.
+        # With no agent known at all, every row is backlog: the guard applies to all.
+        # Rows with a live record are held rows (at most 50), not stale history:
+        # they are always handed over, never skipped, or an agent exposed with a
+        # backlog of them would set the guard off on every poll for an hour.
+        storm_rows = [
+            m for m in normalized
+            if (not known_set or self._row_assistant_id(m) in known_set)
+            and (self._row_assistant_id(m),
+                 self._int_or_none(m.get("message_id"))) not in live_pending
+        ]
+        # Every kept row of an agent not known yet is recorded BEFORE anything is
+        # dispatched: a process that stops while an earlier row is handled (a
+        # message to a known and an unknown agent is two rows with one id) must
+        # still find it on disk.
+        if known_set:
+            for m in normalized:
+                u_aid = self._row_assistant_id(m)
+                u_mid = self._int_or_none(m.get("message_id"))
+                if u_aid is not None and u_mid is not None and u_aid not in known_set:
+                    self._cursors.record_pending(u_aid, u_mid)
+            # (Not marked held here: the handler does that for each row when it
+            # reaches it. A mark without a memory copy would switch off the window
+            # reach-back, for instance when a restart hold interrupts the replay.)
+            # The records just written are live: the storm filter below must see
+            # them, or a storm skip on the poll that first sees a row would drop it.
+            live_pending = self._cursors.live_pending_set()
+        if storm_limit > 0 and len(storm_rows) > storm_limit:
             max_id = max(
-                (mid for mid in (self._int_or_none(m.get("message_id")) for m in normalized) if mid is not None),
+                (mid for mid in (self._int_or_none(m.get("message_id")) for m in storm_rows) if mid is not None),
                 default=last_message_id,
             )
+            if len(messages) >= BACKEND_PAGE_SIZE:
+                # A full page may have cut the rows of its last id (a sibling row
+                # of another agent): stop one below it, as the idle carry does.
+                page_last = max(
+                    (i for i in (self._int_or_none(m.get("message_id")) for m in polled)
+                     if i is not None),
+                    default=max_id,
+                )
+                max_id = min(max_id, page_last - 1)
             if max_id > last_message_id:
-                self._save_last_id(max_id)
+                self._cursors.seed_all(known, max_id)
             log.warning(
                 "BGOS backfill storm guard skipped %d historical messages "
                 "since_message_id=%d and advanced cursor to %d",
-                len(normalized), last_message_id, max_id,
+                len(storm_rows), last_message_id, max_id,
             )
-            return True
+            # Held rows (a live record) are not the backlog the guard skips: they
+            # are still handed over. Nothing else is dispatched.
+            normalized = [
+                m for m in normalized
+                if (self._row_assistant_id(m),
+                    self._int_or_none(m.get("message_id"))) in live_pending
+            ]
+            if not normalized:
+                return True
 
         for msg in normalized:
             replayed_id = self._int_or_none(msg.get("message_id"))
@@ -6556,7 +6762,148 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._handle_inbound(msg, batchable=False)
             except Exception:
                 log.exception("backfill replay failed for message=%s", msg)
+        if self._intake_held():
+            # A restart began during the replay: rows it held were left
+            # unconsumed, so no cursor may be carried past them.
+            return True
+        self._advance_idle_agents(
+            known, polled, normalized, len(messages), held_before,
+        )
         return True
+
+    def _release_unserved_records(
+        self, since: int, messages: list[Any],
+    ) -> None:
+        """A pending record an earlier process left on disk makes the poll window
+        reach back to its row. If a fetch that spans the row's id does not return
+        it, the backend no longer serves it (deleted, agent left): stop reaching
+        back, or the window would stay anchored for the hour."""
+        unheld = self._cursors.unheld_pending_set()
+        if not unheld:
+            return
+        served: set[tuple[int | None, int | None]] = set()
+        max_served = 0
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            mid = self._int_or_none(m.get("message_id", m.get("id")))
+            served.add((self._row_assistant_id(m), mid))
+            if mid is not None:
+                max_served = max(max_served, mid)
+        full = len(messages) >= BACKEND_PAGE_SIZE
+        gone = [
+            (a, m) for (a, m) in unheld
+            if m > since and (a, m) not in served and (not full or m < max_served)
+        ]
+        self._cursors.clear_pending_many(gone)
+
+    def _remember_dropped_unknown(self, data: dict) -> None:
+        """Keep a message that was dropped because its assistant is still
+        unknown, so it is delivered once that agent is exposed. The per agent
+        cursors move on past it (an idle agent is carried up to what a poll
+        covered), so a later poll would not return it. In memory, bounded."""
+        aid = self._int_or_none(data.get("assistant_id"))
+        mid = self._int_or_none(data.get("message_id"))
+        if aid is None or mid is None:
+            return
+        key = (aid, mid)
+        # Persisted too: the poll window reaches back to it and an agent bound
+        # later starts below it, so a restart before the agent is bound
+        # re-fetches it.
+        self._cursors.record_pending(aid, mid)
+        if key not in self._dropped_unknown:
+            self._dropped_unknown[key] = (data, self._clock())
+        # This process holds the row now: the poll window need not stay anchored
+        # at it (that would stall the poll for the hold, and a restart finds the
+        # record on disk and reaches back to it).
+        self._cursors.mark_held(aid, mid)
+        while len(self._dropped_unknown) > _DROPPED_UNKNOWN_CAP:
+            old_key, _entry = self._dropped_unknown.popitem(last=False)
+            self._cursors.release_held(*old_key)
+
+    async def _replay_dropped_unknown(self) -> None:
+        """Deliver the remembered messages whose agent is known now; forget
+        the ones that waited too long. While one still waits for its agent the
+        pairing is refreshed (cooldown limited), because the poll no longer
+        returns the row that would trigger it."""
+        if not self._dropped_unknown:
+            return
+        now = self._clock()
+        for key, (_data, since) in list(self._dropped_unknown.items()):
+            if now - since > _DROPPED_UNKNOWN_TTL_SECONDS:
+                self._dropped_unknown.pop(key, None)
+                self._cursors.release_held(*key)
+        if any(
+            self._state.get_route(aid) is None
+            for aid, _mid in self._dropped_unknown
+        ):
+            try:
+                await self._refresh_pairing_scope()
+            except Exception:
+                log.exception("pairing refresh failed while replaying held messages")
+        for key in list(self._dropped_unknown):
+            if self._intake_held():
+                # A restart is committed: leave the rest remembered for later.
+                return
+            entry = self._dropped_unknown.get(key)
+            if entry is None or self._state.get_route(key[0]) is None:
+                continue
+            self._dropped_unknown.pop(key, None)
+            try:
+                await self._handle_inbound(entry[0], batchable=False)
+            except Exception:
+                log.exception("replay of a held message failed: %s", entry[0])
+            finally:
+                # Delivered, the record is cleared; if the call failed before
+                # that, the window reaches back to the record again.
+                self._cursors.release_held(*key)
+
+    @classmethod
+    def _row_assistant_id(cls, msg: dict[str, Any]) -> int | None:
+        return cls._int_or_none(msg.get("assistant_id", msg.get("assistantId")))
+
+    def _advance_idle_agents(
+        self,
+        known: list[int],
+        polled: list[dict[str, Any]],
+        kept: list[dict[str, Any]],
+        raw_row_count: int,
+        held_before: set[tuple[int, int]] = frozenset(),  # type: ignore[assignment]
+    ) -> None:
+        """Move the cursor of every known agent that had NO row in this poll up
+        to what the poll covered. Every row at or below the watermark is in the
+        response (rows come ASC by id; a full page may have cut the rows of its
+        LAST id, so then the watermark stops one below it). Without this an
+        idle agent would pin the next poll's lowest cursor and the page would
+        never reach new messages."""
+        ids = [self._int_or_none(m.get("message_id")) for m in polled]
+        ids = [i for i in ids if i is not None]
+        if not ids or not known:
+            return
+        with_rows = {self._row_assistant_id(m) for m in polled}
+        last = max(ids)
+        watermark = last if raw_row_count < BACKEND_PAGE_SIZE else last - 1
+        # Never past a kept row of an agent still unknown after the replay: it
+        # was left unconsumed (and recorded as pending), and an idle agent or the
+        # head moving past it would lose it, above all across a restart.
+        known_now = set(self._known_assistant_ids())
+        # Only a row with a LIVE record holds the carry back. The handler records
+        # it before this runs; a row with none (expired, evicted past the bound,
+        # no assistant id, a failed write) has nothing to hold, or the carry
+        # would stay capped below it for ever.
+        live_now = self._cursors.live_pending_set()
+        unknown_rows = [
+            mid for m in kept
+            if (aid := self._row_assistant_id(m)) not in known_now
+            and (mid := self._int_or_none(m.get("message_id"))) is not None
+            and (aid, mid) in live_now
+            and (aid, mid) not in held_before
+        ]
+        if unknown_rows:
+            watermark = min(watermark, min(unknown_rows) - 1)
+        self._cursors.advance_idle(
+            [a for a in known if a not in with_rows], watermark,
+        )
 
     # -------------------------------------------------------------------------
     # Owner-triggered doctor checks (doctor_rpc)
@@ -7004,7 +7351,7 @@ class BGOSAdapter(BasePlatformAdapter):
         if until is None or self._clock() >= until:
             return False
         if self._intake_resume_cursor is None:
-            self._intake_resume_cursor = self._load_last_id()
+            self._intake_resume_cursor = self._poll_since()
         return True
 
     def _take_intake_resume_cursor(self) -> int | None:

@@ -18,6 +18,7 @@ import pytest
 import hermes_channel_bgos.bgos_adapter as bgos_adapter_module
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter, MessageEvent
 from hermes_channel_bgos.config import BgosConfig
+from tests.conftest import forget_inbound_progress
 from tests.mocks.mock_hermes import (
     MessageEvent as GatewayMessageEvent,
     MessageType as GatewayMessageType,
@@ -231,7 +232,7 @@ async def test_reconnect_triggers_backfill(mock_bgos_server, monkeypatch):
         # fetch, which a real since-cursor backend never does. Reset the
         # duplicate-delivery guard along with the handled list so this
         # test stays about the backfill mechanism, not the dedup.
-        adapter._dispatched_inbound_ids.clear()
+        forget_inbound_progress(adapter)
 
         # Simulate reconnect: fire the _on_reconnect hook directly (in
         # production the WS client invokes it after a successful re-handshake)
@@ -305,19 +306,19 @@ async def test_last_id_persists_across_connects(mock_bgos_server, monkeypatch, t
             "chat_id": 11, "message_id": 9999, "text": "hi",
             "user_id": "u", "assistant_id": 7, "message_type": "standard",
         })
-        # File should now contain 9999
-        last_id_file = tmp_path / "hermes_home" / "bgos_last_id"
-        assert last_id_file.read_text().strip() == "9999"
+        # The file should now hold agent 7's cursor at 9999
+        cursor_file = tmp_path / "hermes_home" / "bgos_last_ids.json"
+        assert json.loads(cursor_file.read_text())["agents"]["7"] == 9999
     finally:
         await adapter.disconnect()
 
-    # A fresh adapter with the same HERMES_HOME should load cursor=9999
+    # A fresh adapter with the same HERMES_HOME should load agent 7's cursor=9999
     adapter2 = BGOSAdapter(BgosConfig(base_url=mock_bgos_server.url, pairing_token="pair_xyz"))
-    assert adapter2._load_last_id() == 9999
+    assert adapter2._cursors.get(7) == 9999
 
     # Older message ids don't regress the cursor
-    adapter2._save_last_id(100)
-    assert adapter2._load_last_id() == 9999
+    adapter2._cursors.save(7, 100)
+    assert adapter2._cursors.get(7) == 9999
 
 
 # -----------------------------------------------------------------------------
@@ -436,7 +437,7 @@ async def test_wait_for_reply_ws_echo_is_dropped_after_cursor_advance(tmp_path, 
         "turnState": "expecting_reply",
     })
     assert received == []
-    assert (tmp_path / "hermes_home" / "bgos_last_id").read_text().strip() == "8870"
+    assert adapter._cursors.get(885) == 8870
 async def test_wait_for_reply_poll_echo_is_dropped_after_restart(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
     first = _make_adapter()
@@ -729,8 +730,8 @@ async def test_disconnect_cancels_pending_text_batches():
         "files": [],
         "message_type": "standard",
     })
-    assert 42 in adapter._pending_text_tasks
-    pending = adapter._pending_text_tasks[42]
+    assert (42, 7) in adapter._pending_text_tasks
+    pending = adapter._pending_text_tasks[(42, 7)]
     assert not pending.done()
     await adapter.disconnect()
     assert pending.done()

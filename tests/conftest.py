@@ -19,6 +19,15 @@ from tests.mocks.mock_bgos_server import MockBgosServer
 os.environ.setdefault("HERMES_CHANNEL_BGOS_FORCE_MOCK_HERMES", "1")
 
 
+def forget_inbound_progress(adapter) -> None:
+    """Forget which messages an adapter already took, and every agent's
+    cursor. The mock `/inbound` route re-serves the SAME canned ids on every
+    fetch, which a real since-cursor backend never does; a test that fetches
+    again calls this so it stays about the mechanism under test."""
+    adapter._dispatched_inbound_ids.clear()
+    adapter._cursors._path.unlink(missing_ok=True)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_hermes_home(tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> None:
     """Auto-used: redirect HERMES_HOME to a per-test tmp dir so nothing

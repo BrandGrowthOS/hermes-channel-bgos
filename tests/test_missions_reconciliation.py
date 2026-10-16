@@ -193,7 +193,9 @@ async def test_adapter_reconnect_schedules_mission_reconciliation() -> None:
         await asyncio.sleep(0)
 
         schedule_reconcile.assert_called_once_with()
-        adapter._run_backfill.assert_awaited_once_with(81)
+        # The reconnect backfill starts from the lowest per agent cursor, not
+        # from the highest id the socket saw (81).
+        adapter._run_backfill.assert_awaited_once_with(adapter._poll_since())
     finally:
         await adapter.disconnect()
 

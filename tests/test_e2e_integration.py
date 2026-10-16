@@ -16,6 +16,7 @@ import hermes_channel_bgos.bgos_adapter as adapter_mod
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter, MessageEvent
 from hermes_channel_bgos.bgos_api import BgosApi
 from hermes_channel_bgos.config import BgosConfig
+from tests.conftest import forget_inbound_progress
 
 
 pytestmark = pytest.mark.asyncio
@@ -309,7 +310,7 @@ async def test_reconnect_backfill_replays_missed_messages(mock_bgos_server, monk
         # fetch, which a real since-cursor backend never does. Reset the
         # duplicate-delivery guard along with the handled list so this
         # test stays about the backfill mechanism, not the dedup.
-        adapter._dispatched_inbound_ids.clear()
+        forget_inbound_progress(adapter)
 
         # Simulate reconnect by invoking the backfill path directly with a
         # cursor. (The actual WS-reconnect test is skipped on Windows due to
@@ -365,7 +366,8 @@ async def test_backfill_storm_guard_fast_forwards_without_dispatch(
     await adapter._run_backfill(300)
 
     assert handled == []
-    assert (tmp_path / "bgos_last_id").read_text() == "404"
+    # Every agent's cursor was fast-forwarded to the newest returned id.
+    assert adapter._cursors.get(7) == 404
 
 
 async def test_pairing_revoked_mid_session_surfaces_as_401(mock_bgos_server):
