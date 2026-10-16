@@ -5626,6 +5626,12 @@ class BGOSAdapter(BasePlatformAdapter):
                 self._cursors.mark_held(_early_aid, _early_mid)
             try:
                 await self._refresh_pairing_scope()
+            except asyncio.CancelledError:
+                # Cancelled mid refresh (a disconnect): nothing holds the row in
+                # memory, so the window must reach back to its record again.
+                if _early_mid is not None and _early_aid is not None:
+                    self._cursors.release_held(_early_aid, _early_mid)
+                raise
             except Exception:
                 # A failed refresh leaves the agent unknown: the row is kept
                 # below, not lost.

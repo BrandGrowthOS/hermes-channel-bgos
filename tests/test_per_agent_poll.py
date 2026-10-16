@@ -1068,3 +1068,26 @@ async def test_a_dict_row_without_an_id_does_not_release_the_records() -> None:
     await adapter._run_backfill(adapter._poll_since())
 
     assert adapter._cursors.lowest_pending() == 100
+
+
+async def test_a_handler_cancelled_during_the_refresh_leaves_the_window_reaching_back_to_the_row() -> None:
+    import asyncio
+
+    adapter, _got = _adapter(_Backend(), agents=(1,))
+    entered = asyncio.Event()
+
+    async def blocked_refresh() -> None:
+        entered.set()
+        await asyncio.sleep(3600)
+
+    adapter._refresh_pairing_scope = blocked_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
+    task = asyncio.create_task(adapter._handle_inbound(_row(100, 9), batchable=False))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    adapter._cursors.save(1, 150)
+    assert adapter._cursors.since([1]) == 99  # still reaches back to the record
