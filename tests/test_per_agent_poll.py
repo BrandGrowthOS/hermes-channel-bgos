@@ -1091,3 +1091,34 @@ async def test_a_handler_cancelled_during_the_refresh_leaves_the_window_reaching
 
     adapter._cursors.save(1, 150)
     assert adapter._cursors.since([1]) == 99  # still reaches back to the record
+
+
+async def test_a_cancelled_handler_keeps_the_hold_of_a_row_this_process_still_holds_in_memory() -> None:
+    import asyncio
+
+    adapter, _got = _adapter(_Backend(), agents=(1,))
+
+    async def no_refresh() -> None:
+        return None
+
+    adapter._refresh_pairing_scope = no_refresh  # type: ignore[method-assign]
+    adapter._poll_since()
+    adapter._cursors.save(1, 80)
+    await adapter._handle_inbound(_row(100, 9), batchable=False)  # held in memory
+    assert (9, 100) in adapter._dropped_unknown
+
+    entered = asyncio.Event()
+
+    async def blocked_refresh() -> None:
+        entered.set()
+        await asyncio.sleep(3600)
+
+    adapter._refresh_pairing_scope = blocked_refresh  # type: ignore[method-assign]
+    task = asyncio.create_task(adapter._handle_inbound(_row(100, 9), batchable=False))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    adapter._cursors.save(1, 150)
+    assert adapter._cursors.since([1]) == 150  # the memory copy still covers it

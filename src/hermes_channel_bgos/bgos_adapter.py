@@ -5629,7 +5629,8 @@ class BGOSAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 # Cancelled mid refresh (a disconnect): nothing holds the row in
                 # memory, so the window must reach back to its record again.
-                if _early_mid is not None and _early_aid is not None:
+                if (_early_mid is not None and _early_aid is not None
+                        and (_early_aid, _early_mid) not in self._dropped_unknown):
                     self._cursors.release_held(_early_aid, _early_mid)
                 raise
             except Exception:
