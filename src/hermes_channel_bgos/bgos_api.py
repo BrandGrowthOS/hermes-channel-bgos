@@ -68,6 +68,19 @@ class BgosApi:
         # from it: the scheduled update waits for 10 quiet minutes
         # (design 2.3, decision D8). Never allowed to break a send.
         self.on_message_activity: Callable[[], None] | None = None
+        # Called with the HTTP status of every response to a call that carries
+        # the pairing token. The adapter folds it into its revoked-pairing
+        # tracker (auth_rejection.py). Never allowed to break a call.
+        self.on_auth_status: Callable[[int], None] | None = None
+
+    def _note_auth_status(self, status: int) -> None:
+        hook = self.on_auth_status
+        if hook is None:
+            return
+        try:
+            hook(status)
+        except Exception:
+            log.debug("auth status hook failed (ignored)", exc_info=True)
 
     def _note_message_activity(self) -> None:
         hook = self.on_message_activity
@@ -139,6 +152,8 @@ class BgosApi:
             params=params,
             headers=self._headers(require_pairing=require_pairing, assistant_id=assistant_id),
         )
+        if require_pairing:
+            self._note_auth_status(resp.status_code)
         if log.isEnabledFor(logging.DEBUG):
             log.debug(
                 "bgos_api.response method=%s path=%s status=%d resp_len=%d",
@@ -206,6 +221,7 @@ class BgosApi:
         resp = await self._client.request(
             "GET", path, params=params, headers=headers,
         )
+        self._note_auth_status(resp.status_code)
         if resp.status_code == 304:
             # Server confirms nothing changed since `prev_etag`. Keep the
             # cached validator and tell the caller to do nothing.

@@ -2,6 +2,14 @@
 
 Older releases are described in the README sections named after their version.
 
+## 0.32.1 (2026-10-19)
+
+Safe media fetch, a working /reload-mcp confirm, and backoff on a revoked pairing.
+
+- Remote media (an http or https link an agent emits for `send_image`, `send_animation` or a `MEDIA:` marker) is fetched through Hermes's public `tools.url_safety` helpers (hermes-agent v0.21.7 and later). The URL and every redirect target must be a public address (loopback, private, link local and cloud metadata addresses are refused), redirects are followed by hand up to 5 hops, and the body is streamed and cut off at 25 MiB (a declared larger length is refused before reading). If the helpers cannot be imported, remote fetches are refused (fail closed); local and `file://` paths are unchanged and keep their 100 MiB cap and sensitive path check.
+- The Approve and Cancel buttons on the `/reload-mcp` prompt did nothing: the adapter imported `gateway.slash_confirm` (which does not exist) and called the resolver without `await`. It now imports `tools.slash_confirm.resolve` and awaits it.
+- A revoked pairing no longer keeps polling. The backend answers a revoked token with a plain 401, so the adapter counts consecutive 401s across every authenticated call (30 in a row over at least 60 seconds, as in the Claude Code plugin). It then logs one line, stops the 5 second poll, and sends one probe every 5 minutes; the first answer that is not a refusal resumes polling and sends a heartbeat. A single 401 followed by a good answer never pauses. The 6 hour heartbeat feeds the same count and is skipped while paused. The WebSocket `pairing_revoked` event pauses at once.
+
 ## 0.32.0 (2026-10-15)
 
 Per agent poll cursors (Channels and Organizations phase 0, PR 0.3e).

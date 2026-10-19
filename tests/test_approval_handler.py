@@ -3,8 +3,16 @@ bookkeeping (_approval_state) that Task 8's callback router consumes.
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
+import hermes_channel_bgos.bgos_adapter as adapter_mod
 from hermes_channel_bgos.bgos_adapter import BGOSAdapter
 from hermes_channel_bgos.config import BgosConfig
 
@@ -406,9 +414,12 @@ async def test_send_slash_confirm_without_title(monkeypatch):
 async def test_slash_confirm_callback_resolves(monkeypatch):
     adapter = _make_adapter()
     resolved = []
+
+    async def fake_resolve(sk, cid, choice):
+        resolved.append((sk, cid, choice))
+
     monkeypatch.setattr(
-        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm",
-        lambda sk, cid, choice: resolved.append((sk, cid, choice)),
+        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm", fake_resolve,
     )
     monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
     captured_patches = []
@@ -431,12 +442,70 @@ async def test_slash_confirm_callback_resolves(monkeypatch):
     assert captured_patches[0]["options"] == []
 
 
+async def test_slash_confirm_callback_awaits_the_real_async_resolve(monkeypatch):
+    """Regression: the real tools.slash_confirm.resolve is a coroutine function.
+    Calling it without await creates a coroutine that never runs, so the
+    /reload-mcp Approve and Cancel buttons did nothing. The resolver here only
+    records the choice once its coroutine body actually executes."""
+    adapter = _make_adapter()
+    ran = []
+
+    async def fake_resolve(sk, cid, choice):
+        await asyncio.sleep(0)
+        ran.append((sk, cid, choice))
+        return "Reloaded"
+
+    monkeypatch.setattr(
+        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm", fake_resolve,
+    )
+    monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+
+    async def fake_patch(mid, **kw):
+        return {"id": mid}
+
+    monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
+    for choice in ("once", "cancel"):
+        adapter._slash_confirm_state[f"conf-{choice}"] = "sess-7"
+        await adapter._handle_callback({
+            "callback_data": f"sc:{choice}:conf-{choice}",
+            "user_id": "u_1", "message_id": 51, "chat_id": 1,
+        })
+    assert ran == [("sess-7", "conf-once", "once"), ("sess-7", "conf-cancel", "cancel")]
+
+
+def test_resolve_slash_confirm_is_async_even_without_hermes():
+    assert inspect.iscoroutinefunction(adapter_mod.resolve_slash_confirm)
+
+
+def test_resolve_slash_confirm_imports_from_tools_slash_confirm():
+    """gateway.slash_confirm does not exist in Hermes; the real module is
+    tools.slash_confirm. A fake tools package in a clean interpreter proves
+    the adapter binds to it."""
+    code = (
+        "import sys, types\n"
+        "tools = types.ModuleType('tools'); tools.__path__ = []\n"
+        "sc = types.ModuleType('tools.slash_confirm')\n"
+        "async def resolve(session_key, confirm_id, choice): return 'ok'\n"
+        "sc.resolve = resolve\n"
+        "sys.modules['tools'] = tools; sys.modules['tools.slash_confirm'] = sc\n"
+        "import hermes_channel_bgos.bgos_adapter as m\n"
+        "assert m.resolve_slash_confirm is resolve, m.resolve_slash_confirm\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(adapter_mod.__file__).parents[1])}
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+
+
 async def test_stale_slash_confirm_click_noops(monkeypatch):
     adapter = _make_adapter()
     monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    async def fail_resolve(sk, cid, choice):
+        pytest.fail("should not resolve stale click")
+
     monkeypatch.setattr(
-        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm",
-        lambda sk, cid, choice: pytest.fail("should not resolve stale click"),
+        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm", fail_resolve,
     )
     # _slash_confirm_state is empty (stale or already-resolved click)
     await adapter._handle_callback({

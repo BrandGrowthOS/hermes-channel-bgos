@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import struct
 
+import httpx
 import pytest
 
 from hermes_channel_bgos.bgos_adapter import (
@@ -567,32 +568,36 @@ async def test_send_media_only_all_bad_posts_nothing(monkeypatch):
 # -----------------------------------------------------------------------------
 
 
-class _FakeHttpResp:
-    def __init__(self, content: bytes, ctype: str = "image/png") -> None:
-        self.content = content
-        self.headers = {"content-type": ctype}
+def _install_public_fetch(monkeypatch, handler) -> None:
+    """Route the adapter's remote fetch to an httpx MockTransport handler and
+    stand in for Hermes's tools.url_safety helpers (every URL counts as public,
+    redirects are read off the Location header like the real helper). The
+    SSRF behaviour itself is covered in test_safe_media_fetch.py."""
+    from urllib.parse import urljoin
 
-    def raise_for_status(self) -> None:
-        return None
+    def _client(**kwargs):
+        kwargs.pop("follow_redirects", None)
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=False, **kwargs,
+        )
+
+    def _redirect_target(resp):
+        if not resp.is_redirect:
+            return None
+        return urljoin(str(resp.url), resp.headers["location"])
+
+    mod = "hermes_channel_bgos.bgos_adapter"
+    monkeypatch.setattr(f"{mod}.create_ssrf_safe_async_client", _client, raising=False)
+    monkeypatch.setattr(f"{mod}.is_safe_url", lambda url: True, raising=False)
+    monkeypatch.setattr(
+        f"{mod}.redirect_target_from_response", _redirect_target, raising=False,
+    )
 
 
-class _FakeHttpClient:
-    """Stand-in for httpx.AsyncClient so _fetch_media_source exercises the URL
-    branch without real network. Returns a fixed PNG for any GET."""
-
-    _payload = _png_bytes(40, 30)
-
-    def __init__(self, *a, **k) -> None:
-        pass
-
-    async def __aenter__(self) -> "_FakeHttpClient":
-        return self
-
-    async def __aexit__(self, *a) -> bool:
-        return False
-
-    async def get(self, url: str):
-        return _FakeHttpResp(self._payload, "image/png")
+def _png_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200, content=_png_bytes(40, 30), headers={"content-type": "image/png"},
+    )
 
 
 async def test_send_image_downloads_url_and_reuploads(monkeypatch):
@@ -605,9 +610,7 @@ async def test_send_image_downloads_url_and_reuploads(monkeypatch):
         return {"id": 1}
 
     monkeypatch.setattr(adapter._api, "post_message", fake_post)
-    monkeypatch.setattr(
-        "hermes_channel_bgos.bgos_adapter.httpx.AsyncClient", _FakeHttpClient,
-    )
+    _install_public_fetch(monkeypatch, _png_handler)
 
     await adapter.send_image(
         chat_id=1, image_url="https://fal.media/files/cat.png",
@@ -667,9 +670,7 @@ async def test_send_animation_url_downloads(monkeypatch):
         return {"id": 2}
 
     monkeypatch.setattr(adapter._api, "post_message", fake_post)
-    monkeypatch.setattr(
-        "hermes_channel_bgos.bgos_adapter.httpx.AsyncClient", _FakeHttpClient,
-    )
+    _install_public_fetch(monkeypatch, _png_handler)
     await adapter.send_animation(chat_id=1, animation_url="https://media.test/loop.gif")
     assert len(posts) == 1
     assert posts[0]["files"][0]["fileName"] == "loop.gif"
@@ -696,13 +697,10 @@ async def test_send_image_dead_url_is_graceful(monkeypatch):
     """A dead image URL degrades to a no-op, never raises."""
     adapter = _make_adapter()
 
-    class _BoomClient(_FakeHttpClient):
-        async def get(self, url: str):
-            raise RuntimeError("boom")
+    def _boom(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("boom")
 
-    monkeypatch.setattr(
-        "hermes_channel_bgos.bgos_adapter.httpx.AsyncClient", _BoomClient,
-    )
+    _install_public_fetch(monkeypatch, _boom)
     res = await adapter.send_image(chat_id=1, image_url="https://dead.link/x.png")
     assert res.message_id is None
 

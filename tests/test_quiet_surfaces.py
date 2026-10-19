@@ -189,9 +189,11 @@ async def test_slash_confirm_tidy_callback_leads_with_outcome_and_title(
         "PATCH", f"/api/v1/messages/{message_id}",
     ).respond(200, {"id": message_id})
     monkeypatch.setenv("BGOS_ALLOW_ALL_USERS", "true")
+    async def _resolve(*_args):
+        return None
+
     monkeypatch.setattr(
-        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm",
-        lambda *_args: None,
+        "hermes_channel_bgos.bgos_adapter.resolve_slash_confirm", _resolve,
     )
     adapter = _adapter(mock_bgos_server)
     try:
