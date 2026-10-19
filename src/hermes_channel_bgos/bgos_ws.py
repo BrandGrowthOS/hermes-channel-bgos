@@ -61,6 +61,7 @@ class BgosWs:
         on_profile_rpc: _Handler | None = None,
         on_update_rpc: _Handler | None = None,
         on_mission_event: _Handler | None = None,
+        on_pairing_revoked: _Handler | None = None,
         reconnection_delay: float = 1.0,
         reconnection_delay_max: float = 30.0,
     ) -> None:
@@ -76,6 +77,7 @@ class BgosWs:
         self._memory_bridge: MemoryBridge | None = None
         self._memory_tasks: set[asyncio.Task[None]] = set()
         self._on_mission_event = on_mission_event
+        self._on_pairing_revoked = on_pairing_revoked
         self._skills_bridge: SkillsBridge | None = None
 
         self._assistants: set[int] = set()
@@ -209,6 +211,15 @@ class BgosWs:
                 await _maybe_await(self._on_inbound(data))
             except Exception:
                 log.exception("bgos_ws.on_inbound_message callback failed")
+
+        @self._sio.on("pairing_revoked")  # type: ignore[misc]
+        async def _pairing_revoked(data: dict | None = None) -> None:
+            if self._on_pairing_revoked is None:
+                return
+            try:
+                await _maybe_await(self._on_pairing_revoked(data or {}))
+            except Exception:
+                log.exception("bgos_ws.on_pairing_revoked callback failed")
 
         @self._sio.on("callback_result")  # type: ignore[misc]
         async def _callback(data: dict) -> None:

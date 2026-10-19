@@ -38,6 +38,12 @@ import httpx
 from . import __version__
 from . import scheduled_update
 from . import self_update
+from .auth_rejection import (
+    AUTH_PAUSED_PROBE_SECONDS,
+    PAUSED as _AUTH_PAUSED,
+    RESUMED as _AUTH_RESUMED,
+    AuthRejectionTracker,
+)
 from .bgos_api import BgosApi, BgosApiError, NOT_MODIFIED
 from .bgos_ws import BgosWs
 from .commands_sync import (
@@ -119,19 +125,34 @@ except ImportError:
 
 
 try:  # pragma: no cover - exercised only when Hermes is installed
-    # Phase 1 stub; replace import target when Hermes ships its slash_confirm
-    # helper. Telegram has its own override at gateway/platforms/telegram.py:2119
-    # but the fork hasn't surfaced a shared resolver path yet — tests monkeypatch
-    # this at the module level (hermes_channel_bgos.bgos_adapter.resolve_slash_confirm).
-    from gateway.slash_confirm import resolve as resolve_slash_confirm  # type: ignore
+    # The real helper lives in tools.slash_confirm and `resolve` is a coroutine
+    # function (it awaits the registered handler), so callers must await it.
+    # Tests monkeypatch this at the module level
+    # (hermes_channel_bgos.bgos_adapter.resolve_slash_confirm) with an async fake.
+    from tools.slash_confirm import resolve as resolve_slash_confirm  # type: ignore
 except ImportError:
-    def resolve_slash_confirm(session_key: str, confirm_id: str, choice: str) -> None:  # type: ignore[no-redef]
+    async def resolve_slash_confirm(session_key: str, confirm_id: str, choice: str) -> None:  # type: ignore[no-redef]
         raise RuntimeError(
-            "gateway.slash_confirm.resolve is not importable — either Hermes "
-            "is not installed, or this Hermes build hasn't shipped the slash-"
-            "confirm helper yet (Phase 1 stub in hermes_channel_bgos.bgos_adapter). "
-            "Tests should monkeypatch this at the module level."
+            "tools.slash_confirm.resolve is not importable, so Hermes is not "
+            "installed or is too old to ship the slash-confirm helper. Tests "
+            "should monkeypatch this at the module level "
+            "(hermes_channel_bgos.bgos_adapter)."
         )
+
+
+try:  # pragma: no cover - exercised only when Hermes is installed
+    # Hermes's public SSRF helpers (hermes-agent v0.21.7 and later). All three
+    # are needed to fetch a remote URL safely; if any is missing we refuse
+    # remote fetches (fail closed) rather than fall back to a bare httpx client.
+    from tools.url_safety import (  # type: ignore
+        create_ssrf_safe_async_client,
+        is_safe_url,
+        redirect_target_from_response,
+    )
+except Exception:
+    create_ssrf_safe_async_client = None  # type: ignore[assignment]
+    is_safe_url = None  # type: ignore[assignment]
+    redirect_target_from_response = None  # type: ignore[assignment]
 
 
 # Matches Telegram's callback_data format at gateway/platforms/telegram.py:1275.
@@ -297,6 +318,12 @@ S3_THRESHOLD = 500 * 1024
 # as the ceiling so a pathological path can't OOM the gateway process. Files
 # above this are skipped with a warning rather than read.
 _MEDIA_MAX_BYTES = 100 * 1024 * 1024
+
+# Remote (http/https) media is capped lower than local files and enforced while
+# streaming, so a hostile or runaway URL can neither fill memory nor smuggle a
+# huge body into a chat. The redirect limit bounds a redirect loop.
+_MEDIA_REMOTE_MAX_BYTES = 25 * 1024 * 1024
+_MEDIA_MAX_REDIRECTS = 5
 
 _DOCTOR_RPC_TIMEOUT_SECONDS = 45.0
 
@@ -1566,6 +1593,12 @@ class BGOSAdapter(BasePlatformAdapter):
         # once per stretch instead of every minute.
         self._scheduled_update_pinned: bool = False
         self._api.on_message_activity = self._note_outbound_message
+        # A revoked pairing answers every call with a plain 401. Count them
+        # across every authenticated call; past the threshold the poll loop
+        # pauses and probes slowly instead of replaying the dead token.
+        self._auth = AuthRejectionTracker(clock=lambda: self._clock())
+        self._auth_probe_seconds: float = AUTH_PAUSED_PROBE_SECONDS
+        self._api.on_auth_status = self._on_auth_status
         # Agent Boards round trip ([[BGOS_BOARDS]] marker). Executor tasks
         # are fire-and-forget like _voice_tasks (tracked so exceptions are
         # retrieved and disconnect can drain them). The per-chat counter is
@@ -2028,6 +2061,7 @@ class BGOSAdapter(BasePlatformAdapter):
             on_profile_rpc=self._handle_profile_rpc,
             on_update_rpc=self._handle_update_rpc,
             on_mission_event=self._mission_lane.handle_mission_event,
+            on_pairing_revoked=self._handle_pairing_revoked,
         )
         if self.pairing_id is not None:
             self._ws.bind_pairing(self.pairing_id)
@@ -2132,6 +2166,11 @@ class BGOSAdapter(BasePlatformAdapter):
         (an object sets the app's error, None clears it). Such a beat waits
         out the backend's write window first (finding M2), so it is stored,
         not only acknowledged; one beat at a time per adapter."""
+        if self._auth.paused:
+            # Refused pairing: the poll loop's probe decides when it works
+            # again, and resuming sends a beat at once.
+            log.debug("BGOS heartbeat skipped (pairing refused)")
+            return
         async with self._heartbeat_lock:
             try:
                 latest = await asyncio.to_thread(
@@ -2567,6 +2606,60 @@ class BGOSAdapter(BasePlatformAdapter):
         """
         return enumerate_agents_from_env()
 
+    def _on_auth_status(self, status: int) -> None:
+        """Fold one authenticated call's HTTP status into the revoked-pairing
+        tracker and log each transition once (no traceback per call)."""
+        transition = self._auth.observe(status)
+        if transition == _AUTH_PAUSED:
+            log.error(
+                "BGOS rejected the pairing token %d times in a row over %d "
+                "seconds; the pairing was probably revoked. Polling is paused "
+                "and probed every %d seconds. Re-pair with hermes-pair-bgos "
+                "to restore it.",
+                self._auth.consecutive,
+                int(self._auth.seconds_rejected()),
+                int(self._auth_probe_seconds),
+            )
+        elif transition == _AUTH_RESUMED:
+            self._announce_auth_resumed()
+
+    def _announce_auth_resumed(self) -> None:
+        log.info("BGOS accepted the pairing token again; polling resumed.")
+        # The 6h beat was skipped while paused: send one now.
+        try:
+            asyncio.get_running_loop().create_task(self._post_heartbeat_once())
+        except RuntimeError:
+            pass
+
+    async def _probe_pairing(self) -> None:
+        """The paused state's one slow self probe: any authenticated call
+        will do, the tracker watches its status. Errors are expected while the
+        pairing stays refused and are not logged."""
+        try:
+            await self._api.whoami()
+        except Exception:
+            log.debug("BGOS pairing probe failed (still paused?)", exc_info=True)
+
+    async def _handle_pairing_revoked(self, data: dict) -> None:
+        """WebSocket `pairing_revoked`: the backend tells our own pairing room
+        the pairing was revoked, then drops the socket. Pause at once instead
+        of waiting for the 401 count."""
+        mine = self.pairing_id
+        theirs = data.get("pairingId", data.get("pairing_id")) if isinstance(data, dict) else None
+        try:
+            if mine is not None and theirs is not None and int(theirs) != int(mine):
+                log.debug("ignoring pairing_revoked for pairing %s", theirs)
+                return
+        except (TypeError, ValueError):
+            pass
+        if self._auth.force_pause():
+            log.error(
+                "BGOS reported this pairing revoked. Polling is paused and "
+                "probed every %d seconds. Re-pair with hermes-pair-bgos to "
+                "restore it.",
+                int(self._auth_probe_seconds),
+            )
+
     async def _poll_loop(self, interval: float) -> None:
         """Poll REST inbound every `interval` seconds.
 
@@ -2583,7 +2676,14 @@ class BGOSAdapter(BasePlatformAdapter):
         """
         try:
             while True:
-                await asyncio.sleep(interval)
+                if self._auth.paused:
+                    # Revoked or refused: one slow probe, not a poll.
+                    await asyncio.sleep(self._auth_probe_seconds)
+                    await self._probe_pairing()
+                    if self._auth.paused:
+                        continue
+                else:
+                    await asyncio.sleep(interval)
                 await self._run_backfill(self._poll_since())
         except asyncio.CancelledError:
             pass
@@ -4873,6 +4973,76 @@ class BGOSAdapter(BasePlatformAdapter):
             self._state.last_assistant_message_by_chat[chat_key] = message_id
         return _send_result(message_id=message_id)
 
+    async def _fetch_remote_media(self, src: str) -> tuple[bytes, str] | None:
+        """Download an http(s) media URL, refusing anything internal.
+
+        Returns `(body, content_type)`, or `None` when the fetch is refused
+        (helpers missing, private or non-http target, redirect to one, too many
+        redirects, or a body over `_MEDIA_REMOTE_MAX_BYTES`). Network and HTTP
+        errors raise and are handled by the caller. The bytes end up in a chat
+        other people can read, so every hop (the URL and each redirect target)
+        is checked with Hermes's `is_safe_url`, the client re-validates the
+        address at connect time, and the body is streamed under a hard cap.
+        """
+        if (
+            create_ssrf_safe_async_client is None
+            or is_safe_url is None
+            or redirect_target_from_response is None
+        ):
+            log.warning(
+                "remote media fetch refused: Hermes tools.url_safety helpers "
+                "are not importable (need hermes-agent v0.21.7 or later): %r",
+                src,
+            )
+            return None
+        url = src
+        async with create_ssrf_safe_async_client(
+            timeout=self._config.request_timeout_seconds,
+            follow_redirects=False,
+        ) as client:
+            for _ in range(_MEDIA_MAX_REDIRECTS + 1):
+                # is_safe_url resolves DNS synchronously; keep it off the loop.
+                if not await asyncio.to_thread(is_safe_url, url):
+                    log.warning(
+                        "remote media refused: target is not a public http(s) "
+                        "address: %r (from %r)", url, src,
+                    )
+                    return None
+                async with client.stream("GET", url) as resp:
+                    target = redirect_target_from_response(resp)
+                    if target:
+                        url = target
+                        continue
+                    resp.raise_for_status()
+                    try:
+                        declared = int(resp.headers.get("content-length") or 0)
+                    except ValueError:
+                        declared = 0
+                    if declared > _MEDIA_REMOTE_MAX_BYTES:
+                        log.warning(
+                            "remote media %r declares %d bytes (> %d cap) - skipping",
+                            src, declared, _MEDIA_REMOTE_MAX_BYTES,
+                        )
+                        return None
+                    body = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > _MEDIA_REMOTE_MAX_BYTES:
+                            log.warning(
+                                "remote media %r exceeded the %d byte cap while "
+                                "streaming - skipping", src, _MEDIA_REMOTE_MAX_BYTES,
+                            )
+                            return None
+                    ctype = (
+                        resp.headers.get("content-type") or ""
+                    ).split(";")[0].strip()
+                    return bytes(body), ctype
+        log.warning(
+            "remote media refused: more than %d redirects: %r",
+            _MEDIA_MAX_REDIRECTS, src,
+        )
+        return None
+
     async def _fetch_media_source(
         self, src: str, filename: str | None = None, mime: str | None = None,
     ) -> tuple[bytes | None, str, str]:
@@ -4892,14 +5062,14 @@ class BGOSAdapter(BasePlatformAdapter):
         resolved_mime = mime or ""
         try:
             if re.match(r"^https?://", src, re.IGNORECASE):
-                async with httpx.AsyncClient(
-                    timeout=self._config.request_timeout_seconds,
-                    follow_redirects=True,
-                ) as client:
-                    resp = await client.get(src)
-                    resp.raise_for_status()
-                    data = resp.content
-                ctype = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                fetched = await self._fetch_remote_media(src)
+                if fetched is None:
+                    return (
+                        None,
+                        name or "download",
+                        resolved_mime or "application/octet-stream",
+                    )
+                data, ctype = fetched
                 name = name or Path(unquote(urlparse(src).path)).name
                 resolved_mime = resolved_mime or ctype
             else:
@@ -6280,7 +6450,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 log.info("stale slash-confirm click confirm_id=%s", confirm_id)
                 return
             import hermes_channel_bgos.bgos_adapter as _self_mod
-            _self_mod.resolve_slash_confirm(session_key, confirm_id, choice)
+            await _self_mod.resolve_slash_confirm(session_key, confirm_id, choice)
             # Edit the bubble in place to show the resolution.
             choice_labels = {
                 "once":   "✅ Approved once",
@@ -6570,6 +6740,10 @@ class BGOSAdapter(BasePlatformAdapter):
         hold ends without the restart, the fetch starts no later than the
         cursor it was held at.
         """
+        if self._auth.paused:
+            # A refused pairing: the poll loop's slow probe is the only caller
+            # allowed to find out when that changes.
+            return
         if self._intake_held():
             return
         resume = self._take_intake_resume_cursor()
@@ -6618,6 +6792,16 @@ class BGOSAdapter(BasePlatformAdapter):
         held_before = set(self._dropped_unknown)
         try:
             resp = await self._api.fetch_inbound_since(last_message_id)
+        except BgosApiError as exc:
+            if exc.status == 401:
+                # A refused pairing token: the tracker counts these and logs
+                # the pause once; a traceback per poll would bury that line.
+                log.debug("backfill fetch refused (401) for since_message_id=%d",
+                          last_message_id)
+                return False
+            log.exception("backfill fetch failed for since_message_id=%d",
+                          last_message_id)
+            return False
         except Exception:
             log.exception("backfill fetch failed for since_message_id=%d",
                           last_message_id)
