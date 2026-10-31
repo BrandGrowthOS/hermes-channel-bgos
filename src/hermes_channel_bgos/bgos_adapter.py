@@ -6065,11 +6065,16 @@ class BGOSAdapter(BasePlatformAdapter):
             pending_task = self._pending_text_tasks.get(batch_key)
             if pending_task is not None and not pending_task.done():
                 pending_task.cancel()
-            if batch_key in self._pending_text_batches:
+            person_words_pending = batch_key in self._pending_text_batches
+            if person_words_pending:
                 await self._flush_text_batch(batch_key, 0)
-            # Set only now, after the person's flushed words ran: an answer
-            # to them must not quote this tag (third review).
-            if isinstance(event.message_id, int):
+            # The gateway answers in a background task, so the answer to
+            # those flushed words is posted after this tag: with a person's
+            # words pending the tag is not anchored at all, since losing one
+            # quote is better than quoting it on the person's answer.
+            if person_words_pending:
+                self._room_agent_reply_anchor.pop(event.chat_id, None)
+            elif isinstance(event.message_id, int):
                 self._room_agent_reply_anchor[event.chat_id] = (
                     event.message_id, time.monotonic(),
                 )

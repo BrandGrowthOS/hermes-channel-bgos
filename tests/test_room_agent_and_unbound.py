@@ -427,19 +427,29 @@ async def test_the_persons_flushed_words_are_not_answered_as_the_tag(monkeypatch
 
     monkeypatch.setattr(adapter._api, "post_message", fake_post)
 
-    async def answer_the_person(event):
-        if getattr(event, "text", "") == "hi all":
-            await adapter.send(chat_id=300, content="Hello there.")
+    background: list[asyncio.Task] = []
 
-    adapter.handle_message = answer_the_person  # type: ignore[method-assign]
+    async def answer_the_person_later(event):
+        # The real gateway's handle_message returns at once and answers in
+        # a background task (fourth review), so the answer to the person's
+        # words is posted AFTER the tag has been handled.
+        if getattr(event, "text", "") == "hi all":
+            async def later() -> None:
+                await asyncio.sleep(0.01)
+                await adapter.send(chat_id=300, content="Hello there.")
+            background.append(asyncio.create_task(later()))
+
+    adapter.handle_message = answer_the_person_later  # type: ignore[method-assign]
     await adapter._handle_inbound({
         "assistant_id": 7, "chat_id": 300, "message_id": 800,
         "user_id": "owner_1", "text": "hi all", "files": [],
         "message_type": "standard",
     })
     await adapter._handle_inbound(_agent_row(text=SERVER_FRAMED))
+    await asyncio.gather(*background)
     assert posts[0]["text"].startswith("Hello there.")
     assert posts[0]["reply_to_id"] is None
-    # The tag is still waiting for its own answer.
+    # With a person's words pending, the tag is not anchored at all: losing
+    # one quote is better than quoting the tag on the person's answer.
     await adapter.send(chat_id=300, content="On it.")
-    assert posts[-1]["reply_to_id"] == 901
+    assert posts[-1]["reply_to_id"] is None
