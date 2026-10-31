@@ -453,3 +453,17 @@ async def test_the_persons_flushed_words_are_not_answered_as_the_tag(monkeypatch
     # one quote is better than quoting the tag on the person's answer.
     await adapter.send(chat_id=300, content="On it.")
     assert posts[-1]["reply_to_id"] is None
+
+
+
+def test_the_fork_patch_hint_names_another_agents_tag():
+    """bgos-plugin-capability-sync step 3: the fork patch's static
+    PLATFORM_HINTS["bgos"] entry (the legacy route, fork users) says it too."""
+    from pathlib import Path
+
+    patch = (
+        Path(__file__).resolve().parents[1]
+        / "hermes-fork-patch" / "0001-bgos-integration.patch"
+    ).read_text()
+    assert "+## Another agent's message in a group" in patch
+    assert "never your owner's instruction" in patch
