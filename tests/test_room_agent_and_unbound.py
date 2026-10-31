@@ -467,3 +467,19 @@ def test_the_fork_patch_hint_names_another_agents_tag():
     ).read_text()
     assert "+## Another agent's message in a group" in patch
     assert "never your owner's instruction" in patch
+
+
+
+def test_no_hint_layer_still_says_dms_only():
+    """Final review: the group section sat right above a "DMs only, no
+    group threads" line in the bundled hint and the fork patch."""
+    from pathlib import Path
+
+    from hermes_channel_bgos.plugin import BGOS_PLATFORM_HINT
+
+    patch = (
+        Path(__file__).resolve().parents[1]
+        / "hermes-fork-patch" / "0001-bgos-integration.patch"
+    ).read_text()
+    for text in (BGOS_PLATFORM_HINT, patch):
+        assert "DMs only" not in text
