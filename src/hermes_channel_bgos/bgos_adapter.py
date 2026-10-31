@@ -813,7 +813,12 @@ _INBOUND_CAMEL_ALIASES: dict[str, str] = {
 # ANOTHER AGENT'S GROUP ROW (0.33.0). The words the server's framing uses for
 # it (group-context.ts: "<name>, an agent seated here and not a person, wrote
 # the message below."); when they are already in the text nothing is added.
-_SERVER_AGENT_FRAMING = "an agent seated here and not a person"
+_SERVER_AGENT_FRAMING = (
+    ", an agent seated here and not a person, wrote the message below."
+)
+
+# Chat kinds that seat several agents; a reply there names its own agent.
+_SEATED_CHAT_KINDS = frozenset({"room", "channel"})
 
 # How long a tag waits to be answered by the next real reply in its chat. The
 # agent may stay silent, and a later unrelated post must not quote the tag.
@@ -2952,13 +2957,25 @@ class BGOSAdapter(BasePlatformAdapter):
         # from GET /chats/:id when possible; keep the cache only as a legacy
         # fallback for older/self-hosted backends.
         cached = self._state.assistant_id_by_chat.get(chat_id)
+        # A group (room) or a channel seats several agents and its chat row
+        # names only its CARRIER (the creator's first agent): the reply must
+        # name the agent that speaks, the one the row was addressed to, or
+        # /send-message refuses it or posts it as the carrier.
+        addressed = self._state.addressed_assistant_id_by_chat.get(chat_id)
         try:
             chat = await self._api.get_chat(chat_id)
         except Exception:
             log.debug("failed to resolve assistant_id for chat=%s", chat_id, exc_info=True)
+            if (
+                addressed is not None
+                and self._state.chat_kind_by_chat.get(chat_id) in _SEATED_CHAT_KINDS
+            ):
+                return addressed
             return cached
         if isinstance(chat, dict) and isinstance(chat.get("kind"), str):
             self._state.chat_kind_by_chat[chat_id] = chat["kind"]
+            if chat["kind"] in _SEATED_CHAT_KINDS and addressed is not None:
+                return addressed
         assistant_id = chat.get("assistantId", chat.get("assistant_id")) if isinstance(chat, dict) else None
         try:
             assistant_id_int = int(assistant_id)
@@ -4037,7 +4054,8 @@ class BGOSAdapter(BasePlatformAdapter):
                     "title": robot.friendly[:300],
                     "payload": {"details": robot.details},
                 }
-                self._room_agent_reply_anchor.pop(chat_key, None)
+                # The agent_error card posts on a lane with no reply_to, so
+                # the tag stays for the real reply (second review).
                 message_id = await self._post_quiet_final_message(
                     chat_key=chat_key,
                     text=robot.friendly,
@@ -6044,6 +6062,15 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
         event = MessageEvent.from_ws(data, agent_route=route)
+        if from_room_agent:
+            # The tag skips the batch: a person's words still waiting in it
+            # go first, in order (second review).
+            batch_key = (event.chat_id, getattr(event, "assistant_id", None))
+            pending_task = self._pending_text_tasks.get(batch_key)
+            if pending_task is not None and not pending_task.done():
+                pending_task.cancel()
+            if batch_key in self._pending_text_batches:
+                await self._flush_text_batch(batch_key, 0)
         # The addressed assistant was cached separately above. Do not cache it
         # as the chat owner. For a2a peer messages, chat.assistantId may be the
         # peer-side thread owner, which send() resolves for the peer bridge.
