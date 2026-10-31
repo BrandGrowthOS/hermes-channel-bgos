@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+import hermes_channel_bgos.bgos_adapter as bgos_adapter_module
 from hermes_channel_bgos.bgos_adapter import (
     BGOSAdapter,
     room_agent_provenance_line,
@@ -196,6 +197,63 @@ async def test_a_persons_row_after_the_tag_drops_the_anchor(monkeypatch):
         "message_type": "slash_command", "command_name": "nope",
     })
     await adapter.send(chat_id=300, content="Hello.")
+    assert posts[-1]["reply_to_id"] is None
+
+
+async def _anchored_adapter(monkeypatch):
+    adapter = _adapter()
+    _capture(adapter)
+    posts: list[dict] = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1000 + len(posts)}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    await adapter._handle_inbound(_agent_row(text=SERVER_FRAMED))
+    return adapter, posts
+
+
+async def test_a_tool_progress_send_does_not_use_up_the_anchor(monkeypatch):
+    """Review of d537e7d: the gateway sends a turn's FIRST tool through
+    send(); it became the progress card and took the anchor, so the answer
+    after it went out unanchored."""
+    adapter, posts = await _anchored_adapter(monkeypatch)
+    edits: list[Any] = []
+
+    async def fake_progress(chat_key, *args, **kwargs):
+        edits.append(chat_key)
+        return bgos_adapter_module._send_result(message_id=None)
+
+    monkeypatch.setattr(adapter, "_handle_tool_progress_edit", fake_progress)
+    await adapter.send(chat_id=300, content='\U0001f4bb terminal: "ls -la"')
+    assert edits == [300]
+    await adapter.send(chat_id=300, content="Here is my answer.")
+    assert posts[-1]["text"].startswith("Here is my answer.")
+    assert posts[-1]["reply_to_id"] == 901
+
+
+async def test_an_old_anchor_is_not_applied(monkeypatch):
+    """The agent may stay silent; a later unrelated send in that chat must
+    not quote the old tag."""
+    adapter, posts = await _anchored_adapter(monkeypatch)
+    real_now = bgos_adapter_module.time.monotonic
+    monkeypatch.setattr(
+        bgos_adapter_module.time, "monotonic",
+        lambda: real_now() + bgos_adapter_module._ROOM_AGENT_ANCHOR_TTL_S + 1,
+    )
+    await adapter.send(chat_id=300, content="Scheduled report.")
+    assert posts[-1]["reply_to_id"] is None
+
+
+async def test_the_owners_button_tap_drops_the_anchor(monkeypatch):
+    adapter, posts = await _anchored_adapter(monkeypatch)
+    await adapter._handle_inbound_click({
+        "assistantId": 7, "userId": "owner_1", "chatId": 300,
+        "messageId": 500, "optionId": 1, "callbackData": "a",
+        "buttonText": "A",
+    })
+    await adapter.send(chat_id=300, content="Thanks for choosing A.")
     assert posts[-1]["reply_to_id"] is None
 
 

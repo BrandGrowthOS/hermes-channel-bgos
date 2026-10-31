@@ -815,6 +815,10 @@ _INBOUND_CAMEL_ALIASES: dict[str, str] = {
 # the message below."); when they are already in the text nothing is added.
 _SERVER_AGENT_FRAMING = "an agent seated here and not a person"
 
+# How long a tag waits to be answered by the next real reply in its chat. The
+# agent may stay silent, and a later unrelated post must not quote the tag.
+_ROOM_AGENT_ANCHOR_TTL_S = 30 * 60
+
 
 def room_agent_provenance_line(sender_assistant_id: int | None) -> str:
     """The line put in front of another agent's row when the server's own
@@ -1553,7 +1557,8 @@ class BGOSAdapter(BasePlatformAdapter):
         # Another agent's tag (0.33.0): the message the next reply in that
         # chat answers, once (the served canon: answer a tag with
         # reply_to_id set to its message).
-        self._room_agent_reply_anchor: dict[int, int] = {}
+        # chat id -> (message id, monotonic time it arrived).
+        self._room_agent_reply_anchor: dict[int, tuple[int, float]] = {}
         self._quiet_failsafe_tasks: dict[int, asyncio.Task] = {}
         # Adaptive text-batching for rapid inbound user messages. Mobile
         # clients sometimes split a long transcription or paste into multiple
@@ -2722,6 +2727,18 @@ class BGOSAdapter(BasePlatformAdapter):
                 int(self._auth_probe_seconds),
             )
 
+    def _room_agent_anchor_for(self, chat_key: int) -> int | None:
+        """The tag the next real reply in this chat answers, if it is still
+        fresh; a stale one is dropped."""
+        held = self._room_agent_reply_anchor.get(chat_key)
+        if held is None:
+            return None
+        message_id, at = held
+        if time.monotonic() - at > _ROOM_AGENT_ANCHOR_TTL_S:
+            self._room_agent_reply_anchor.pop(chat_key, None)
+            return None
+        return message_id
+
     async def _handle_assistant_unbound(self, data: dict) -> None:
         """WebSocket `assistant_unbound` (0.33.0): an agent was deleted or
         unbound from this pairing while the pairing still serves others
@@ -3875,8 +3892,11 @@ class BGOSAdapter(BasePlatformAdapter):
         effective_reply_to: int | None = (
             int(reply_to) if reply_to is not None else marker_reply_to
         )
-        # The first reply after another agent's tag answers it (0.33.0).
-        tag_anchor = self._room_agent_reply_anchor.pop(chat_key, None)
+        # The first reply after another agent's tag answers it (0.33.0). Only
+        # looked at here: it is used up below when a real bubble is posted,
+        # never by a tool progress card or a suppressed tool dump (review of
+        # d537e7d: the gateway sends a turn's first tool through send()).
+        tag_anchor = self._room_agent_anchor_for(chat_key)
         if effective_reply_to is None and tag_anchor is not None:
             effective_reply_to = tag_anchor
 
@@ -4017,6 +4037,7 @@ class BGOSAdapter(BasePlatformAdapter):
                     "title": robot.friendly[:300],
                     "payload": {"details": robot.details},
                 }
+                self._room_agent_reply_anchor.pop(chat_key, None)
                 message_id = await self._post_quiet_final_message(
                     chat_key=chat_key,
                     text=robot.friendly,
@@ -4046,6 +4067,9 @@ class BGOSAdapter(BasePlatformAdapter):
             ):
                 _schedule_peer_once()
                 return _send_result(message_id=None)
+
+        # A real bubble goes out now: the tag it answers is answered.
+        self._room_agent_reply_anchor.pop(chat_key, None)
 
         # End-of-turn signal: this send() is delivering a plain agent reply
         # (no tool markers). If we still have an open tool_progress card for
@@ -6004,7 +6028,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 data = {**data, "message_type": "standard"}
             batchable = False
             if inbound_chat_id is not None and isinstance(msg_id, int):
-                self._room_agent_reply_anchor[inbound_chat_id] = msg_id
+                self._room_agent_reply_anchor[inbound_chat_id] = (
+                    msg_id, time.monotonic(),
+                )
         elif inbound_chat_id is not None:
             # A person wrote since: the tag is no longer the thing answered.
             self._room_agent_reply_anchor.pop(inbound_chat_id, None)
@@ -6724,6 +6750,9 @@ class BGOSAdapter(BasePlatformAdapter):
         if click_chat_key is not None:
             self._boards_consecutive_results.pop(click_chat_key, None)
             self._peer_consecutive_results.pop(click_chat_key, None)
+            # A person acted in the chat: a pending tag is no longer what the
+            # next reply answers.
+            self._room_agent_reply_anchor.pop(click_chat_key, None)
 
         # Approval/slash-confirm taps may arrive as `inbound_click` instead of
         # `callback_result` on some BGOS deployments. Route those through the

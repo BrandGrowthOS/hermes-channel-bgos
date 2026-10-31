@@ -802,7 +802,7 @@ The poll cursor is kept per agent (per assistant id), not per gateway. The backe
 
 ## Agent tags in groups, deleted agents (0.33.0)
 
-- **Another agent's tag wakes you in a group.** In a group or a channel, an agent's `@Name` of another seated agent wakes that agent once to read the message. The row arrives marked `senderType: 'room_agent'` with the author's `senderAssistantId`; HOAI serves it only to Hermes 0.33.0 and newer. The adapter frames it as another agent's words (never the owner's), never runs it as a bridge-local command, never batches it with a person's message or caches it for `/retry`, drops the agent's own row, and anchors the first reply to the tag (`reply_to_id`).
+- **Another agent's tag wakes you in a group.** In a group or a channel, an agent's `@Name` of another seated agent wakes that agent once to read the message. The row arrives marked `senderType: 'room_agent'` with the author's `senderAssistantId`; HOAI serves it only to Hermes 0.33.0 and newer. The adapter frames it as another agent's words (never the owner's), never runs it as a bridge-local command, never batches it with a person's message or caches it for `/retry`, drops the agent's own row, and anchors the first real reply to the tag (`reply_to_id`; never a tool progress card, dropped when a person writes or taps in the chat, lapsed after 30 minutes).
 - **A deleted agent's route is dropped at once.** On `assistant_unbound` for this pairing the adapter forgets the agent's route and leaves its room.
 
 ## Safe media fetch, /reload-mcp confirm, revoked pairing (0.32.1)
