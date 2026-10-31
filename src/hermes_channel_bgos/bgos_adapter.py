@@ -6045,10 +6045,6 @@ class BGOSAdapter(BasePlatformAdapter):
             if data.get("message_type") == "slash_command":
                 data = {**data, "message_type": "standard"}
             batchable = False
-            if inbound_chat_id is not None and isinstance(msg_id, int):
-                self._room_agent_reply_anchor[inbound_chat_id] = (
-                    msg_id, time.monotonic(),
-                )
         elif inbound_chat_id is not None:
             # A person wrote since: the tag is no longer the thing answered.
             self._room_agent_reply_anchor.pop(inbound_chat_id, None)
@@ -6071,6 +6067,12 @@ class BGOSAdapter(BasePlatformAdapter):
                 pending_task.cancel()
             if batch_key in self._pending_text_batches:
                 await self._flush_text_batch(batch_key, 0)
+            # Set only now, after the person's flushed words ran: an answer
+            # to them must not quote this tag (third review).
+            if isinstance(event.message_id, int):
+                self._room_agent_reply_anchor[event.chat_id] = (
+                    event.message_id, time.monotonic(),
+                )
         # The addressed assistant was cached separately above. Do not cache it
         # as the chat owner. For a2a peer messages, chat.assistantId may be the
         # peer-side thread owner, which send() resolves for the peer bridge.

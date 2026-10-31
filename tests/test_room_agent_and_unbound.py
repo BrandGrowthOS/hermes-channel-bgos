@@ -412,3 +412,34 @@ async def test_an_error_card_does_not_use_up_the_anchor(monkeypatch):
     await adapter.send(chat_id=300, content="Here is my answer.")
     assert posts[-1]["text"].startswith("Here is my answer.")
     assert posts[-1]["reply_to_id"] == 901
+
+
+async def test_the_persons_flushed_words_are_not_answered_as_the_tag(monkeypatch):
+    """Third review: the flush runs the person's pending words first; an
+    answer to them must not quote the tag that arrived after them."""
+    adapter = _adapter()
+    adapter._text_batch_window = 5.0
+    posts: list[dict] = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 4000 + len(posts)}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+
+    async def answer_the_person(event):
+        if getattr(event, "text", "") == "hi all":
+            await adapter.send(chat_id=300, content="Hello there.")
+
+    adapter.handle_message = answer_the_person  # type: ignore[method-assign]
+    await adapter._handle_inbound({
+        "assistant_id": 7, "chat_id": 300, "message_id": 800,
+        "user_id": "owner_1", "text": "hi all", "files": [],
+        "message_type": "standard",
+    })
+    await adapter._handle_inbound(_agent_row(text=SERVER_FRAMED))
+    assert posts[0]["text"].startswith("Hello there.")
+    assert posts[0]["reply_to_id"] is None
+    # The tag is still waiting for its own answer.
+    await adapter.send(chat_id=300, content="On it.")
+    assert posts[-1]["reply_to_id"] == 901
