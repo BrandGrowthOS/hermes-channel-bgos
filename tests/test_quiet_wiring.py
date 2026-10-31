@@ -23,6 +23,17 @@ TOOL_JSON = (
 EMOJI_TOOL = '📖 read_file: "/etc/hostname"'
 
 
+async def _wait_until(predicate, timeout: float = 3.0) -> None:
+    """Poll instead of a fixed sleep: a failsafe that must fire is waited
+    for, so a loaded machine's slower HTTP round trips cannot fail the test."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            return
+        await asyncio.sleep(0.01)
+
+
 @pytest.fixture(autouse=True)
 def _tidy_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BGOS_CHAT_STYLE", raising=False)
@@ -287,11 +298,13 @@ async def test_prose_send_passes_through_and_cancels_failsafe(
     mock_bgos_server,
 ):
     adapter = await _connected_adapter(mock_bgos_server)
-    adapter._quiet_failsafe_seconds = 0.05
+    # Long enough that the second send always lands first, however slow the
+    # first round trip; the wait past it proves the prose cancelled it.
+    adapter._quiet_failsafe_seconds = 0.5
     try:
         await adapter.send(CHAT_ID, TOOL_JSON)
         await adapter.send(CHAT_ID, "All done, your Saturday is planned.")
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.8)
 
         standards = _standard_post_bodies(mock_bgos_server)
         assert any(
@@ -309,7 +322,16 @@ async def test_failsafe_promotes_suppressed_text(mock_bgos_server):
     adapter._quiet_failsafe_seconds = 0.05
     try:
         await adapter.send(CHAT_ID, TOOL_JSON)
-        await asyncio.sleep(0.2)
+        await _wait_until(
+            lambda: any(
+                TOOL_JSON in body["text"]
+                for body in _standard_post_bodies(mock_bgos_server)
+            )
+            and bool(_tool_progress_bodies(mock_bgos_server))
+            and _tool_progress_bodies(mock_bgos_server)[-1]["toolProgress"][
+                "state"
+            ] == "done"
+        )
 
         standards = _standard_post_bodies(mock_bgos_server)
         assert any(TOOL_JSON in body["text"] for body in standards)
@@ -337,7 +359,15 @@ async def test_a2a_failsafe_uses_bridge_and_session_handle(
         await adapter.edit_message(
             A2A_CHAT_ID, PREVIEW_ID, suppressed_edit,
         )
-        await asyncio.sleep(0.2)
+        await _wait_until(
+            lambda: any(
+                request.method == "POST"
+                and request.path == "/api/v1/send-message"
+                and suppressed_edit in (request.json_body or {}).get("text", "")
+                for request in mock_bgos_server.requests
+            )
+        )
+        await asyncio.sleep(0.1)
 
         promoted = [
             request.json_body
@@ -545,7 +575,7 @@ async def test_deferred_prose_edit_cancels_suppressed_failsafe(
     mock_bgos_server,
 ):
     adapter = await _connected_adapter(mock_bgos_server)
-    adapter._quiet_failsafe_seconds = 0.12
+    adapter._quiet_failsafe_seconds = 0.6
     adapter._edit_throttle_seconds = 0.03
     try:
         await adapter.send(CHAT_ID, TOOL_JSON)
@@ -553,7 +583,7 @@ async def test_deferred_prose_edit_cancels_suppressed_failsafe(
         await adapter.edit_message(
             CHAT_ID, PREVIEW_ID, "The plan is ready.",
         )
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.9)
 
         preview_patches = [
             request.json_body
@@ -600,19 +630,19 @@ async def test_slow_visible_edit_pauses_old_failsafe(
     mock_bgos_server, monkeypatch: pytest.MonkeyPatch,
 ):
     adapter = await _connected_adapter(mock_bgos_server)
-    adapter._quiet_failsafe_seconds = 0.03
+    adapter._quiet_failsafe_seconds = 0.3
     try:
         await adapter.send(CHAT_ID, TOOL_JSON)
 
         async def slow_patch(message_id: int, **_kwargs) -> dict:
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(0.6)
             return {"id": message_id}
 
         monkeypatch.setattr(adapter._api, "patch_message", slow_patch)
         await adapter.edit_message(
             CHAT_ID, PREVIEW_ID, "The plan is ready.",
         )
-        await asyncio.sleep(0.12)
+        await asyncio.sleep(0.9)
 
         assert CHAT_ID not in adapter._quiet_suppressed_text
         assert CHAT_ID not in adapter._quiet_failsafe_tasks
