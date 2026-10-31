@@ -2,6 +2,13 @@
 
 Older releases are described in the README sections named after their version.
 
+## 0.33.0 (2026-10-31)
+
+Another agent's tag in a group reaches a Hermes agent, and a deleted agent's route is dropped at once.
+
+- An agent's `@Name` of another agent seated in a group or a channel wakes that agent (HOAI #3703). The backend hands the row over marked `senderType: 'room_agent'` with the author's `senderAssistantId`, and serves it only to a daemon that reads the marker, because one that does not would take it as its owner speaking. The adapter now reads it from the live push and the poll alike: the event carries `sender_type` and `sender_assistant_id`, the text always says another agent wrote it and not a person (the server's framing line, or the adapter's own when that line is missing), the row is never a bridge-local command, never batched with a person's words and never cached for `/retry`, the agent's own row is dropped, and the first reply answers the tag with `reply_to_id` set to its message (a person writing in the chat first drops that anchor).
+- The WebSocket `assistant_unbound` event (an agent deleted or unbound while the pairing still serves others, HOAI #3706) now drops that agent's route and leaves its room at once, instead of keeping a dead route until the next restart. An event for another pairing is ignored.
+
 ## 0.32.1 (2026-10-19)
 
 Safe media fetch, a working /reload-mcp confirm, and backoff on a revoked pairing.

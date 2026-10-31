@@ -62,6 +62,7 @@ class BgosWs:
         on_update_rpc: _Handler | None = None,
         on_mission_event: _Handler | None = None,
         on_pairing_revoked: _Handler | None = None,
+        on_assistant_unbound: _Handler | None = None,
         reconnection_delay: float = 1.0,
         reconnection_delay_max: float = 30.0,
     ) -> None:
@@ -78,6 +79,7 @@ class BgosWs:
         self._memory_tasks: set[asyncio.Task[None]] = set()
         self._on_mission_event = on_mission_event
         self._on_pairing_revoked = on_pairing_revoked
+        self._on_assistant_unbound = on_assistant_unbound
         self._skills_bridge: SkillsBridge | None = None
 
         self._assistants: set[int] = set()
@@ -220,6 +222,15 @@ class BgosWs:
                 await _maybe_await(self._on_pairing_revoked(data or {}))
             except Exception:
                 log.exception("bgos_ws.on_pairing_revoked callback failed")
+
+        @self._sio.on("assistant_unbound")  # type: ignore[misc]
+        async def _assistant_unbound(data: dict | None = None) -> None:
+            if self._on_assistant_unbound is None:
+                return
+            try:
+                await _maybe_await(self._on_assistant_unbound(data or {}))
+            except Exception:
+                log.exception("bgos_ws.on_assistant_unbound callback failed")
 
         @self._sio.on("callback_result")  # type: ignore[misc]
         async def _callback(data: dict) -> None:
