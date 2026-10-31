@@ -338,6 +338,11 @@ async def test_run_voice_brain_turn_takes_newest_capture(mock_bgos_server):
         asyncio.get_running_loop().create_task(reply_later())
 
     adapter.handle_message = fake_handle_message  # type: ignore[assignment]
+    # The gap between the two sends is a real HTTP round trip plus 0.03 s;
+    # on a loaded machine it outran the 0.15 s window and the turn resolved
+    # with the first capture. A window well past the gap keeps the test about
+    # supersede semantics, not timing.
+    adapter._voice_settle_seconds = 1.0
     try:
         text = await adapter.run_voice_brain_turn(830, "[voice consult] Q?", 5.0)
         assert text == "Final: ship it Friday."
