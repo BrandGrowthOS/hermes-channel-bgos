@@ -1,4 +1,4 @@
-"""Another agent's group row (room_agent) and a deleted agent (0.33.0).
+"""Another agent's group row (room_agent) and a deleted agent (0.32.3).
 
 HOAI #3703 (2026-10-31): in a group or a channel an agent's @tag of another
 seated agent wakes it. The row is handed to the tagged agent marked

@@ -2,13 +2,17 @@
 
 Older releases are described in the README sections named after their version.
 
-## 0.33.0 (2026-10-31)
+## 0.32.3 (unreleased)
 
 Another agent's tag in a group reaches a Hermes agent, and a deleted agent's route is dropped at once.
 
 - An agent's `@Name` of another agent seated in a group or a channel wakes that agent (HOAI #3703). The backend hands the row over marked `senderType: 'room_agent'` with the author's `senderAssistantId`, and serves it only to a daemon that reads the marker, because one that does not would take it as its owner speaking. The adapter now reads it from the live push and the poll alike: the event carries `sender_type` and `sender_assistant_id`, the text always says another agent wrote it and not a person (the server's framing line, or the adapter's own when that line is missing), the row is never a bridge-local command, never batched with a person's words and never cached for `/retry`, the agent's own row is dropped (and so is one whose `senderAssistantId` is missing or unreadable, since it cannot be told apart from the agent's own; both are dropped before they could re-arm the boards and peer loop guards), and the first real reply answers the tag with `reply_to_id` set to its message. A tool progress card or a suppressed tool dump never uses that anchor up; a person writing or tapping a button in the chat first drops it, and it lapses after 30 minutes, so a later unrelated post never quotes the tag.
 - The WebSocket `assistant_unbound` event (an agent deleted or unbound while the pairing still serves others, HOAI #3706) now drops that agent's route and leaves its room at once, instead of keeping a dead route until the next restart. An event for another pairing is ignored.
 - A reply in a group or a channel now names the agent the row was addressed to. Before, it named the chat row's assistant, which for a group is its carrier (the creator's first agent), so `/send-message` refused the reply or posted it as that agent. A tag no longer overtakes a person's words still waiting in the text batch (an answer to those words never quotes the tag; in that case the tag's own answer goes out unanchored), and an `agent_error` card leaves the tag's anchor for the real reply.
+- Another agent's tag never cuts into a person's running turn. The row reaches the gateway as an internal event, which Hermes v0.23.0 queues behind the running turn and never uses to interrupt or steer it; a person's message still interrupts. On an older Hermes whose busy handler interrupts on every message, a tag still interrupts.
+- Two agents of one pairing seated in the same group: each reply posts as the agent whose turn wrote it. Before, every reply in that chat named whichever agent's row arrived last, so one agent's answer could post as the other. The tag a reply answers, and whether a person's turn is still running, are now kept per agent in a chat. On Hermes v0.23.0 the adapter computes the session key with the gateway's own per-profile method, so the running turn of an agent on a second profile is seen (the key built without the profile never matched it).
+- An agent's row whose body is empty inside the server's group framing never wakes the agent. The server frames an empty body as well, so the text was never empty.
+- Released as 0.32.3, not 0.33.0: the backend reads Hermes 0.33.0 and later as posting work notes itself, and this release does not.
 
 ## 0.32.2 (2026-11-09)
 
