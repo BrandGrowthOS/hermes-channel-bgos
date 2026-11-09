@@ -1620,6 +1620,13 @@ class BGOSAdapter(BasePlatformAdapter):
         # reply_to_id set to its message).
         # chat id -> (message id, monotonic time it arrived).
         self._room_agent_reply_anchor: dict[int, tuple[int, float]] = {}
+        # A person's turn still running in a chat: a tag arriving then is not
+        # anchored, or the answer to the person would quote it. Chats whose
+        # person row was handed over with no real bubble posted since, and
+        # the gateway session key of the latest person turn per chat (when
+        # the gateway exposes one; it covers a turn after its first bubble).
+        self._person_turn_unanswered: set[int] = set()
+        self._person_turn_session_key: dict[int, str] = {}
         self._quiet_failsafe_tasks: dict[int, asyncio.Task] = {}
         # Adaptive text-batching for rapid inbound user messages. Mobile
         # clients sometimes split a long transcription or paste into multiple
@@ -2788,6 +2795,23 @@ class BGOSAdapter(BasePlatformAdapter):
                 int(self._auth_probe_seconds),
             )
 
+    def _person_turn_running(self, chat_key: int) -> bool:
+        """Is a person's turn in this chat still running? The gateway's own
+        session tracking decides when it is available; otherwise a person's
+        row handed over with no real bubble posted since counts."""
+        active = self._voice_turn_active(
+            self._person_turn_session_key.get(chat_key),
+        )
+        if active is not None:
+            return active
+        return chat_key in self._person_turn_unanswered
+
+    def _note_person_turn_source(self, chat_key: int, source: Any) -> None:
+        """Remember the gateway session a person's turn runs in."""
+        key = self._voice_session_key(source)
+        if key:
+            self._person_turn_session_key[chat_key] = key
+
     def _room_agent_anchor_for(self, chat_key: int) -> int | None:
         """The tag the next real reply in this chat answers, if it is still
         fresh; a stale one is dropped."""
@@ -3450,7 +3474,7 @@ class BGOSAdapter(BasePlatformAdapter):
         same session key (`bgos:<chat_id>`), `message_id=None` so no reply
         anchor is invented. On the mock/fallback path provenance rides in
         the text itself (the fixed `[BGOS boards result]` header + preamble)
-        since this repo's MessageEvent carries no sender_type field. One
+        since a boards result sets no sender_type on this repo's MessageEvent. One
         deliberate difference from the voice lane: `internal=True` is set
         UNCONDITIONALLY (voice sets it only when the pairing owner is
         unknown), because a boards result is adapter-authored by definition
@@ -4142,8 +4166,10 @@ class BGOSAdapter(BasePlatformAdapter):
                 _schedule_peer_once()
                 return _send_result(message_id=None)
 
-        # A real bubble goes out now: the tag it answers is answered.
+        # A real bubble goes out now: the tag it answers is answered, and a
+        # person's turn has its reply.
         self._room_agent_reply_anchor.pop(chat_key, None)
+        self._person_turn_unanswered.discard(chat_key)
 
         # End-of-turn signal: this send() is delivering a plain agent reply
         # (no tool markers). If we still have an open tool_progress card for
@@ -6135,6 +6161,14 @@ class BGOSAdapter(BasePlatformAdapter):
                     msg_id,
                 )
                 return
+            # No body yet (the poll can hand over an agent's row before its
+            # first edit): nothing to read, and the framing line alone must
+            # not wake the agent.
+            if not str(data.get("text") or "").strip() and not data.get("files"):
+                log.info(
+                    "dropping room_agent row message_id=%s: no text yet", msg_id,
+                )
+                return
 
         # Server-authoritative chat addressing (2026-05-30 hardening).
         # Remember the chat this inbound targeted so later outbound
@@ -6216,7 +6250,9 @@ class BGOSAdapter(BasePlatformAdapter):
             # those flushed words is posted after this tag: with a person's
             # words pending the tag is not anchored at all, since losing one
             # quote is better than quoting it on the person's answer.
-            if person_words_pending:
+            # The same holds while a person's turn is still running: its
+            # answer is the next real bubble (review).
+            if person_words_pending or self._person_turn_running(event.chat_id):
                 self._room_agent_reply_anchor.pop(event.chat_id, None)
             elif isinstance(event.message_id, int):
                 self._room_agent_reply_anchor[event.chat_id] = (
@@ -6252,6 +6288,10 @@ class BGOSAdapter(BasePlatformAdapter):
                 event.chat_id, event.message_id,
             )
             return
+
+        if not from_room_agent:
+            # A person's (or a peer's) turn starts with this row.
+            self._person_turn_unanswered.add(event.chat_id)
 
         # Track the most-recent inbound user_id per chat. The PATCH
         # /api/v1/messages/{id} endpoint requires `userId` (backend's
@@ -6306,6 +6346,8 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self.handle_message(event)
                 return
             self._stamp_source_profile(source, route)
+            if not from_room_agent:
+                self._note_person_turn_source(event.chat_id, source)
             msg_type = (
                 _GatewayMessageType.COMMAND  # type: ignore[attr-defined]
                 if event.message_type == "slash_command"
@@ -6505,6 +6547,8 @@ class BGOSAdapter(BasePlatformAdapter):
                     await self.handle_message(event)
                     return
                 self._stamp_source_profile(source, event.agent_route)
+                # A batch holds a person's words only (a tag never batches).
+                self._note_person_turn_source(event.chat_id, source)
                 user_id = str(event.user_id) if event.user_id else None
                 is_backfill = user_id is None
                 gateway_event = _GatewayMessageEvent(

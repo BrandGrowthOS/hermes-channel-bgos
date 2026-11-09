@@ -97,12 +97,15 @@ def _poll_row(chat_kind: str, *, message_id: int, **marker: Any) -> dict:
     return row
 
 
-async def _deliver(adapter: BGOSAdapter, lane: str, chat_kind: str, **marker: Any) -> None:
+async def _deliver(
+    adapter: BGOSAdapter, lane: str, chat_kind: str, *, message_id: int = 901,
+    **marker: Any,
+) -> None:
     """Hand one row to the adapter on the given lane, the way BGOS would."""
     if lane == "push":
-        await adapter._handle_inbound(_push_frame(chat_kind, message_id=901, **marker))
+        await adapter._handle_inbound(_push_frame(chat_kind, message_id=message_id, **marker))
     else:
-        row = _poll_row(chat_kind, message_id=901, **marker)
+        row = _poll_row(chat_kind, message_id=message_id, **marker)
 
         async def fetch_inbound_since(since: int) -> dict:
             return {"messages": [row]}
@@ -182,3 +185,70 @@ async def test_a_persons_message_wakes_the_agent_unmarked(lane, chat_kind):
     assert len(got) == 1
     assert getattr(got[0], "sender_type", None) is None
     assert got[0].text == "@Echo hi"
+
+
+@pytest.mark.parametrize("lane", LANES)
+@pytest.mark.parametrize("text", ["", None], ids=["empty", "null"])
+async def test_another_agents_empty_message_does_not_wake_it(lane, text):
+    # The poll can hand over an agent's row before it has any text (the
+    # author creates it, then edits it). Nothing to read: no wake, and the
+    # adapter's framing line alone must not turn it into a message.
+    adapter = _adapter()
+    got = _capture(adapter)
+    await _deliver(adapter, lane, "room", text=text, **_room_agent(OTHER_ASSISTANT_ID))
+    assert got == []
+
+
+async def _posts(adapter: BGOSAdapter, monkeypatch) -> list[dict]:
+    posts: list[dict] = []
+
+    async def fake_post(**kw):
+        posts.append(kw)
+        return {"id": 1000 + len(posts)}
+
+    monkeypatch.setattr(adapter._api, "post_message", fake_post)
+    return posts
+
+
+async def test_a_tag_during_a_persons_unanswered_turn_is_not_anchored(monkeypatch):
+    # A person asked first and the agent is still working on it when the tag
+    # arrives. The next reply answers the PERSON: it must not quote the tag.
+    adapter = _adapter()
+    _capture(adapter)
+    posts = await _posts(adapter, monkeypatch)
+    await _deliver(
+        adapter, "push", "room", message_id=900, text="@Echo what is the build status?",
+    )
+    await _deliver(adapter, "push", "room", **_room_agent(OTHER_ASSISTANT_ID))
+    await adapter.send(chat_id=CHAT_ID, content="The build is green.")
+    assert posts[-1]["reply_to_id"] is None
+
+
+async def test_a_tag_after_the_persons_turn_was_answered_is_anchored(monkeypatch):
+    adapter = _adapter()
+    _capture(adapter)
+    posts = await _posts(adapter, monkeypatch)
+    await _deliver(
+        adapter, "push", "room", message_id=900, text="@Echo what is the build status?",
+    )
+    await adapter.send(chat_id=CHAT_ID, content="The build is green.")
+    await _deliver(adapter, "push", "room", **_room_agent(OTHER_ASSISTANT_ID))
+    await adapter.send(chat_id=CHAT_ID, content="On it.")
+    assert posts[-1]["reply_to_id"] == 901
+
+
+async def test_a_live_gateway_session_keeps_a_tag_unanchored_after_the_first_bubble(monkeypatch):
+    # With the gateway's session tracking, a person's turn that is still
+    # running (after its first bubble) also keeps the tag unanchored.
+    adapter = _adapter()
+    _capture(adapter)
+    posts = await _posts(adapter, monkeypatch)
+    adapter._active_sessions = {"bgos-session-300": object()}  # type: ignore[attr-defined]
+    await _deliver(
+        adapter, "push", "room", message_id=900, text="@Echo what is the build status?",
+    )
+    adapter._person_turn_session_key[CHAT_ID] = "bgos-session-300"
+    await adapter.send(chat_id=CHAT_ID, content="Checking.")
+    await _deliver(adapter, "push", "room", **_room_agent(OTHER_ASSISTANT_ID))
+    await adapter.send(chat_id=CHAT_ID, content="The build is green.")
+    assert posts[-1]["reply_to_id"] is None
