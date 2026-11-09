@@ -1681,11 +1681,14 @@ class BGOSAdapter(BasePlatformAdapter):
             tuple[int, int | None], tuple[int, float]
         ] = {}
         # A person's turn still running for an agent in a chat: a tag for
-        # that agent arriving then is not anchored, or the answer to the
-        # person would quote it. (chat, assistant) pairs whose person row was
-        # handed over with no real bubble posted since, and the gateway
-        # session key of the latest person turn per pair (when the gateway
-        # exposes one; it covers a turn after its first bubble).
+        # that agent arriving then is held behind that turn (_hand_over) and
+        # anchored when it is released, so the answer to the person never
+        # quotes it. Without the gateway's session tracking a tag goes in at
+        # once and is not anchored. This set is the (chat, assistant) pairs
+        # whose person row was handed over with no real bubble posted since;
+        # the dict below is the gateway session key of the latest person turn
+        # per pair (when the gateway exposes one; it covers a turn after its
+        # first bubble).
         self._person_turn_unanswered: set[tuple[int, int | None]] = set()
         self._person_turn_session_key: dict[tuple[int, int | None], str] = {}
         # Another agent's tags held while the tagged agent's gateway session
@@ -6607,8 +6610,10 @@ class BGOSAdapter(BasePlatformAdapter):
                 await self._flush_text_batch(batch_key, 0)
             # The gateway answers in a background task, so the answer to
             # those flushed words is posted after this tag: with a person's
-            # words pending the tag is not anchored at all, since losing one
-            # quote is better than quoting it on the person's answer.
+            # words pending no anchor is chosen here, so that answer never
+            # quotes the tag. A tag held behind that turn is anchored when it
+            # is released; one that goes in at once (no gateway session
+            # tracking) keeps no anchor.
             # The same holds while a person's turn is still running: its
             # answer is the next real bubble (review). The anchor itself is
             # set where the tag goes in (_hand_over): a tag held behind a

@@ -35,8 +35,8 @@ pytestmark = pytest.mark.asyncio
 
 SERVER_FRAMED = (
     "You are in the group Launch.\n"
-    "Ares, an agent seated here and not a person, wrote the message below.\n"
-    "@Echo can you check the build?"
+    "Testbot, an agent seated here and not a person, wrote the message below.\n"
+    "@Mockbot can you check the build?"
 )
 
 
@@ -63,7 +63,7 @@ def _agent_row(**over: Any) -> dict:
         "chatId": 300,
         "messageId": 901,
         "userId": "owner_1",
-        "text": "@Echo can you check the build?",
+        "text": "@Mockbot can you check the build?",
         "files": [],
         "messageType": "standard",
         "senderType": "room_agent",
@@ -113,7 +113,7 @@ async def test_the_adapter_says_another_agent_wrote_it_when_the_framing_is_missi
     await adapter._handle_inbound(_agent_row())
     line = room_agent_provenance_line(42)
     assert got[0].text.startswith(line)
-    assert "@Echo can you check the build?" in got[0].text
+    assert "@Mockbot can you check the build?" in got[0].text
     assert "not a person" in line
     assert "not your owner's instruction" in line
 

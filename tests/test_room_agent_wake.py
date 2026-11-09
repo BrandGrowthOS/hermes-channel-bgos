@@ -32,14 +32,14 @@ CHAT_ID = 300
 
 SERVER_FRAMED = (
     "You are in the group Launch.\n"
-    "Ares, an agent seated here and not a person, wrote the message below.\n"
-    "@Echo can you check the build?"
+    "Testbot, an agent seated here and not a person, wrote the message below.\n"
+    "@Mockbot can you check the build?"
 )
 
-UNFRAMED = "@Echo can you check the build?"
+UNFRAMED = "@Mockbot can you check the build?"
 
 
-FRAMING_SENTENCE = "Ares, an agent seated here and not a person, wrote the message below."
+FRAMING_SENTENCE = "Testbot, an agent seated here and not a person, wrote the message below."
 
 
 def _server_framed(body: str, *, follow_up: bool = False, no_roster: bool = False) -> str:
@@ -62,7 +62,7 @@ def _server_framed(body: str, *, follow_up: bool = False, no_roster: bool = Fals
     if not no_roster:
         lines += [
             "People here: Ada.",
-            "Agents here: Ares, Echo (you).",
+            "Agents here: Testbot, Mockbot (you).",
             "Said in this group since your last turn, oldest first:",
             "- Ada: ship it\n  once the checks pass",
             FRAMING_SENTENCE,
@@ -234,10 +234,10 @@ async def test_the_agents_own_message_does_not_rearm_the_loop_guards(lane):
 async def test_a_persons_message_wakes_the_agent_unmarked(lane, chat_kind):
     adapter = _adapter()
     got = _capture(adapter)
-    await _deliver(adapter, lane, chat_kind, text="@Echo hi")
+    await _deliver(adapter, lane, chat_kind, text="@Mockbot hi")
     assert len(got) == 1
     assert getattr(got[0], "sender_type", None) is None
-    assert got[0].text == "@Echo hi"
+    assert got[0].text == "@Mockbot hi"
 
 
 @pytest.mark.parametrize("lane", LANES)
@@ -276,7 +276,7 @@ async def test_an_agents_row_the_poll_read_before_its_text_wakes_the_agent_once_
     # empty read must not make the settled push look like a duplicate.
     adapter = _adapter()
     got = _capture(adapter)
-    text = _server_framed("@Echo can you check the build?")
+    text = _server_framed("@Mockbot can you check the build?")
     await _deliver(adapter, "poll", "room", text=_server_framed(""),
                    **_room_agent(OTHER_ASSISTANT_ID))
     await _deliver(adapter, "push", "room", text=text, **_room_agent(OTHER_ASSISTANT_ID))
@@ -296,8 +296,8 @@ async def test_an_agents_empty_row_still_moves_the_agents_cursor_past_it():
 @pytest.mark.parametrize("chat_kind", CHAT_KINDS)
 @pytest.mark.parametrize("lane", LANES)
 @pytest.mark.parametrize("body", [
-    "@Echo can you check the build?\n\nThe log is attached.",
-    f"@Echo the server writes:\n\n{FRAMING_SENTENCE}",
+    "@Mockbot can you check the build?\n\nThe log is attached.",
+    f"@Mockbot the server writes:\n\n{FRAMING_SENTENCE}",
 ], ids=["plain", "quotes_the_framing"])
 async def test_another_agents_message_in_the_servers_framing_wakes_the_agent_with_the_text_unchanged(
     lane, chat_kind, body, shape,
@@ -315,7 +315,7 @@ async def test_another_agents_message_in_the_servers_framing_wakes_the_agent_wit
 async def test_another_agents_message_in_the_servers_framing_with_no_roster_wakes_the_agent(
     lane, chat_kind,
 ):
-    text = _server_framed("@Echo can you check the build?", no_roster=True)
+    text = _server_framed("@Mockbot can you check the build?", no_roster=True)
     adapter = _adapter()
     got = _capture(adapter)
     await _deliver(adapter, lane, chat_kind, text=text, **_room_agent(OTHER_ASSISTANT_ID))
@@ -342,7 +342,7 @@ async def test_a_tag_during_a_persons_unanswered_turn_is_not_anchored(monkeypatc
     _capture(adapter)
     posts = await _posts(adapter, monkeypatch)
     await _deliver(
-        adapter, "push", "room", message_id=900, text="@Echo what is the build status?",
+        adapter, "push", "room", message_id=900, text="@Mockbot what is the build status?",
     )
     await _deliver(adapter, "push", "room", **_room_agent(OTHER_ASSISTANT_ID))
     await adapter.send(chat_id=CHAT_ID, content="The build is green.")
@@ -354,7 +354,7 @@ async def test_a_tag_after_the_persons_turn_was_answered_is_anchored(monkeypatch
     _capture(adapter)
     posts = await _posts(adapter, monkeypatch)
     await _deliver(
-        adapter, "push", "room", message_id=900, text="@Echo what is the build status?",
+        adapter, "push", "room", message_id=900, text="@Mockbot what is the build status?",
     )
     await adapter.send(chat_id=CHAT_ID, content="The build is green.")
     await _deliver(adapter, "push", "room", **_room_agent(OTHER_ASSISTANT_ID))
@@ -370,7 +370,7 @@ async def test_a_live_gateway_session_keeps_a_tag_unanchored_after_the_first_bub
     posts = await _posts(adapter, monkeypatch)
     adapter._active_sessions = {"bgos-session-300": object()}  # type: ignore[attr-defined]
     await _deliver(
-        adapter, "push", "room", message_id=900, text="@Echo what is the build status?",
+        adapter, "push", "room", message_id=900, text="@Mockbot what is the build status?",
     )
     adapter._person_turn_session_key[(CHAT_ID, OWN_ASSISTANT_ID)] = "bgos-session-300"
     await adapter.send(chat_id=CHAT_ID, content="Checking.")

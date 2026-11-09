@@ -215,7 +215,7 @@ def _paused(monkeypatch, notice: str | None) -> None:
 def _tag(lane: str, chat_kind: str = "room", message_id: int = 901) -> dict:
     return _row(
         lane, message_id=message_id, to=AGENT_A, chat_kind=chat_kind,
-        text="@Achilles can you check the build?", tagged_by=TAGGER,
+        text="@Testbot can you check the build?", tagged_by=TAGGER,
     )
 
 
@@ -321,7 +321,7 @@ async def test_a_held_tag_waits_for_a_persons_words_still_in_the_batch(monkeypat
     got = _gateway_takes(adapter, sessions)
     await _deliver(adapter, "push", _tag("push", message_id=901))
     await adapter._handle_inbound(_row(
-        "push", message_id=904, to=AGENT_A, text="@Achilles also check the docs",
+        "push", message_id=904, to=AGENT_A, text="@Testbot also check the docs",
     ))
     del sessions[SESSION]
     await asyncio.sleep(0.1)
@@ -344,13 +344,13 @@ async def test_a_held_tag_is_answered_with_its_quote_once_its_turn_runs(monkeypa
     posts = _backend(adapter, monkeypatch)
     _gateway_takes(adapter, sessions)
     await _deliver(adapter, "push", _row(
-        "push", message_id=900, to=AGENT_A, text="@Achilles what is the status?",
+        "push", message_id=900, to=AGENT_A, text="@Testbot what is the status?",
     ))
     await _deliver(adapter, "push", _tag("push", message_id=901))
-    await adapter.send(chat_id=CHAT_ID, content="Achilles: all green.")
+    await adapter.send(chat_id=CHAT_ID, content="Testbot: all green.")
     del sessions[SESSION]  # the person's turn ends
     await asyncio.sleep(0.1)
-    await adapter.send(chat_id=CHAT_ID, content="Achilles: the build passed.")
+    await adapter.send(chat_id=CHAT_ID, content="Testbot: the build passed.")
     person_answer, tag_answer = posts
     assert person_answer["reply_to_id"] != 901
     assert tag_answer["reply_to_id"] == 901
@@ -370,7 +370,7 @@ async def test_a_held_tag_waits_while_the_gateway_is_taking_a_persons_message(mo
     got = _gateway_takes(adapter, sessions, gate=0.1)
     await _deliver(adapter, "push", _tag("push", message_id=901))
     await adapter._handle_inbound(_row(
-        "push", message_id=904, to=AGENT_A, text="@Achilles also check the docs",
+        "push", message_id=904, to=AGENT_A, text="@Testbot also check the docs",
     ))
     del sessions[SESSION]
     await asyncio.sleep(0.5)
@@ -442,17 +442,17 @@ async def test_a_tag_held_behind_another_tags_turn_leaves_that_turns_quote(perso
     _gateway_takes(adapter, sessions)
     if person_first:
         await _deliver(adapter, "push", _row(
-            "push", message_id=900, to=AGENT_A, text="@Achilles what is the status?",
+            "push", message_id=900, to=AGENT_A, text="@Testbot what is the status?",
         ))
-        await adapter.send(chat_id=CHAT_ID, content="Achilles: all green.")
+        await adapter.send(chat_id=CHAT_ID, content="Testbot: all green.")
         del sessions[SESSION]
         await asyncio.sleep(0.05)
     await _deliver(adapter, "push", _tag("push", message_id=901))
     await _deliver(adapter, "push", _tag("push", message_id=903))
-    await adapter.send(chat_id=CHAT_ID, content="Achilles: the build passed.")
+    await adapter.send(chat_id=CHAT_ID, content="Testbot: the build passed.")
     del sessions[SESSION]
     await asyncio.sleep(0.1)
-    await adapter.send(chat_id=CHAT_ID, content="Achilles: the docs are fine.")
+    await adapter.send(chat_id=CHAT_ID, content="Testbot: the docs are fine.")
     assert [p["reply_to_id"] for p in posts[-2:]] == [901, 903]
     await adapter.disconnect()
 
@@ -564,7 +564,7 @@ async def test_a_persons_message_reaches_the_gateway_while_hermes_is_paused(monk
     _paused(monkeypatch, "Hermes is paused.")
     got = _capture(adapter)
     await _deliver(adapter, "push", _row(
-        "push", message_id=902, to=AGENT_A, text="@Achilles what is the status?",
+        "push", message_id=902, to=AGENT_A, text="@Testbot what is the status?",
     ))
     assert len(got) == 1
     assert got[0].internal is False
@@ -576,7 +576,7 @@ async def test_a_persons_message_reaches_the_gateway_as_the_persons(lane, monkey
     _gateway_wrap(adapter, monkeypatch)
     got = _capture(adapter)
     await _deliver(adapter, lane, _row(
-        lane, message_id=902, to=AGENT_A, text="@Achilles what is the status?",
+        lane, message_id=902, to=AGENT_A, text="@Testbot what is the status?",
     ))
     assert len(got) == 1
     assert got[0].internal is False
@@ -594,17 +594,17 @@ async def test_each_agents_reply_posts_as_that_agent(chat_kind, wrap, monkeypatc
     turns = _Turns(adapter)
     posts = _backend(adapter, monkeypatch, chat_kind)
     await _deliver(adapter, "push", _row(
-        "push", message_id=900, to=AGENT_A, chat_kind=chat_kind, text="@Achilles status?",
+        "push", message_id=900, to=AGENT_A, chat_kind=chat_kind, text="@Testbot status?",
     ))
     await _deliver(adapter, "push", _row(
-        "push", message_id=901, to=AGENT_B, chat_kind=chat_kind, text="@Shadow status?",
+        "push", message_id=901, to=AGENT_B, chat_kind=chat_kind, text="@Probebot status?",
     ))
     # Agent B's row arrived last; agent A answers first.
-    await turns.reply(AGENT_A, "Achilles: green.")
-    await turns.reply(AGENT_B, "Shadow: green.")
+    await turns.reply(AGENT_A, "Testbot: green.")
+    await turns.reply(AGENT_B, "Probebot: green.")
     assert [(p["assistant_id"], p["text"]) for p in posts] == [
-        (AGENT_A, "Achilles: green."),
-        (AGENT_B, "Shadow: green."),
+        (AGENT_A, "Testbot: green."),
+        (AGENT_B, "Probebot: green."),
     ]
 
 
@@ -615,14 +615,14 @@ async def test_a_tag_is_answered_by_the_agent_it_tagged(monkeypatch):
     # Another owner's agent tags A; meanwhile a person asks B, and B
     # answers first.
     await _deliver(adapter, "push", _row(
-        "push", message_id=950, to=AGENT_A, text="@Achilles can you check the build?",
+        "push", message_id=950, to=AGENT_A, text="@Testbot can you check the build?",
         tagged_by=TAGGER,
     ))
     await _deliver(adapter, "push", _row(
-        "push", message_id=951, to=AGENT_B, text="@Shadow what time is it?",
+        "push", message_id=951, to=AGENT_B, text="@Probebot what time is it?",
     ))
-    await turns.reply(AGENT_B, "Shadow: noon.")
-    await turns.reply(AGENT_A, "Achilles: the build is green.")
+    await turns.reply(AGENT_B, "Probebot: noon.")
+    await turns.reply(AGENT_A, "Testbot: the build is green.")
     shadow, achilles = posts
     assert shadow["assistant_id"] == AGENT_B
     assert shadow["reply_to_id"] != 950, "B's reply must not quote a tag addressed to A"
@@ -636,14 +636,14 @@ async def test_a_persons_running_turn_with_one_agent_does_not_hold_back_the_othe
     posts = _backend(adapter, monkeypatch)
     # A person asked B, and B is still working on it when A is tagged.
     await _deliver(adapter, "push", _row(
-        "push", message_id=960, to=AGENT_B, text="@Shadow summarise the thread",
+        "push", message_id=960, to=AGENT_B, text="@Probebot summarise the thread",
     ))
     await _deliver(adapter, "push", _row(
-        "push", message_id=961, to=AGENT_A, text="@Achilles can you check the build?",
+        "push", message_id=961, to=AGENT_A, text="@Testbot can you check the build?",
         tagged_by=TAGGER,
     ))
-    await turns.reply(AGENT_A, "Achilles: on it.")
-    await turns.reply(AGENT_B, "Shadow: here is the summary.")
+    await turns.reply(AGENT_A, "Testbot: on it.")
+    await turns.reply(AGENT_B, "Probebot: here is the summary.")
     achilles, shadow = posts
     assert achilles["reply_to_id"] == 961
     assert shadow["reply_to_id"] != 961
@@ -672,16 +672,16 @@ async def test_a_second_profiles_running_turn_keeps_its_tag_unanchored_after_its
     _capture(adapter)
     posts = _backend(adapter, monkeypatch)
     await _deliver(adapter, "push", _row(
-        "push", message_id=970, to=AGENT_B, text="@Shadow what is the build status?",
+        "push", message_id=970, to=AGENT_B, text="@Probebot what is the build status?",
     ))
     # The gateway runs B's turn in B's profile, and B posts a first bubble.
     adapter._active_sessions["agent:shadow:bgos:group:300"] = object()  # type: ignore[attr-defined]
-    await adapter.send(chat_id=CHAT_ID, content="Shadow: checking.")
+    await adapter.send(chat_id=CHAT_ID, content="Probebot: checking.")
     await _deliver(adapter, "push", _row(
-        "push", message_id=971, to=AGENT_B, text="@Shadow can you check the build?",
+        "push", message_id=971, to=AGENT_B, text="@Probebot can you check the build?",
         tagged_by=TAGGER,
     ))
-    await adapter.send(chat_id=CHAT_ID, content="Shadow: the build is green.")
+    await adapter.send(chat_id=CHAT_ID, content="Probebot: the build is green.")
     assert posts[-1]["assistant_id"] == AGENT_B
     assert posts[-1]["reply_to_id"] is None, "the person's answer must not quote the tag"
     await adapter.disconnect()
@@ -731,10 +731,10 @@ async def test_a_turn_the_gateway_starts_for_an_agent_posts_as_that_agent(monkey
     _gateway_wrap(adapter, monkeypatch)
     _profiles(monkeypatch)
     posts = _backend(adapter, monkeypatch)
-    _gateway_turns(adapter, monkeypatch, "Shadow: the nightly check is done.")
+    _gateway_turns(adapter, monkeypatch, "Probebot: the nightly check is done.")
     # A's row arrived last, so A is the chat's latest addressed agent.
     await _deliver(adapter, "push", _row(
-        "push", message_id=980, to=AGENT_A, text="@Achilles hi",
+        "push", message_id=980, to=AGENT_A, text="@Testbot hi",
     ))
     posts.clear()
     await adapter.handle_message(_wake("shadow"))
@@ -749,9 +749,9 @@ async def test_a_turn_started_from_inside_another_agents_turn_posts_as_its_own_a
     _gateway_wrap(adapter, monkeypatch)
     _profiles(monkeypatch)
     posts = _backend(adapter, monkeypatch)
-    _gateway_turns(adapter, monkeypatch, "Shadow: done.")
+    _gateway_turns(adapter, monkeypatch, "Probebot: done.")
     await _deliver(adapter, "push", _row(
-        "push", message_id=981, to=AGENT_B, text="@Shadow hi",
+        "push", message_id=981, to=AGENT_B, text="@Probebot hi",
     ))
     posts.clear()
     # A's turn starts B's (a tool of A's wakes B's session): the context it
@@ -773,9 +773,9 @@ async def test_a_turn_whose_agent_cannot_be_told_keeps_the_speaker_it_was_starte
     _gateway_wrap(adapter, monkeypatch)
     monkeypatch.setattr(bgos_adapter_module, "profile_for_route", lambda route, **_: None)
     posts = _backend(adapter, monkeypatch)
-    _gateway_turns(adapter, monkeypatch, "Shadow: the board is updated.")
+    _gateway_turns(adapter, monkeypatch, "Probebot: the board is updated.")
     await _deliver(adapter, "push", _row(
-        "push", message_id=982, to=AGENT_A, text="@Achilles hi",
+        "push", message_id=982, to=AGENT_A, text="@Testbot hi",
     ))
     posts.clear()
     with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
@@ -796,7 +796,7 @@ async def test_an_agents_status_line_is_set_on_that_agent(monkeypatch):
 
     monkeypatch.setattr(adapter._api, "patch_status", patch_status)
     await _deliver(adapter, "push", _row(
-        "push", message_id=983, to=AGENT_B, text="@Shadow review the PR",
+        "push", message_id=983, to=AGENT_B, text="@Probebot review the PR",
     ))
     await turns.reply(AGENT_B, "STATUS: reviewing the PR\nShadow: on it.")
     assert [s["assistant_id"] for s in statuses] == [AGENT_B]
@@ -822,11 +822,11 @@ async def test_a_tap_on_an_agents_card_is_answered_by_that_agent(monkeypatch):
     await adapter._handle_inbound_click(_tap(on_card_of=AGENT_A, message_id=2500))
     # B's row arrives while A's turn for the tap is still running.
     await _deliver(adapter, "push", _row(
-        "push", message_id=980, to=AGENT_B, text="@Shadow status?",
+        "push", message_id=980, to=AGENT_B, text="@Probebot status?",
     ))
-    await turns.reply(AGENT_A, "Achilles: shipping.")
+    await turns.reply(AGENT_A, "Testbot: shipping.")
     assert (posts[-1]["assistant_id"], posts[-1]["text"]) == (
-        AGENT_A, "Achilles: shipping.",
+        AGENT_A, "Testbot: shipping.",
     )
 
 
@@ -835,11 +835,11 @@ async def test_a_tap_on_one_agents_card_does_not_drop_the_others_tag(monkeypatch
     turns = _Turns(adapter)
     posts = _backend(adapter, monkeypatch)
     await _deliver(adapter, "push", _row(
-        "push", message_id=990, to=AGENT_A, text="@Achilles can you check the build?",
+        "push", message_id=990, to=AGENT_A, text="@Testbot can you check the build?",
         tagged_by=TAGGER,
     ))
     await adapter._handle_inbound_click(_tap(on_card_of=AGENT_B, message_id=2600))
-    await turns.reply(AGENT_A, "Achilles: the build is green.")
+    await turns.reply(AGENT_A, "Testbot: the build is green.")
     achilles = [p for p in posts if p["assistant_id"] == AGENT_A]
     assert achilles[-1]["reply_to_id"] == 990, "a tap on B's card is not an answer to A's tag"
 
@@ -910,17 +910,17 @@ async def test_each_agents_streamed_edit_lands_while_the_other_streams(monkeypat
     await _both_agents_asked(adapter)
     adapter._edit_throttle_seconds = 0.2
     with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
-        await adapter.edit_message(CHAT_ID, 1001, "Achilles: checking")
+        await adapter.edit_message(CHAT_ID, 1001, "Testbot: checking")
     with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
-        await adapter.edit_message(CHAT_ID, 1002, "Shadow: the build is green.")
+        await adapter.edit_message(CHAT_ID, 1002, "Probebot: the build is green.")
     with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
-        await adapter.edit_message(CHAT_ID, 1001, "Achilles: the tests pass.")
+        await adapter.edit_message(CHAT_ID, 1001, "Testbot: the tests pass.")
     await asyncio.sleep(0.4)
     last_text = {mid: kw.get("text") for mid, kw in wire.patches}
-    assert last_text.get(1002) == "Shadow: the build is green.", (
+    assert last_text.get(1002) == "Probebot: the build is green.", (
         "B's edit must not be dropped for A's"
     )
-    assert last_text.get(1001) == "Achilles: the tests pass."
+    assert last_text.get(1001) == "Testbot: the tests pass."
 
 
 async def test_each_agents_tools_get_a_card_of_their_own(monkeypatch):
@@ -957,11 +957,11 @@ async def test_another_agents_reply_does_not_cancel_an_agents_quiet_failsafe(mon
         await adapter.send(chat_id=CHAT_ID, content=tool_json)
     # B answers in prose meanwhile.
     with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
-        await adapter.send(chat_id=CHAT_ID, content="Shadow: all good.")
+        await adapter.send(chat_id=CHAT_ID, content="Probebot: all good.")
     await asyncio.sleep(0.3)
     finals = [
         p for p in wire.posts
-        if p.get("message_type") != "tool_progress" and p.get("text") != "Shadow: all good."
+        if p.get("message_type") != "tool_progress" and p.get("text") != "Probebot: all good."
     ]
     assert finals, "A's held output must still be posted when A sends no prose"
 
@@ -977,10 +977,10 @@ async def test_an_agents_peer_call_anchors_on_that_agents_own_last_message(monke
         lambda chat_key, requests, errors, anchor: anchors.append(anchor),
     )
     with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
-        await adapter.send(chat_id=CHAT_ID, content="Shadow: I will ask the reviewer.")
+        await adapter.send(chat_id=CHAT_ID, content="Probebot: I will ask the reviewer.")
     shadow_message = wire.posts[-1]
     with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
-        await adapter.send(chat_id=CHAT_ID, content="Achilles: noted.")
+        await adapter.send(chat_id=CHAT_ID, content="Testbot: noted.")
     # B's marker-only send: its side thread hangs off B's own last message.
     with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
         await adapter.send(
