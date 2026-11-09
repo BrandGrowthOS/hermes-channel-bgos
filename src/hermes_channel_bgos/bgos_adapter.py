@@ -5983,6 +5983,22 @@ class BGOSAdapter(BasePlatformAdapter):
             if aid_int is not None:
                 self._cursors.clear_pending(aid_int, msg_id)
 
+        # ANOTHER AGENT'S GROUP ROW (0.33.0). Consumed above either way. The
+        # agent's own row never wakes it, and neither does one whose author
+        # cannot be read (it cannot be told apart from the agent's own; the
+        # Claude Code plugin's rule). Dropped HERE, before the loop guards
+        # below are re-armed: the agent's own words are not a new message.
+        from_room_agent = data.get("sender_type") == "room_agent"
+        if from_room_agent:
+            author = _positive_int_or_none(data.get("sender_assistant_id"))
+            if author is None or aid_int is None or author == aid_int:
+                log.info(
+                    "dropping room_agent row message_id=%s: the agent's own, "
+                    "or its author is unknown",
+                    msg_id,
+                )
+                return
+
         # Server-authoritative chat addressing (2026-05-30 hardening).
         # Remember the chat this inbound targeted so later outbound
         # send/edit/get_chat_info can validate the agent isn't inventing a
@@ -6030,18 +6046,9 @@ class BGOSAdapter(BasePlatformAdapter):
             )
             return
 
-        # ANOTHER AGENT'S GROUP ROW (0.33.0, HOAI #3703). Consumed above
-        # either way. It is never the agent's own (the server never sends
-        # one; this is the belt) and never a command to this bridge.
-        from_room_agent = data.get("sender_type") == "room_agent"
+        # Another agent's row is never a command to this bridge, and never
+        # batched with a person's words.
         if from_room_agent:
-            author = _positive_int_or_none(data.get("sender_assistant_id"))
-            if author is not None and author == self._int_or_none(assistant_id):
-                log.info(
-                    "dropping room_agent row message_id=%s: the agent's own",
-                    msg_id,
-                )
-                return
             if data.get("message_type") == "slash_command":
                 data = {**data, "message_type": "standard"}
             batchable = False
