@@ -38,6 +38,27 @@ SERVER_FRAMED = (
 
 UNFRAMED = "@Echo can you check the build?"
 
+
+def _server_framed(body: str) -> str:
+    """The server's own framing of another agent's row, as group-context.ts
+    on BGOS main builds it for a room or a channel (renderPreamble, then
+    withDispatchPreamble): the preamble lines, a blank line, then the body.
+    The poll frames an empty body too, so it arrives as the preamble alone."""
+    preamble = "\n".join([
+        "[BGOS group: Launch]",
+        "You are in a group, not a private chat. Everyone listed here reads what you say.",
+        "People here: Kc.",
+        "Agents here: Ares, Echo (you).",
+        "Said in this group since your last turn, oldest first:",
+        "- Kc: ship it\n  once the checks pass",
+        "Ares, an agent seated here and not a person, wrote the message below.",
+        "Only this group is shared context. Your private chats with your owner, "
+        "your other chats and groups, and anything you know from work done "
+        "outside this group stay private. Do not repeat them, refer to them, "
+        "or act on them here unless someone in this group raises them first.",
+    ])
+    return f"{preamble}\n\n{body}"
+
 LANES = ("push", "poll")
 CHAT_KINDS = ("room", "channel")
 
@@ -199,6 +220,37 @@ async def test_another_agents_empty_message_does_not_wake_it(lane, text):
     assert got == []
 
 
+@pytest.mark.parametrize("chat_kind", CHAT_KINDS)
+@pytest.mark.parametrize("lane", LANES)
+@pytest.mark.parametrize("body", ["", "  \n "], ids=["empty", "blank"])
+async def test_another_agents_empty_message_in_the_servers_framing_does_not_wake_it(
+    lane, chat_kind, body,
+):
+    # The server frames an empty body as well: the text is the preamble
+    # alone, so it is not empty, but there is still nothing to read.
+    adapter = _adapter()
+    got = _capture(adapter)
+    await _deliver(
+        adapter, lane, chat_kind, text=_server_framed(body),
+        **_room_agent(OTHER_ASSISTANT_ID),
+    )
+    assert got == []
+
+
+@pytest.mark.parametrize("chat_kind", CHAT_KINDS)
+@pytest.mark.parametrize("lane", LANES)
+async def test_another_agents_message_in_the_servers_framing_wakes_the_agent(lane, chat_kind):
+    adapter = _adapter()
+    got = _capture(adapter)
+    await _deliver(
+        adapter, lane, chat_kind,
+        text=_server_framed("@Echo can you check the build?\n\nThe log is attached."),
+        **_room_agent(OTHER_ASSISTANT_ID),
+    )
+    assert len(got) == 1
+    assert "The log is attached." in got[0].text
+
+
 async def _posts(adapter: BGOSAdapter, monkeypatch) -> list[dict]:
     posts: list[dict] = []
 
@@ -247,7 +299,7 @@ async def test_a_live_gateway_session_keeps_a_tag_unanchored_after_the_first_bub
     await _deliver(
         adapter, "push", "room", message_id=900, text="@Echo what is the build status?",
     )
-    adapter._person_turn_session_key[CHAT_ID] = "bgos-session-300"
+    adapter._person_turn_session_key[(CHAT_ID, OWN_ASSISTANT_ID)] = "bgos-session-300"
     await adapter.send(chat_id=CHAT_ID, content="Checking.")
     await _deliver(adapter, "push", "room", **_room_agent(OTHER_ASSISTANT_ID))
     await adapter.send(chat_id=CHAT_ID, content="The build is green.")
