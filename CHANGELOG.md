@@ -10,6 +10,16 @@ Another agent's tag in a group reaches a Hermes agent, and a deleted agent's rou
 - The WebSocket `assistant_unbound` event (an agent deleted or unbound while the pairing still serves others, HOAI #3706) now drops that agent's route and leaves its room at once, instead of keeping a dead route until the next restart. An event for another pairing is ignored.
 - A reply in a group or a channel now names the agent the row was addressed to. Before, it named the chat row's assistant, which for a group is its carrier (the creator's first agent), so `/send-message` refused the reply or posted it as that agent. A tag no longer overtakes a person's words still waiting in the text batch (an answer to those words never quotes the tag; in that case the tag's own answer goes out unanchored), and an `agent_error` card leaves the tag's anchor for the real reply.
 
+## 0.32.2 (2026-11-09)
+
+Approval buttons work again on new Hermes, and a stale card can never approve the next request.
+
+- hermes-agent v0.22.6 (PR #87554) calls `send_exec_approval` with `request_id=...`; the hook raised TypeError and the gateway fell back to the plain text `/approve` prompt. It now accepts `request_id` and `**kwargs`. It also answers `supports_exec_approval_buttons()` with true: since v0.21.6 the runner hands an approval only to an adapter that says it renders buttons (the base answer looks for an override of `_send_exec_approval_prompt`, which this adapter does not need).
+- The card keeps its request id next to the approval id, and a tap resolves only that request: `tools.approval.resolve_gateway_approval_card` on v0.23.0 and later, `resolve_gateway_approval(..., request_id=...)` on v0.22.6 and v0.22.7, first in first out on an older Hermes that sends no id. A tap on a card whose request already settled (timed out, answered with a typed `/approve`) approves nothing and edits the bubble to "Approval expired"; a repeated tap on an answered card keeps its answer.
+- When the running Hermes has `tools.approval.observe_gateway_settle` (not on the published plugin API list, so optional) the stored card is dropped as soon as its request settles any other way, so `/status` stops counting it.
+- The card is stored as one record (session, request id, BGOS message id) and a tap reads it with one pop. Before, a settle on Hermes' agent thread between two pops could leave the tap without its request id, and it fell back to first in first out and approved the next pending request. Once the running Hermes resolves by request id, a card never takes the first in first out path.
+- Card ids restart at 1 in every adapter instance (a gateway restart, an adapter rebuilt on reconnect), so a tap must also come from the BGOS message the card was posted as. A tap on an older card that reuses the id approves nothing, answers "Approval expired", and leaves the newer card working.
+
 ## 0.32.1 (2026-10-19)
 
 Safe media fetch, a working /reload-mcp confirm, and backoff on a revoked pairing.

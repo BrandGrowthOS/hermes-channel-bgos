@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import hermes_channel_bgos.bgos_adapter as adapter_mod
-from hermes_channel_bgos.bgos_adapter import BGOSAdapter
+from hermes_channel_bgos.bgos_adapter import BGOSAdapter, _ApprovalCard
 from hermes_channel_bgos.config import BgosConfig
 
 
@@ -86,7 +86,7 @@ async def test_send_exec_approval_posts_expected_payload(mock_bgos_server):
         assert styles == ["success", "success", "default", "danger"]
 
         # State stash — keyed by approval_id, maps to session_key
-        assert adapter._approval_state[approval_id] == "sess-abc-123"
+        assert adapter._approval_state[approval_id].session_key == "sess-abc-123"
     finally:
         await adapter.disconnect()
 
@@ -139,9 +139,9 @@ async def test_approval_id_monotonic_per_adapter(mock_bgos_server):
 
         ids = sorted(adapter._approval_state.keys())
         assert ids == [1, 2, 3]
-        assert adapter._approval_state[1] == "s1"
-        assert adapter._approval_state[2] == "s2"
-        assert adapter._approval_state[3] == "s3"
+        assert adapter._approval_state[1].session_key == "s1"
+        assert adapter._approval_state[2].session_key == "s2"
+        assert adapter._approval_state[3].session_key == "s3"
     finally:
         await adapter.disconnect()
 
@@ -301,7 +301,7 @@ async def test_approval_callback_edits_message_in_place(monkeypatch):
         captured_patches.append({"message_id": mid, "text": text, "options": options})
         return {"id": mid}
     monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
-    adapter._approval_state[7] = "session-abc"
+    adapter._approval_state[7] = _ApprovalCard("session-abc")
     await adapter._handle_callback({
         "callback_data": "ea:once:7",
         "user_id": "user_42",
@@ -328,7 +328,7 @@ async def test_approval_callback_edit_uses_camelcase_payload(monkeypatch):
         seen.append(mid)
         return {"id": mid}
     monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
-    adapter._approval_state[8] = "sess-x"
+    adapter._approval_state[8] = _ApprovalCard("sess-x")
     await adapter._handle_callback({
         "callback_data": "ea:always:8",
         "userId": "user_42",
@@ -351,7 +351,7 @@ async def test_approval_callback_edit_swallows_patch_errors(monkeypatch, caplog)
     async def fake_patch(mid, **kw):
         raise RuntimeError("boom")
     monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
-    adapter._approval_state[9] = "sess-y"
+    adapter._approval_state[9] = _ApprovalCard("sess-y")
     await adapter._handle_callback({
         "callback_data": "ea:deny:9",
         "user_id": "u",

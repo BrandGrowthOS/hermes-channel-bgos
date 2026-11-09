@@ -13,7 +13,7 @@ import asyncio
 import pytest
 
 import hermes_channel_bgos.bgos_adapter as adapter_mod
-from hermes_channel_bgos.bgos_adapter import BGOSAdapter
+from hermes_channel_bgos.bgos_adapter import BGOSAdapter, _ApprovalCard
 from hermes_channel_bgos.config import BgosConfig
 
 
@@ -215,7 +215,7 @@ async def test_approval_callback_rejects_unauthorized_user(monkeypatch):
         "hermes_channel_bgos.bgos_adapter.resolve_gateway_approval",
         lambda sk, choice: pytest.fail("should not resolve when unauthorized"),
     )
-    adapter._approval_state[1] = "session-x"
+    adapter._approval_state[1] = _ApprovalCard("session-x")
     await adapter._handle_callback({
         "callback_data": "ea:once:1",
         "user_id": "user_intruder",
@@ -238,7 +238,7 @@ async def test_approval_callback_allows_authorized_user(monkeypatch):
     async def fake_patch(mid, **kw):
         return {"id": mid}
     monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
-    adapter._approval_state[1] = "session-x"
+    adapter._approval_state[1] = _ApprovalCard("session-x")
     await adapter._handle_callback({
         "callback_data": "ea:once:1",
         "user_id": "user_42",
@@ -262,7 +262,7 @@ async def test_callback_authz_allow_all_users_bypass(monkeypatch):
     async def fake_patch(mid, **kw):
         return {"id": mid}
     monkeypatch.setattr(adapter._api, "patch_message", fake_patch)
-    adapter._approval_state[1] = "s"
+    adapter._approval_state[1] = _ApprovalCard("s")
     await adapter._handle_callback({
         "callback_data": "ea:once:1",
         "user_id": "anyone",
