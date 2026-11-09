@@ -5,8 +5,12 @@ seated in the same group.
   event behind the running turn and never interrupts or steers it
   (hermes-agent v0.23.0, gateway/run_busy.py,
   ``_handle_active_session_busy_message``), while a person's message in the
-  same session interrupts it. So another agent's row reaches the gateway as
-  internal.
+  same session interrupts it. So another agent's row reaches a busy session
+  as internal. An internal event also skips the gateway's gates for new
+  turns (``/pause``, the startup restore, a maintenance drain, auth, the
+  bot chain guard; gateway/run_inbound.py ``_hm_admit_event`` and
+  ``_hm_estop_gate``), so a tag for an idle session is a normal message,
+  and while Hermes is paused or draining a tag is not handed over at all.
 - One pairing can serve two agents seated in the same group (one gateway,
   multiplexed profiles). Each agent's turn runs in a task of its own, and its
   reply posts as that agent, whichever agent's row arrived last. The tag a
@@ -16,7 +20,8 @@ seated in the same group.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -185,20 +190,125 @@ class _Turns:
 # --- A tag never cuts into a person's running turn ---------------------------
 
 
-@pytest.mark.parametrize("chat_kind", CHAT_KINDS)
-@pytest.mark.parametrize("lane", ("push", "poll"))
-async def test_another_agents_tag_reaches_the_gateway_as_internal(lane, chat_kind, monkeypatch):
-    adapter = _adapter()
-    _gateway_wrap(adapter, monkeypatch)
-    got = _capture(adapter)
-    await _deliver(adapter, lane, _row(
+def _sessions(adapter: BGOSAdapter, monkeypatch) -> dict:
+    """The gateway's live sessions (BasePlatformAdapter ``_active_sessions``),
+    keyed the way handle_message keys a turn (``_source_session_key``)."""
+    monkeypatch.setattr(
+        adapter,
+        "_source_session_key",
+        lambda source: f"agent:{source.profile or 'main'}:bgos:group:{source.chat_id}",
+        raising=False,
+    )
+    adapter._active_sessions = {}  # type: ignore[attr-defined]
+    return adapter._active_sessions  # type: ignore[attr-defined]
+
+
+def _paused(monkeypatch, notice: str | None) -> None:
+    """Hermes's emergency stop (``hermes pause``): agent.estop.paused_reply
+    returns the paused notice, or None when not paused."""
+    estop = ModuleType("agent.estop")
+    estop.paused_reply = lambda: notice  # type: ignore[attr-defined]
+    package = ModuleType("agent")
+    package.estop = estop  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", package)
+    monkeypatch.setitem(sys.modules, "agent.estop", estop)
+
+
+def _tag(lane: str, chat_kind: str = "room") -> dict:
+    return _row(
         lane, message_id=901, to=AGENT_A, chat_kind=chat_kind,
         text="@Achilles can you check the build?", tagged_by=TAGGER,
-    ))
+    )
+
+
+@pytest.mark.parametrize("chat_kind", CHAT_KINDS)
+@pytest.mark.parametrize("lane", ("push", "poll"))
+async def test_another_agents_tag_reaches_a_busy_session_as_internal(lane, chat_kind, monkeypatch):
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[f"agent:main:bgos:group:{CHAT_ID}"] = object()  # a person's turn runs
+    got = _capture(adapter)
+    await _deliver(adapter, lane, _tag(lane, chat_kind))
     assert len(got) == 1
     assert got[0].internal is True, (
         "a tag must queue behind a person's running turn, never interrupt it"
     )
+
+
+@pytest.mark.parametrize("lane", ("push", "poll"))
+async def test_another_agents_tag_reaches_an_idle_session_as_a_normal_message(lane, monkeypatch):
+    # Nothing runs, so there is nothing to cut into, and an internal event
+    # would skip the gateway's gates for a new turn (pause, startup restore,
+    # maintenance drain, auth, the bot chain guard).
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _sessions(adapter, monkeypatch)
+    got = _capture(adapter)
+    await _deliver(adapter, lane, _tag(lane))
+    assert len(got) == 1
+    assert got[0].internal is False
+
+
+@pytest.mark.parametrize("busy", (False, True), ids=("idle", "busy"))
+@pytest.mark.parametrize("lane", ("push", "poll"))
+async def test_another_agents_tag_is_not_handed_over_while_hermes_is_paused(
+    lane, busy, monkeypatch,
+):
+    # A paused Hermes starts no new agent turn, and nobody typed the tag
+    # (Hermes blocks its own synthetic turns then and sends nothing).
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    sessions = _sessions(adapter, monkeypatch)
+    if busy:
+        sessions[f"agent:main:bgos:group:{CHAT_ID}"] = object()
+    _paused(monkeypatch, "Hermes is paused.")
+    got = _capture(adapter)
+    await _deliver(adapter, lane, _tag(lane))
+    assert got == []
+
+
+async def test_another_agents_tag_reaches_the_gateway_when_hermes_is_not_paused(monkeypatch):
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _sessions(adapter, monkeypatch)
+    _paused(monkeypatch, None)
+    got = _capture(adapter)
+    await _deliver(adapter, "push", _tag("push"))
+    assert len(got) == 1
+
+
+@pytest.mark.parametrize("flag", ("_external_drain_active", "_draining"))
+@pytest.mark.parametrize("busy", (False, True), ids=("idle", "busy"))
+async def test_another_agents_tag_is_not_handed_over_while_the_gateway_drains(
+    busy, flag, monkeypatch,
+):
+    # A maintenance drain or a restart takes no new turn, and the gateway
+    # drops what it queued for one.
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    sessions = _sessions(adapter, monkeypatch)
+    if busy:
+        sessions[f"agent:main:bgos:group:{CHAT_ID}"] = object()
+    adapter.gateway_runner = SimpleNamespace(**{flag: True})  # type: ignore[attr-defined]
+    got = _capture(adapter)
+    await _deliver(adapter, "push", _tag("push"))
+    assert got == []
+
+
+async def test_a_persons_message_reaches_the_gateway_while_hermes_is_paused(monkeypatch):
+    # The person's own message still meets the gateway's pause gate, which
+    # answers it with the paused notice.
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _sessions(adapter, monkeypatch)
+    _paused(monkeypatch, "Hermes is paused.")
+    got = _capture(adapter)
+    await _deliver(adapter, "push", _row(
+        "push", message_id=902, to=AGENT_A, text="@Achilles what is the status?",
+    ))
+    assert len(got) == 1
+    assert got[0].internal is False
 
 
 @pytest.mark.parametrize("lane", ("push", "poll"))

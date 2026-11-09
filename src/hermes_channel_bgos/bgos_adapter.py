@@ -2897,9 +2897,54 @@ class BGOSAdapter(BasePlatformAdapter):
         self, event: Any, chat_id: Any, assistant_id: Any,
     ) -> None:
         """handle_message, as the agent the row was addressed to: the turn
-        the gateway starts for it speaks as that agent (_TURN_SPEAKER)."""
+        the gateway starts for it speaks as that agent (_TURN_SPEAKER).
+
+        Another agent's tag (0.32.3) never cuts into a person's running turn.
+        While its session is busy it goes in as an internal event, which
+        hermes-agent v0.23.0 queues behind the running turn and never uses to
+        interrupt or steer it (run_busy.py). An internal event also skips
+        every gate for a new turn (run_inbound.py _hm_admit_event and
+        _hm_estop_gate: /pause, the startup restore, a maintenance drain,
+        auth, the bot chain guard), so a tag for an idle session goes in as
+        a normal message, and while Hermes is paused or draining it is not
+        handed over at all: nobody typed it, and Hermes sends nothing for
+        its own synthetic turns then either. The gateway sets no reply
+        anchor for an internal event; the adapter's own tag anchor gives the
+        reply its reply_to_id."""
+        row = getattr(event, "raw_message", None) or event
+        if getattr(row, "sender_type", None) == "room_agent":
+            if self._gateway_takes_no_new_turn():
+                log.info(
+                    "dropping room_agent row message_id=%s: Hermes is paused "
+                    "or draining", getattr(row, "message_id", None),
+                )
+                return
+            if hasattr(event, "internal") and self._voice_turn_active(
+                self._voice_session_key(getattr(event, "source", None)),
+            ) is True:
+                event.internal = True
         with _speaking_as(chat_id, assistant_id):
             await self.handle_message(event)
+
+    def _gateway_takes_no_new_turn(self) -> bool:
+        """Hermes is paused (`hermes pause`, agent.estop), or the gateway is
+        draining for maintenance or a restart. False on a Hermes that has
+        neither."""
+        try:
+            from agent.estop import paused_reply  # type: ignore
+        except Exception:
+            paused_reply = None
+        if paused_reply is not None:
+            try:
+                if paused_reply() is not None:
+                    return True
+            except Exception:
+                log.debug("paused_reply failed", exc_info=True)
+        runner = getattr(self, "gateway_runner", None)
+        return any(
+            getattr(runner, flag, False) is True
+            for flag in ("_external_drain_active", "_draining")
+        )
 
     async def _handle_assistant_unbound(self, data: dict) -> None:
         """WebSocket `assistant_unbound` (0.32.3): an agent was deleted or
@@ -6417,13 +6462,9 @@ class BGOSAdapter(BasePlatformAdapter):
             # so the fork's auth gate (which requires source.user_id) lets
             # them through instead of dropping.
             is_backfill = user_id is None
-            # Another agent's tag is internal too: the gateway queues an
-            # internal event behind a running turn and never interrupts or
-            # steers it (hermes-agent v0.23.0 run_busy.py), so it never cuts
-            # into a person's running turn. A person's message still does.
-            # The gateway sets no reply anchor for it either; the adapter's
-            # own tag anchor gives the reply its reply_to_id.
-            internal_turn = is_backfill or from_room_agent
+            # Another agent's tag is made internal at the hand-over, and only
+            # while its session is busy (_hand_over).
+            internal_turn = is_backfill
             try:
                 source = self.build_source(  # type: ignore[attr-defined]
                     chat_id=str(event.chat_id), user_id=user_id,
