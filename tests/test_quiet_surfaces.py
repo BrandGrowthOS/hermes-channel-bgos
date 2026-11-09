@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_channel_bgos.bgos_adapter import BGOSAdapter
+from hermes_channel_bgos.bgos_adapter import BGOSAdapter, _ApprovalCard
 from hermes_channel_bgos.commands_sync import (
     BRIDGE_LOCAL_COMMANDS,
     build_manifest,
@@ -262,8 +262,8 @@ async def test_status_tidy_posts_friendly_event_with_private_payload(
         201, {"id": 9005}
     )
     adapter = _adapter(mock_bgos_server)
-    adapter._approval_state[1] = "sess-1"
-    adapter._approval_state[2] = "sess-2"
+    adapter._approval_state[1] = _ApprovalCard("sess-1")
+    adapter._approval_state[2] = _ApprovalCard("sess-2")
     try:
         await adapter._handle_bridge_local("status", {"chat_id": CHAT_ID})
 
