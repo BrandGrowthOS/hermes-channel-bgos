@@ -427,6 +427,121 @@ async def test_a_second_profiles_running_turn_keeps_its_tag_unanchored_after_its
     assert posts[-1]["reply_to_id"] is None, "the person's answer must not quote the tag"
 
 
+def _profiles(monkeypatch) -> None:
+    """Agent B's route has a Hermes profile of its own; A is served by the
+    default profile."""
+    monkeypatch.setattr(
+        bgos_adapter_module,
+        "profile_for_route",
+        lambda route, **_: None if route == "default" else route,
+    )
+
+
+def _gateway_turns(adapter: BGOSAdapter, monkeypatch, reply: str) -> None:
+    """The gateway's own handle_message (BasePlatformAdapter): the turn runs
+    in a task of its own, which copies the caller's context, and sends one
+    reply."""
+    base = type(adapter).__mro__[1]
+
+    async def handle_message(self: Any, event: Any) -> None:
+        chat_id = int(event.source.chat_id)
+
+        async def turn() -> None:
+            await self.send(chat_id=chat_id, content=reply)
+
+        asyncio.get_running_loop().create_task(turn())
+
+    monkeypatch.setattr(base, "handle_message", handle_message)
+
+
+def _wake(profile: str | None) -> Any:
+    """A turn the gateway starts itself (a heartbeat, a goal continuation,
+    gateway/wake.py deliver_wake): no BGOS row behind it, the session's
+    source with its profile."""
+    return GatewayMessageEvent(
+        text="[wake]",
+        message_type=GatewayMessageType.TEXT,
+        source=SimpleNamespace(chat_id=str(CHAT_ID), user_id="owner_1", profile=profile),
+        internal=True,
+    )
+
+
+async def test_a_turn_the_gateway_starts_for_an_agent_posts_as_that_agent(monkeypatch):
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _profiles(monkeypatch)
+    posts = _backend(adapter, monkeypatch)
+    _gateway_turns(adapter, monkeypatch, "Shadow: the nightly check is done.")
+    # A's row arrived last, so A is the chat's latest addressed agent.
+    await _deliver(adapter, "push", _row(
+        "push", message_id=980, to=AGENT_A, text="@Achilles hi",
+    ))
+    posts.clear()
+    await adapter.handle_message(_wake("shadow"))
+    await asyncio.sleep(0.05)
+    assert [p["assistant_id"] for p in posts] == [AGENT_B]
+
+
+async def test_a_turn_started_from_inside_another_agents_turn_posts_as_its_own_agent(
+    monkeypatch,
+):
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _profiles(monkeypatch)
+    posts = _backend(adapter, monkeypatch)
+    _gateway_turns(adapter, monkeypatch, "Shadow: done.")
+    await _deliver(adapter, "push", _row(
+        "push", message_id=981, to=AGENT_B, text="@Shadow hi",
+    ))
+    posts.clear()
+    # A's turn starts B's (a tool of A's wakes B's session): the context it
+    # is started from speaks as A.
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
+        await adapter.handle_message(_wake("shadow"))
+    await asyncio.sleep(0.05)
+    assert [p["assistant_id"] for p in posts] == [AGENT_B]
+
+
+async def test_a_turn_whose_agent_cannot_be_told_keeps_the_speaker_it_was_started_with(
+    monkeypatch,
+):
+    # Here no route has a Hermes profile of its own, so the default profile
+    # serves both agents and a source on it names no single agent. A boards
+    # or peer result turn started inside B's turn stays B's, though A is the
+    # chat's latest addressed agent.
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    monkeypatch.setattr(bgos_adapter_module, "profile_for_route", lambda route, **_: None)
+    posts = _backend(adapter, monkeypatch)
+    _gateway_turns(adapter, monkeypatch, "Shadow: the board is updated.")
+    await _deliver(adapter, "push", _row(
+        "push", message_id=982, to=AGENT_A, text="@Achilles hi",
+    ))
+    posts.clear()
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
+        await adapter.handle_message(_wake(None))
+    await asyncio.sleep(0.05)
+    assert [p["assistant_id"] for p in posts] == [AGENT_B]
+
+
+async def test_an_agents_status_line_is_set_on_that_agent(monkeypatch):
+    adapter = _adapter()
+    turns = _Turns(adapter)
+    _backend(adapter, monkeypatch)
+    statuses: list[dict] = []
+
+    async def patch_status(**kw: Any) -> dict:
+        statuses.append(kw)
+        return {}
+
+    monkeypatch.setattr(adapter._api, "patch_status", patch_status)
+    await _deliver(adapter, "push", _row(
+        "push", message_id=983, to=AGENT_B, text="@Shadow review the PR",
+    ))
+    await turns.reply(AGENT_B, "STATUS: reviewing the PR\nShadow: on it.")
+    assert [s["assistant_id"] for s in statuses] == [AGENT_B]
+
+
 def _tap(*, on_card_of: int, message_id: int) -> dict:
     """A person's tap on a card one agent posted (`inbound_click`)."""
     return {

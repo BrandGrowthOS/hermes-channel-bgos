@@ -2926,6 +2926,45 @@ class BGOSAdapter(BasePlatformAdapter):
         with _speaking_as(chat_id, assistant_id):
             await self.handle_message(event)
 
+    async def handle_message(self, event: Any) -> None:
+        """Every turn speaks as the agent its event names (0.32.3): the BGOS
+        row's own agent, else the one agent whose Hermes profile the source
+        carries. That covers the turns the gateway starts itself (a
+        heartbeat, a goal continuation, a wake: gateway/wake.py), which reach
+        the adapter only through here, and a turn started from inside
+        another agent's turn. An event that names no single agent keeps the
+        speaker it was handed over with."""
+        chat_key, speaker = self._event_speaker(event)
+        with _speaking_as(chat_key, speaker):
+            await super().handle_message(event)
+
+    def _event_speaker(self, event: Any) -> tuple[int | None, int | None]:
+        """(chat id, agent) a turn's event names, either None if unknown."""
+        row = getattr(event, "raw_message", None) or event
+        source = getattr(event, "source", None)
+        chat_key = self._int_or_none(getattr(row, "chat_id", None))
+        if chat_key is None:
+            chat_key = self._int_or_none(getattr(source, "chat_id", None))
+        speaker = _positive_int_or_none(getattr(row, "assistant_id", None))
+        if speaker is None and source is not None:
+            speaker = self._assistant_for_profile(getattr(source, "profile", None))
+        return chat_key, speaker
+
+    def _assistant_for_profile(self, profile: Any) -> int | None:
+        """The one agent of this pairing served by Hermes profile `profile`
+        (None is the default profile), or None when none or several are."""
+        if profile is not None and not isinstance(profile, str):
+            return None
+        found: list[int] = []
+        for aid, route in list(self._state.assistant_route.items()):
+            try:
+                served_by = profile_for_route(route, warn_missing=False)
+            except Exception:
+                continue
+            if served_by == (profile or None):
+                found.append(aid)
+        return found[0] if len(found) == 1 else None
+
     def _gateway_takes_no_new_turn(self) -> bool:
         """Hermes is paused (`hermes pause`, agent.estop), or the gateway is
         draining for maintenance or a restart. False on a Hermes that has
@@ -3626,7 +3665,7 @@ class BGOSAdapter(BasePlatformAdapter):
             chat_id=chat_key,
             message_id=0,
             user_id=user_id or "",
-            assistant_id=self._state.assistant_id_by_chat.get(chat_key, 0),
+            assistant_id=self._style_assistant_id_for_chat(chat_key) or 0,
             agent_route="",
             text=text,
             files=[],
@@ -3942,7 +3981,7 @@ class BGOSAdapter(BasePlatformAdapter):
             chat_id=chat_key,
             message_id=0,
             user_id=user_id or "",
-            assistant_id=self._state.assistant_id_by_chat.get(chat_key, 0),
+            assistant_id=self._style_assistant_id_for_chat(chat_key) or 0,
             agent_route="",
             text=text,
             files=[],
@@ -4131,10 +4170,13 @@ class BGOSAdapter(BasePlatformAdapter):
         # if the map is empty (shouldn't happen in normal use) we skip
         # gracefully. Mirror of sync_commands_for's fail-open pattern.
         if status_text is not None:
-            _first_aid: int | None = None
-            for _aid in self._state.assistant_route:
-                _first_aid = _aid
-                break
+            # The agent speaking (0.32.3: one pairing can serve several), else
+            # the route map's first agent.
+            _first_aid: int | None = speaker
+            if _first_aid is None:
+                for _aid in self._state.assistant_route:
+                    _first_aid = _aid
+                    break
             if _first_aid is not None:
                 try:
                     await self._api.patch_status(
@@ -8762,7 +8804,7 @@ class BGOSAdapter(BasePlatformAdapter):
             chat_id=chat_key,
             message_id=0,
             user_id=user_id or "",
-            assistant_id=self._state.assistant_id_by_chat.get(chat_key, 0),
+            assistant_id=self._style_assistant_id_for_chat(chat_key) or 0,
             agent_route="",
             text=text,
             files=[],
