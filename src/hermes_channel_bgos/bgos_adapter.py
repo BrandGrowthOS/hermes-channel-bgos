@@ -125,6 +125,26 @@ except ImportError:
 
 
 try:  # pragma: no cover - exercised only when Hermes is installed
+    # hermes-agent v0.23.0 and later, on the published plugin API list:
+    # resolves only the request the card was rendered for (returns 0 when it
+    # already settled), so a stale card can never answer the next request.
+    from tools.approval import resolve_gateway_approval_card  # type: ignore
+except ImportError:
+    resolve_gateway_approval_card = None  # type: ignore[assignment]
+
+
+try:  # pragma: no cover - exercised only when Hermes is installed
+    # hermes-agent v0.22.6 and later: observe_gateway_settle(session_key,
+    # request_id, cb) calls cb(reason) once when that request's wait ends by
+    # any path (timeout, a typed /approve, the session closing). It is NOT on
+    # the published plugin API list, so it is optional: without it a stale
+    # card is still refused at tap time, only the stored entry lingers.
+    from tools.approval import observe_gateway_settle  # type: ignore
+except ImportError:
+    observe_gateway_settle = None  # type: ignore[assignment]
+
+
+try:  # pragma: no cover - exercised only when Hermes is installed
     # The real helper lives in tools.slash_confirm and `resolve` is a coroutine
     # function (it awaits the registered handler), so callers must await it.
     # Tests monkeypatch this at the module level
@@ -159,6 +179,21 @@ except Exception:
 # Four choice values: once, session, always, deny — mapped 1:1 from Hermes's
 # approval vocabulary.
 _APPROVAL_CALLBACK_RE = re.compile(r"^ea:(once|session|always|deny):(\d+)$")
+
+
+@dataclass(frozen=True)
+class _ApprovalCard:
+    """One live approval card, stored as a single value so a tap reads it
+    with ONE pop: a settle on Hermes' agent thread can drop the whole card,
+    never half of it (half a card used to fall back to first in first out
+    and approve the next request in the session)."""
+
+    session_key: str
+    # The Hermes request the card shows (v0.22.6+); None on an older Hermes.
+    request_id: str | None = None
+    # The BGOS message the card was posted as. Approval ids restart at 1 in
+    # every adapter instance, so a tap must also come from this message.
+    message_id: int | None = None
 
 # Slash-confirm callback shape — three choices (once / always / cancel) for
 # the 3-button UX rendered by send_slash_confirm. confirm_id is opaque to the
@@ -952,6 +987,20 @@ except ImportError:
     _GatewayMessageType = None  # type: ignore
 
 
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    """True when `fn` can be called with keyword `name` (or takes **kwargs)."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        (p.name == name and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY))
+        or p.kind is p.VAR_KEYWORD
+        for p in params
+    )
+
+
 def _format_inbound_files(text: str, files: list[dict]) -> str:
     """Append inbound user attachments to the agent's view of the message.
 
@@ -1418,10 +1467,17 @@ class BGOSAdapter(BasePlatformAdapter):
         # under this pairing belong to assistants owned by this user,
         # so the ownership check in UpdateMessageDto always passes.
         self.pairing_user_id: str | None = None
-        # Approval bookkeeping — approval_id → session_key. Populated by
-        # send_exec_approval, drained by Task 8's callback router.
-        self._approval_state: dict[int, str] = {}
+        # Approval bookkeeping: approval_id -> the live card (session key,
+        # the Hermes request it shows, the BGOS message it was posted as).
+        # Populated by send_exec_approval, drained by the callback router. A
+        # tap resolves THAT request, never the oldest one queued in the
+        # session.
+        self._approval_state: dict[int, _ApprovalCard] = {}
         self._approval_id_counter = itertools.count(1)
+        # Cards answered by a tap in this process, so a repeated tap on one
+        # keeps its "Approved ..." line instead of turning it into
+        # "Approval expired". Bounded; ids only grow.
+        self._approval_answered: OrderedDict[int, None] = OrderedDict()
         # Slash-confirm bookkeeping — confirm_id → session_key. Populated
         # by send_slash_confirm; drained by the sc:* branch of
         # _handle_callback. Telegram-parity 3-button UX for non-destructive
@@ -5435,7 +5491,15 @@ class BGOSAdapter(BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        request_id: str | None = None,
+        **_future_kwargs: Any,
     ) -> SendResult:
+        # hermes-agent v0.22.6 (PR #87554) passes request_id on every call:
+        # the tools.approval request this card answers, and only that one.
+        # The **_future_kwargs catch-all means the next argument Hermes adds
+        # cannot raise TypeError here (which the gateway turns into the plain
+        # text prompt) before we get a chance to accept it on purpose.
+        #
         # The Hermes gateway's _approval_notify_sync closure calls this hook
         # with allow_permanent / allow_session / smart_denied describing which
         # approval scopes the caller may offer. These MUST be accepted: the
@@ -5520,9 +5584,82 @@ class BGOSAdapter(BasePlatformAdapter):
         )
         # Stash AFTER the successful POST so a 5xx doesn't leave us with a
         # phantom pending approval the router would later try to resolve.
-        self._approval_state[approval_id] = session_key
         message_id = resp.get("id") if isinstance(resp, dict) else None
+        self._approval_state[approval_id] = _ApprovalCard(
+            session_key=session_key,
+            request_id=str(request_id) if request_id else None,
+            message_id=message_id if isinstance(message_id, int) else None,
+        )
+        if request_id:
+            self._watch_approval_settle(approval_id, session_key, str(request_id))
         return _send_result(message_id=message_id)
+
+    @classmethod
+    def supports_exec_approval_buttons(cls) -> bool:
+        """Hermes v0.21.6 and later hand an approval to `send_exec_approval`
+        only when this is true; the base answer looks for an override of
+        `_send_exec_approval_prompt`. This adapter renders its own card in
+        `send_exec_approval`, so it says yes; without this the user got the
+        plain text "/approve" prompt and never saw the buttons."""
+        return True
+
+    def _watch_approval_settle(
+        self, approval_id: int, session_key: str, request_id: str,
+    ) -> None:
+        """Forget the stored card once its request settles some other way
+        (timeout, a typed /approve, the session closing), when the running
+        Hermes can tell us. The observer runs on Hermes' agent thread; it
+        only pops dict keys, which is safe there."""
+        import hermes_channel_bgos.bgos_adapter as _self_mod
+        observe = _self_mod.observe_gateway_settle
+        if observe is None:
+            return
+
+        def _settled(_reason: Any = None) -> None:
+            self._forget_approval(approval_id)
+
+        try:
+            pending = observe(session_key, request_id, _settled)
+        except Exception:
+            log.debug("observe_gateway_settle failed", exc_info=True)
+            return
+        if pending is False:
+            # The request settled before the card was stored (for example
+            # it timed out while the POST was in flight): nothing to answer.
+            self._forget_approval(approval_id)
+
+    def _forget_approval(self, approval_id: int) -> None:
+        self._approval_state.pop(approval_id, None)
+
+    def _resolve_approval_card(
+        self, session_key: str, choice: str, request_id: str | None,
+    ) -> bool:
+        """Resolve the request this card was rendered for. False when it has
+        already settled, so the tap must approve nothing.
+
+        - Hermes v0.23.0+: `resolve_gateway_approval_card` (published API).
+        - v0.22.6 / v0.22.7 pass a request id but have no card helper; their
+          `resolve_gateway_approval` takes `request_id=`, which is exactly
+          what the card helper calls.
+        - Older Hermes sends no request id: first in first out, as before.
+          Only there: once the running Hermes resolves by request id, a card
+          without one approves nothing rather than the oldest request.
+        """
+        import hermes_channel_bgos.bgos_adapter as _self_mod
+        card = _self_mod.resolve_gateway_approval_card
+        resolve = _self_mod.resolve_gateway_approval
+        by_id = _accepts_kwarg(resolve, "request_id")
+        if not request_id:
+            if card is not None or by_id:
+                return False
+        elif card is not None:
+            return bool(card(session_key, choice, request_id))
+        elif by_id:
+            return bool(resolve(session_key, choice, request_id=request_id))
+        count = resolve(session_key, choice)
+        # Older resolvers (and test doubles) return None; only an explicit
+        # 0 says nothing was pending.
+        return count is None or bool(count)
 
     # -------------------------------------------------------------------------
     # send_slash_confirm (Task 2.3) — three-button slash-command confirmation
@@ -6391,6 +6528,24 @@ class BGOSAdapter(BasePlatformAdapter):
         allowed_set = {u.strip() for u in allowed.split(",") if u.strip()}
         return user_id is not None and str(user_id) in allowed_set
 
+    async def _answer_expired_approval(self, data: dict) -> None:
+        """Tell the tapper the card is dead: the bubble reads "Approval
+        expired" and loses its buttons. Cosmetic; failures are logged."""
+        msg_id = data.get("message_id") or data.get("messageId")
+        if not isinstance(msg_id, int):
+            return
+        user_id_label = data.get("user_id") or data.get("userId") or ""
+        try:
+            await self._api.patch_message(
+                msg_id, text="⌛ Approval expired", options=[],
+                user_id=str(user_id_label) if user_id_label else None,
+            )
+        except Exception:
+            log.warning(
+                "expired approval message edit failed message_id=%d",
+                msg_id, exc_info=True,
+            )
+
     async def _handle_callback(self, data: dict) -> None:
         """Route a callback_result WS event.
 
@@ -6489,16 +6644,45 @@ class BGOSAdapter(BasePlatformAdapter):
         if m is not None:
             choice = m.group(1)
             approval_id = int(m.group(2))
-            session_key = self._approval_state.pop(approval_id, None)
-            if session_key is None:
+            if approval_id in self._approval_answered:
+                log.info("repeated tap on answered approval approval_id=%d", approval_id)
+                return
+            # Approval ids restart at 1 in every adapter instance (a gateway
+            # restart, an adapter rebuilt on reconnect), so `ea:*:1` on an
+            # old card still live in the app names this instance's card 1
+            # too. The tap must come from the message this card was posted
+            # as. A mismatch leaves the card in place for its own tap.
+            live = self._approval_state.get(approval_id)
+            tap_message_id = data.get("message_id") or data.get("messageId")
+            if (
+                live is not None and live.message_id is not None
+                and str(tap_message_id) != str(live.message_id)
+            ):
                 log.info(
-                    "stale approval click approval_id=%d — already resolved or timed out",
+                    "approval tap from message %s, card %d is message %d: "
+                    "an older card, approving nothing",
+                    tap_message_id, approval_id, live.message_id,
+                )
+                await self._answer_expired_approval(data)
+                return
+            # One pop: a settle on Hermes' agent thread drops the whole card
+            # or none of it, so the tap never loses its request id halfway.
+            card = self._approval_state.pop(approval_id, None)
+            if card is None or not self._resolve_approval_card(
+                card.session_key, choice, card.request_id,
+            ):
+                # Its request already settled (timed out, answered by a
+                # typed /approve, or the adapter restarted): approve nothing,
+                # and in particular not the next request in the session.
+                log.info(
+                    "stale approval click approval_id=%d: already resolved or timed out",
                     approval_id,
                 )
+                await self._answer_expired_approval(data)
                 return
-            # Route via the module-level binding so tests can monkeypatch it.
-            import hermes_channel_bgos.bgos_adapter as _self_mod
-            _self_mod.resolve_gateway_approval(session_key, choice)
+            self._approval_answered[approval_id] = None
+            while len(self._approval_answered) > 256:
+                self._approval_answered.popitem(last=False)
 
             # Edit the original bubble in-place to show the resolution.
             # Mirrors gateway/platforms/telegram.py:2533-2537. We bypass

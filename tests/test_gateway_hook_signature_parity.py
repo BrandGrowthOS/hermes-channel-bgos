@@ -47,9 +47,11 @@ GATEWAY_HOOK_KWARGS: dict[str, list[str]] = {
         "chat_id", "choices", "clarify_id", "metadata", "question", "session_key",
     ],
     "send_document": ["chat_id", "file_path", "metadata"],
+    # hermes-agent v0.22.6 added request_id (PR #87554); the hook also keeps a
+    # **kwargs catch-all so the next new argument cannot break it again.
     "send_exec_approval": [
-        "allow_permanent", "allow_session", "chat_id", "command",
-        "description", "metadata", "session_key", "smart_denied",
+        "**", "allow_permanent", "allow_session", "chat_id", "command",
+        "description", "metadata", "request_id", "session_key", "smart_denied",
     ],
     "send_image": ["caption", "chat_id", "image_url", "metadata"],
     "send_image_file": ["caption", "chat_id", "image_path", "metadata"],

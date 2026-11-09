@@ -20,7 +20,7 @@ import pytest
 
 import hermes_channel_bgos.bgos_adapter as bgos_adapter_module
 from hermes_channel_bgos import __version__, scheduled_update, self_update
-from hermes_channel_bgos.bgos_adapter import BGOSAdapter
+from hermes_channel_bgos.bgos_adapter import BGOSAdapter, _ApprovalCard
 from hermes_channel_bgos.bgos_api import NOT_MODIFIED
 from hermes_channel_bgos.config import BgosConfig
 from hermes_channel_bgos.self_update import AppliedUpdate, SelfUpdateError
@@ -1102,7 +1102,7 @@ async def test_held_intake_still_resolves_work_in_flight(sched, monkeypatch):
     )
     monkeypatch.setattr(adapter, "_is_callback_user_authorized", lambda uid: True)
     assert await _idle_through_quiet_window(adapter, clock) == "restarting"
-    adapter._approval_state[5] = "bgos:42"
+    adapter._approval_state[5] = _ApprovalCard("bgos:42")
     await adapter._handle_callback({"callbackData": "ea:once:5", "userId": "u"})
     assert resolved == [("bgos:42", "once")]
 
