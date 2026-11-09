@@ -61,10 +61,10 @@ def _server_framed(body: str, *, follow_up: bool = False, no_roster: bool = Fals
         "You are in a group, not a private chat. Everyone listed here reads what you say.")
     if not no_roster:
         lines += [
-            "People here: Kc.",
+            "People here: Ada.",
             "Agents here: Ares, Echo (you).",
             "Said in this group since your last turn, oldest first:",
-            "- Kc: ship it\n  once the checks pass",
+            "- Ada: ship it\n  once the checks pass",
             FRAMING_SENTENCE,
         ]
     elif follow_up:

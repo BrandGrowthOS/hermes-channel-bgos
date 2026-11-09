@@ -1,16 +1,13 @@
 """Another agent's tag next to a person's turn, and two agents of one pairing
 seated in the same group.
 
-- A tag never cuts into a person's running turn. Hermes queues an internal
-  event behind the running turn and never interrupts or steers it
-  (hermes-agent v0.23.0, gateway/run_busy.py,
-  ``_handle_active_session_busy_message``), while a person's message in the
-  same session interrupts it. So another agent's row reaches a busy session
-  as internal. An internal event also skips the gateway's gates for new
-  turns (``/pause``, the startup restore, a maintenance drain, auth, the
-  bot chain guard; gateway/run_inbound.py ``_hm_admit_event`` and
-  ``_hm_estop_gate``), so a tag for an idle session is a normal message,
-  and while Hermes is paused or draining a tag is not handed over at all.
+- A tag never cuts into a person's running turn. A normal message to a busy
+  session interrupts its turn, and an internal event queued behind it did
+  not run until a pause or a drain (hermes-agent v0.23.0). So the adapter
+  holds a tag while the tagged agent's session is busy and hands it over as
+  a normal message once the turn ends, oldest first, one turn each. A tag
+  for an idle session goes in at once, and while Hermes is paused or
+  draining a tag is not handed over at all.
 - One pairing can serve two agents seated in the same group (one gateway,
   multiplexed profiles). Each agent's turn runs in a task of its own, and its
   reply posts as that agent, whichever agent's row arrived last. The tag a
@@ -20,6 +17,7 @@ seated in the same group.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -214,26 +212,287 @@ def _paused(monkeypatch, notice: str | None) -> None:
     monkeypatch.setitem(sys.modules, "agent.estop", estop)
 
 
-def _tag(lane: str, chat_kind: str = "room") -> dict:
+def _tag(lane: str, chat_kind: str = "room", message_id: int = 901) -> dict:
     return _row(
-        lane, message_id=901, to=AGENT_A, chat_kind=chat_kind,
+        lane, message_id=message_id, to=AGENT_A, chat_kind=chat_kind,
         text="@Achilles can you check the build?", tagged_by=TAGGER,
     )
 
 
+SESSION = f"agent:main:bgos:group:{CHAT_ID}"  # agent A's gateway session
+
+
+def _release_every(monkeypatch, seconds: float) -> None:
+    """How often the adapter looks again at a session it holds tags for."""
+    monkeypatch.setattr(bgos_adapter_module, "_HELD_TAG_POLL_S", seconds, raising=False)
+
+
+def _gateway_takes(adapter: BGOSAdapter, sessions: dict, gate: float = 0.0) -> list[Any]:
+    """handle_message as the gateway runs it: the session is busy from the
+    moment it takes a turn (BasePlatformAdapter installs the session guard
+    before handle_message returns) until the test ends that turn. `gate`
+    is how long handle_message waits before that (its burst gate)."""
+    received: list[Any] = []
+
+    async def take(event: Any) -> None:
+        if gate:
+            await asyncio.sleep(gate)
+        received.append(event)
+        sessions[SESSION] = object()
+
+    adapter.handle_message = take  # type: ignore[method-assign]
+    return received
+
+
+def _ids(events: list[Any]) -> list[int]:
+    return [(getattr(e, "raw_message", None) or e).message_id for e in events]
+
+
 @pytest.mark.parametrize("chat_kind", CHAT_KINDS)
 @pytest.mark.parametrize("lane", ("push", "poll"))
-async def test_another_agents_tag_reaches_a_busy_session_as_internal(lane, chat_kind, monkeypatch):
+async def test_a_tag_during_a_running_turn_reaches_the_agent_after_the_turn(lane, chat_kind, monkeypatch):
+    # No pause and no drain: the turn ending is what lets the tag in.
     adapter = _adapter()
     _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
     sessions = _sessions(adapter, monkeypatch)
-    sessions[f"agent:main:bgos:group:{CHAT_ID}"] = object()  # a person's turn runs
+    sessions[SESSION] = object()  # a person's turn runs
     got = _capture(adapter)
     await _deliver(adapter, lane, _tag(lane, chat_kind))
-    assert len(got) == 1
-    assert got[0].internal is True, (
-        "a tag must queue behind a person's running turn, never interrupt it"
-    )
+    assert got == [], "a tag must never reach a session whose turn is running"
+    del sessions[SESSION]  # the person's turn ends
+    await asyncio.sleep(0.1)
+    assert _ids(got) == [901]
+    assert got[0].internal is False, "it goes in as a normal message"
+    await adapter.disconnect()
+
+
+async def test_two_tags_during_a_running_turn_reach_the_agent_in_order_one_turn_each(monkeypatch):
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[SESSION] = object()
+    got = _gateway_takes(adapter, sessions)
+    await _deliver(adapter, "push", _tag("push", message_id=901))
+    await _deliver(adapter, "poll", _tag("poll", message_id=903))
+    assert got == []
+    del sessions[SESSION]
+    await asyncio.sleep(0.1)
+    assert _ids(got) == [901], "the second tag waits for the first tag's turn"
+    del sessions[SESSION]
+    await asyncio.sleep(0.1)
+    assert _ids(got) == [901, 903]
+    assert [e.internal for e in got] == [False, False]
+    await adapter.disconnect()
+
+
+async def test_a_tag_arriving_as_the_turn_ends_waits_behind_the_held_one(monkeypatch):
+    # The adapter has not looked at the session again yet when the turn ends
+    # and a second tag arrives: the second still goes after the first.
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.5)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[SESSION] = object()
+    got = _gateway_takes(adapter, sessions)
+    await _deliver(adapter, "push", _tag("push", message_id=901))
+    del sessions[SESSION]
+    await _deliver(adapter, "push", _tag("push", message_id=903))
+    assert got == []
+    await asyncio.sleep(0.5)
+    assert _ids(got) == [901]
+    del sessions[SESSION]
+    await asyncio.sleep(0.6)
+    assert _ids(got) == [901, 903]
+    await adapter.disconnect()
+
+
+async def test_a_held_tag_waits_for_a_persons_words_still_in_the_batch(monkeypatch):
+    # The person writes again just as the turn ends, and their words still
+    # sit in the adapter's batch window: they go first, and the tag waits
+    # for their turn.
+    adapter = _adapter()
+    adapter._text_batch_window = 0.3
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[SESSION] = object()
+    got = _gateway_takes(adapter, sessions)
+    await _deliver(adapter, "push", _tag("push", message_id=901))
+    await adapter._handle_inbound(_row(
+        "push", message_id=904, to=AGENT_A, text="@Achilles also check the docs",
+    ))
+    del sessions[SESSION]
+    await asyncio.sleep(0.1)
+    assert got == [], "the tag must not start ahead of the person's words"
+    await asyncio.sleep(0.4)
+    assert _ids(got) == [904]
+    del sessions[SESSION]
+    await asyncio.sleep(0.1)
+    assert _ids(got) == [904, 901]
+    await adapter.disconnect()
+
+
+async def test_a_held_tag_is_answered_with_its_quote_once_its_turn_runs(monkeypatch):
+    # The person's answer never quotes the tag; the tag's own answer does,
+    # as for a tag that found the session free.
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    sessions = _sessions(adapter, monkeypatch)
+    posts = _backend(adapter, monkeypatch)
+    _gateway_takes(adapter, sessions)
+    await _deliver(adapter, "push", _row(
+        "push", message_id=900, to=AGENT_A, text="@Achilles what is the status?",
+    ))
+    await _deliver(adapter, "push", _tag("push", message_id=901))
+    await adapter.send(chat_id=CHAT_ID, content="Achilles: all green.")
+    del sessions[SESSION]  # the person's turn ends
+    await asyncio.sleep(0.1)
+    await adapter.send(chat_id=CHAT_ID, content="Achilles: the build passed.")
+    person_answer, tag_answer = posts
+    assert person_answer["reply_to_id"] != 901
+    assert tag_answer["reply_to_id"] == 901
+    await adapter.disconnect()
+
+
+async def test_a_held_tag_waits_while_the_gateway_is_taking_a_persons_message(monkeypatch):
+    # The person's words have left the batch, but the gateway has not marked
+    # the session busy yet: handle_message first waits at its burst gate.
+    # The tag must not slip in ahead of them then.
+    adapter = _adapter()
+    adapter._text_batch_window = 0.3
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[SESSION] = object()
+    got = _gateway_takes(adapter, sessions, gate=0.1)
+    await _deliver(adapter, "push", _tag("push", message_id=901))
+    await adapter._handle_inbound(_row(
+        "push", message_id=904, to=AGENT_A, text="@Achilles also check the docs",
+    ))
+    del sessions[SESSION]
+    await asyncio.sleep(0.5)
+    assert _ids(got) == [904], "the tag must wait for the person's turn"
+    del sessions[SESSION]
+    await asyncio.sleep(0.25)
+    assert _ids(got) == [904, 901]
+    await adapter.disconnect()
+
+
+async def test_tags_past_the_hold_limit_are_dropped_and_logged(monkeypatch, caplog):
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    monkeypatch.setattr(bgos_adapter_module, "_HELD_TAGS_MAX", 2, raising=False)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[SESSION] = object()
+    got = _gateway_takes(adapter, sessions)
+    with caplog.at_level(logging.WARNING):
+        for message_id in (901, 903, 905):
+            await _deliver(adapter, "push", _tag("push", message_id=message_id))
+    for _ in range(3):
+        del sessions[SESSION]
+        await asyncio.sleep(0.1)
+        sessions.setdefault(SESSION, object())
+    assert _ids(got) == [901, 903]
+    assert "message_id=905" in caplog.text
+    await adapter.disconnect()
+
+
+async def test_a_held_tag_for_an_agent_deleted_meanwhile_is_dropped(monkeypatch):
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[SESSION] = object()
+    got = _capture(adapter)
+    await _deliver(adapter, "push", _tag("push"))
+    await adapter._handle_assistant_unbound({"assistantId": AGENT_A})
+    del sessions[SESSION]
+    await asyncio.sleep(0.1)
+    assert got == []
+    await adapter.disconnect()
+
+
+async def test_another_agents_busy_session_does_not_hold_this_agents_tag(monkeypatch):
+    # Agent B runs on a Hermes profile of its own, so its turn is a session
+    # of its own: a tag for agent A goes in at once.
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _profiles(monkeypatch)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[f"agent:shadow:bgos:group:{CHAT_ID}"] = object()  # B's turn runs
+    got = _capture(adapter)
+    await _deliver(adapter, "push", _tag("push"))
+    assert _ids(got) == [901]
+    await adapter.disconnect()
+
+
+@pytest.mark.parametrize("person_first", (False, True), ids=("no_person_turn", "after_a_person_turn"))
+async def test_a_tag_held_behind_another_tags_turn_leaves_that_turns_quote(person_first, monkeypatch):
+    # Tag 901 found agent A free and its turn runs; tag 903 arrives and is
+    # held. Holding 903 must not touch what 901's answer quotes.
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    sessions = _sessions(adapter, monkeypatch)
+    posts = _backend(adapter, monkeypatch)
+    _gateway_takes(adapter, sessions)
+    if person_first:
+        await _deliver(adapter, "push", _row(
+            "push", message_id=900, to=AGENT_A, text="@Achilles what is the status?",
+        ))
+        await adapter.send(chat_id=CHAT_ID, content="Achilles: all green.")
+        del sessions[SESSION]
+        await asyncio.sleep(0.05)
+    await _deliver(adapter, "push", _tag("push", message_id=901))
+    await _deliver(adapter, "push", _tag("push", message_id=903))
+    await adapter.send(chat_id=CHAT_ID, content="Achilles: the build passed.")
+    del sessions[SESSION]
+    await asyncio.sleep(0.1)
+    await adapter.send(chat_id=CHAT_ID, content="Achilles: the docs are fine.")
+    assert [p["reply_to_id"] for p in posts[-2:]] == [901, 903]
+    await adapter.disconnect()
+
+
+async def test_a_held_tag_is_dropped_if_hermes_is_paused_when_the_turn_ends(monkeypatch):
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[SESSION] = object()
+    _paused(monkeypatch, None)
+    got = _capture(adapter)
+    await _deliver(adapter, "push", _tag("push"))
+    assert got == []
+    _paused(monkeypatch, "Hermes is paused.")
+    del sessions[SESSION]
+    await asyncio.sleep(0.1)
+    assert got == []
+    await adapter.disconnect()
+
+
+async def test_a_tag_held_when_the_adapter_stops_is_dropped_and_logged(monkeypatch, caplog):
+    # A restart or a shutdown while the agent is busy: the held tag is not
+    # handed to a gateway that is going away. The agent's cursor has moved
+    # past it, so it is not answered after the restart either; the log says
+    # so.
+    adapter = _adapter()
+    _gateway_wrap(adapter, monkeypatch)
+    _release_every(monkeypatch, 0.01)
+    sessions = _sessions(adapter, monkeypatch)
+    sessions[SESSION] = object()
+    got = _capture(adapter)
+    await _deliver(adapter, "push", _tag("push"))
+    assert got == []
+    with caplog.at_level(logging.WARNING):
+        await adapter.disconnect()
+    del sessions[SESSION]
+    await asyncio.sleep(0.1)
+    assert got == []
+    assert "dropping 1 held room_agent row" in caplog.text
 
 
 @pytest.mark.parametrize("lane", ("push", "poll"))
@@ -425,6 +684,7 @@ async def test_a_second_profiles_running_turn_keeps_its_tag_unanchored_after_its
     await adapter.send(chat_id=CHAT_ID, content="Shadow: the build is green.")
     assert posts[-1]["assistant_id"] == AGENT_B
     assert posts[-1]["reply_to_id"] is None, "the person's answer must not quote the tag"
+    await adapter.disconnect()
 
 
 def _profiles(monkeypatch) -> None:

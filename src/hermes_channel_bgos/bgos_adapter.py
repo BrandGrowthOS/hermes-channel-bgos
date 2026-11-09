@@ -16,7 +16,7 @@ import base64
 import contextlib
 import contextvars
 import itertools
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import json
 import logging
 import mimetypes
@@ -860,6 +860,11 @@ _SEATED_CHAT_KINDS = frozenset({"room", "channel"})
 # How long a tag waits to be answered by the next real reply in its chat. The
 # agent may stay silent, and a later unrelated post must not quote the tag.
 _ROOM_AGENT_ANCHOR_TTL_S = 30 * 60
+# How often the adapter looks again at a gateway session it holds another
+# agent's tags for (0.32.3), until no turn runs in it.
+_HELD_TAG_POLL_S = 0.25
+# At most this many tags wait for one session; a tag past it is dropped.
+_HELD_TAGS_MAX = 10
 
 # THE AGENT A TURN SPEAKS AS. One pairing can serve two agents seated in the
 # same group (one gateway, multiplexed profiles), and the chat's latest
@@ -1683,6 +1688,15 @@ class BGOSAdapter(BasePlatformAdapter):
         # exposes one; it covers a turn after its first bubble).
         self._person_turn_unanswered: set[tuple[int, int | None]] = set()
         self._person_turn_session_key: dict[tuple[int, int | None], str] = {}
+        # Another agent's tags held while the tagged agent's gateway session
+        # runs a turn, oldest first, per session key, and the task that hands
+        # them over once it is free (_hold_room_agent_tag).
+        self._held_room_agent_tags: dict[str, deque] = {}
+        self._held_room_agent_tasks: dict[str, asyncio.Task] = {}
+        # A person's message (or tap) the gateway is still taking, per
+        # session key: its session is not marked busy until handle_message
+        # returns (it waits at its burst gate first).
+        self._person_handovers: dict[str, int] = {}
         self._quiet_failsafe_tasks: dict[tuple[int, int | None], asyncio.Task] = {}
         # Adaptive text-batching for rapid inbound user messages. Mobile
         # clients sometimes split a long transcription or paste into multiple
@@ -2907,22 +2921,27 @@ class BGOSAdapter(BasePlatformAdapter):
 
     async def _hand_over(
         self, event: Any, chat_id: Any, assistant_id: Any,
+        *, tag_anchor: int | None = None,
     ) -> None:
         """handle_message, as the agent the row was addressed to: the turn
         the gateway starts for it speaks as that agent (_TURN_SPEAKER).
 
         Another agent's tag (0.32.3) never cuts into a person's running turn.
-        While its session is busy it goes in as an internal event, which
-        hermes-agent v0.23.0 queues behind the running turn and never uses to
-        interrupt or steer it (run_busy.py). An internal event also skips
-        every gate for a new turn (run_inbound.py _hm_admit_event and
-        _hm_estop_gate: /pause, the startup restore, a maintenance drain,
-        auth, the bot chain guard), so a tag for an idle session goes in as
-        a normal message, and while Hermes is paused or draining it is not
-        handed over at all: nobody typed it, and Hermes sends nothing for
-        its own synthetic turns then either. The gateway sets no reply
-        anchor for an internal event; the adapter's own tag anchor gives the
-        reply its reply_to_id."""
+        A normal message to a busy session interrupts its turn, and an
+        internal event queued behind it did not run until a pause or a drain
+        (hermes-agent v0.23.0). So while the tagged agent's session runs a
+        turn, or still holds earlier tags, the tag is held here and handed
+        over as a normal message once the session is free
+        (_release_room_agent_tags). A tag for a free session goes in at
+        once. While Hermes is paused or draining a tag is not handed over at
+        all: nobody typed it, and Hermes sends nothing for its own synthetic
+        turns then either. Without the gateway's session tracking a tag goes
+        in at once, as before.
+
+        `tag_anchor` is the tag's own message id when its answer may quote
+        it (no person's words or turn came first), else None. It is applied
+        only when the tag goes in here; a held tag leaves the anchor of the
+        turn it waits behind alone, and is anchored when it is released."""
         row = getattr(event, "raw_message", None) or event
         if getattr(row, "sender_type", None) == "room_agent":
             if self._gateway_takes_no_new_turn():
@@ -2931,12 +2950,116 @@ class BGOSAdapter(BasePlatformAdapter):
                     "or draining", getattr(row, "message_id", None),
                 )
                 return
-            if hasattr(event, "internal") and self._voice_turn_active(
-                self._voice_session_key(getattr(event, "source", None)),
-            ) is True:
-                event.internal = True
-        with _speaking_as(chat_id, assistant_id):
-            await self.handle_message(event)
+            session_key = self._voice_session_key(getattr(event, "source", None))
+            if session_key and (
+                session_key in self._held_room_agent_tags
+                or self._voice_turn_active(session_key) is True
+            ):
+                self._hold_room_agent_tag(session_key, event, chat_id, assistant_id)
+                return
+            if tag_anchor is None:
+                self._room_agent_reply_anchor.pop((chat_id, assistant_id), None)
+            else:
+                self._room_agent_reply_anchor[(chat_id, assistant_id)] = (
+                    tag_anchor, time.monotonic(),
+                )
+            with _speaking_as(chat_id, assistant_id):
+                await self.handle_message(event)
+            return
+        person_key = self._voice_session_key(getattr(event, "source", None))
+        if person_key:
+            self._person_handovers[person_key] = (
+                self._person_handovers.get(person_key, 0) + 1
+            )
+        try:
+            with _speaking_as(chat_id, assistant_id):
+                await self.handle_message(event)
+        finally:
+            if person_key:
+                left = self._person_handovers.get(person_key, 1) - 1
+                if left > 0:
+                    self._person_handovers[person_key] = left
+                else:
+                    self._person_handovers.pop(person_key, None)
+
+    def _hold_room_agent_tag(
+        self, session_key: str, event: Any, chat_id: Any, assistant_id: Any,
+    ) -> None:
+        """Hold another agent's tag behind the turn running in its gateway
+        session, after the tags already held there."""
+        held = self._held_room_agent_tags.setdefault(session_key, deque())
+        row = getattr(event, "raw_message", None) or event
+        if len(held) >= _HELD_TAGS_MAX:
+            log.warning(
+                "dropping room_agent row message_id=%s: %d tags already wait "
+                "for the turn running in its session",
+                getattr(row, "message_id", None), len(held),
+            )
+            return
+        held.append((event, chat_id, assistant_id))
+        log.info(
+            "holding room_agent row message_id=%s until the turn running in "
+            "its session ends", getattr(row, "message_id", None),
+        )
+        task = self._held_room_agent_tasks.get(session_key)
+        if task is None or task.done():
+            self._held_room_agent_tasks[session_key] = asyncio.get_running_loop().create_task(
+                self._release_room_agent_tags(session_key),
+            )
+
+    async def _release_room_agent_tags(self, session_key: str) -> None:
+        """Hand one gateway session's held tags over, oldest first, each once
+        the session is free: no turn runs in it, none of a person's words to
+        that agent still wait in the text batch, and no person's message is
+        still being taken by the gateway (those go first). Each tag
+        goes in as a normal message, in a turn of its own, and is anchored
+        like a tag that found the session free. One that finds Hermes paused
+        or draining by then, or its agent gone from this pairing, is
+        dropped. The session stays held while a tag is
+        handed over, so a tag arriving meanwhile waits its turn."""
+        held = self._held_room_agent_tags.get(session_key)
+        try:
+            while held:
+                event, chat_id, assistant_id = held[0]
+                if (
+                    self._voice_turn_active(session_key) is True
+                    or (chat_id, assistant_id) in self._pending_text_batches
+                    or self._person_handovers.get(session_key)
+                ):
+                    await asyncio.sleep(_HELD_TAG_POLL_S)
+                    continue
+                held.popleft()
+                row = getattr(event, "raw_message", None) or event
+                message_id = getattr(row, "message_id", None)
+                if self._gateway_takes_no_new_turn():
+                    log.info(
+                        "dropping held room_agent row message_id=%s: Hermes "
+                        "is paused or draining", message_id,
+                    )
+                    continue
+                if self._state.get_route(assistant_id) is None:
+                    log.info(
+                        "dropping held room_agent row message_id=%s: its agent "
+                        "left this pairing", message_id,
+                    )
+                    continue
+                if isinstance(message_id, int) and not isinstance(message_id, bool):
+                    self._room_agent_reply_anchor[(chat_id, assistant_id)] = (
+                        message_id, time.monotonic(),
+                    )
+                try:
+                    with _speaking_as(chat_id, assistant_id):
+                        await self.handle_message(event)
+                except Exception:
+                    log.exception(
+                        "handing over held room_agent row message_id=%s failed",
+                        message_id,
+                    )
+        finally:
+            if not held and self._held_room_agent_tags.get(session_key) is held:
+                self._held_room_agent_tags.pop(session_key, None)
+            if self._held_room_agent_tasks.get(session_key) is asyncio.current_task():
+                self._held_room_agent_tasks.pop(session_key, None)
 
     async def handle_message(self, event: Any) -> None:
         """Every turn speaks as the agent its event names (0.32.3): the BGOS
@@ -2999,8 +3122,8 @@ class BGOSAdapter(BasePlatformAdapter):
 
     async def _handle_assistant_unbound(self, data: dict) -> None:
         """WebSocket `assistant_unbound` (0.32.3): an agent was deleted or
-        unbound from this pairing while the pairing still serves others
-        (HOAI #3706). Drop its route and leave its room at once, instead of
+        unbound from this pairing while the pairing still serves others.
+        Drop its route and leave its room at once, instead of
         keeping a dead route until the next restart. Another pairing's event
         is ignored."""
         if not isinstance(data, dict):
@@ -3059,6 +3182,25 @@ class BGOSAdapter(BasePlatformAdapter):
         don't get a chance to hit a closed httpx client (which would
         raise `RuntimeError: Cannot send a request...` deep in httpx).
         """
+        # Another agent's tags still held behind a running turn (0.32.3) are
+        # dropped: the gateway they wait for is going away. The agent's
+        # cursor has moved past them, so after a restart they are not
+        # answered either.
+        held_tasks = [
+            t for t in self._held_room_agent_tasks.values() if not t.done()
+        ]
+        for task in held_tasks:
+            task.cancel()
+        if held_tasks:
+            await asyncio.gather(*held_tasks, return_exceptions=True)
+        held_count = sum(len(q) for q in self._held_room_agent_tags.values())
+        if held_count:
+            log.warning(
+                "dropping %d held room_agent row(s): the adapter is stopping, "
+                "and they will not be answered", held_count,
+            )
+        self._held_room_agent_tasks.clear()
+        self._held_room_agent_tags.clear()
         # Snapshot + cancel pending edit flushes before clearing the dict
         # so iteration doesn't race with a flush mutating it.
         pending_tasks = [
@@ -6452,6 +6594,7 @@ class BGOSAdapter(BasePlatformAdapter):
                 return
 
         event = MessageEvent.from_ws(data, agent_route=route)
+        tag_anchor: int | None = None
         if from_room_agent:
             # The tag skips the batch: a person's words still waiting in it
             # go first, in order (second review).
@@ -6467,15 +6610,14 @@ class BGOSAdapter(BasePlatformAdapter):
             # words pending the tag is not anchored at all, since losing one
             # quote is better than quoting it on the person's answer.
             # The same holds while a person's turn is still running: its
-            # answer is the next real bubble (review).
-            if person_words_pending or self._person_turn_running(
-                event.chat_id, aid_int,
-            ):
-                self._room_agent_reply_anchor.pop((event.chat_id, aid_int), None)
-            elif isinstance(event.message_id, int):
-                self._room_agent_reply_anchor[(event.chat_id, aid_int)] = (
-                    event.message_id, time.monotonic(),
-                )
+            # answer is the next real bubble (review). The anchor itself is
+            # set where the tag goes in (_hand_over): a tag held behind a
+            # running turn leaves that turn's quote alone.
+            if not (
+                person_words_pending
+                or self._person_turn_running(event.chat_id, aid_int)
+            ) and isinstance(event.message_id, int):
+                tag_anchor = event.message_id
         # The addressed assistant was cached separately above. Do not cache it
         # as the chat owner. For a2a peer messages, chat.assistantId may be the
         # peer-side thread owner, which send() resolves for the peer bridge.
@@ -6552,8 +6694,8 @@ class BGOSAdapter(BasePlatformAdapter):
             # so the fork's auth gate (which requires source.user_id) lets
             # them through instead of dropping.
             is_backfill = user_id is None
-            # Another agent's tag is made internal at the hand-over, and only
-            # while its session is busy (_hand_over).
+            # Another agent's tag waits for a busy session in the adapter and
+            # goes in as a normal message (_hand_over).
             internal_turn = is_backfill
             try:
                 source = self.build_source(  # type: ignore[attr-defined]
@@ -6564,7 +6706,9 @@ class BGOSAdapter(BasePlatformAdapter):
                 # and hope the base class's default is forgiving. Use the
                 # agent-visible text so attachments still surface.
                 event.text = agent_visible_text
-                await self._hand_over(event, event.chat_id, aid_int)
+                await self._hand_over(
+                    event, event.chat_id, aid_int, tag_anchor=tag_anchor,
+                )
                 return
             self._stamp_source_profile(source, route)
             if not from_room_agent:
@@ -6635,10 +6779,14 @@ class BGOSAdapter(BasePlatformAdapter):
                             setattr(gateway_event, attr, value)
                         except Exception:
                             pass
-            await self._hand_over(gateway_event, event.chat_id, aid_int)
+            await self._hand_over(
+                gateway_event, event.chat_id, aid_int, tag_anchor=tag_anchor,
+            )
         else:
             event.text = agent_visible_text
-            await self._hand_over(event, event.chat_id, aid_int)
+            await self._hand_over(
+                event, event.chat_id, aid_int, tag_anchor=tag_anchor,
+            )
 
     def _should_batch_event(self, event: "MessageEvent") -> bool:
         """Eligible for batching: standard plain-text only (no slash

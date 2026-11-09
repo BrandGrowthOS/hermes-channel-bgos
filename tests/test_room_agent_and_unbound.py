@@ -1,6 +1,6 @@
 """Another agent's group row (room_agent) and a deleted agent (0.32.3).
 
-HOAI #3703 (2026-10-31): in a group or a channel an agent's @tag of another
+BGOS (2026-10-31): in a group or a channel an agent's @tag of another
 seated agent wakes it. The row is handed to the tagged agent marked
 ``senderType: 'room_agent'`` with the author's ``senderAssistantId``, and the
 backend serves it only to a connector that reads the marker
@@ -10,7 +10,7 @@ agent wrote it, it is never a bridge-local command, never batched with a
 person's words, never the agent's own, and the first reply answers the tag
 with reply_to_id set to its message.
 
-HOAI #3706 (2026-10-31): deleting an agent unbinds it from a pairing that
+BGOS (2026-10-31): deleting an agent unbinds it from a pairing that
 serves other agents and tells the pairing ``assistant_unbound``. The adapter
 now drops the agent's route and leaves its room at once, instead of keeping
 a dead route until the next restart.
