@@ -6322,6 +6322,31 @@ class BGOSAdapter(BasePlatformAdapter):
         # reset acks in a row" loop caught 2026-05-15.
         msg_id = data.get("message_id")
         aid_int = self._int_or_none(assistant_id)
+        # Another agent's row with no body yet (0.32.3): the poll can hand one
+        # over before its first edit. Nothing to read, and the framing alone
+        # must not wake the agent; the body is read inside the server's
+        # framing, which wraps an empty body as well. The row is passed over
+        # (its cursor moves, so the poll does not serve it again) but NOT
+        # remembered as dispatched: the backend pushes it once its text has
+        # settled, under the same id, and that push must wake the agent
+        # instead of being taken for a duplicate.
+        if data.get("sender_type") == "room_agent":
+            _author = _positive_int_or_none(data.get("sender_assistant_id"))
+            body = _room_agent_body(str(data.get("text") or ""))
+            if (
+                _author is not None
+                and aid_int is not None
+                and _author != aid_int
+                and not body.strip()
+                and not data.get("files")
+            ):
+                if isinstance(msg_id, int):
+                    self._save_agent_cursor(assistant_id, msg_id)
+                    self._cursors.clear_pending(aid_int, msg_id)
+                log.info(
+                    "dropping room_agent row message_id=%s: no text yet", msg_id,
+                )
+                return
         if dedup and isinstance(msg_id, int):
             dedup_key = (self._int_or_none(assistant_id), msg_id)
             if dedup_key in self._dispatched_inbound_ids:
@@ -6357,16 +6382,6 @@ class BGOSAdapter(BasePlatformAdapter):
                     "dropping room_agent row message_id=%s: the agent's own, "
                     "or its author is unknown",
                     msg_id,
-                )
-                return
-            # No body yet (the poll can hand over an agent's row before its
-            # first edit): nothing to read, and the framing line alone must
-            # not wake the agent. The body is read inside the server's
-            # framing, which wraps an empty body as well.
-            body = _room_agent_body(str(data.get("text") or ""))
-            if not body.strip() and not data.get("files"):
-                log.info(
-                    "dropping room_agent row message_id=%s: no text yet", msg_id,
                 )
                 return
 

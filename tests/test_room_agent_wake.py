@@ -270,6 +270,28 @@ async def test_another_agents_empty_message_in_the_servers_framing_does_not_wake
     assert got == []
 
 
+async def test_an_agents_row_the_poll_read_before_its_text_wakes_the_agent_once_its_text_is_pushed():
+    # The poll serves an agent's row as soon as it exists; the push waits
+    # until it has settled and then delivers it, under the same id. The
+    # empty read must not make the settled push look like a duplicate.
+    adapter = _adapter()
+    got = _capture(adapter)
+    text = _server_framed("@Echo can you check the build?")
+    await _deliver(adapter, "poll", "room", text=_server_framed(""),
+                   **_room_agent(OTHER_ASSISTANT_ID))
+    await _deliver(adapter, "push", "room", text=text, **_room_agent(OTHER_ASSISTANT_ID))
+    await _deliver(adapter, "poll", "room", text=text, **_room_agent(OTHER_ASSISTANT_ID))
+    assert [event.text for event in got] == [text]
+
+
+async def test_an_agents_empty_row_still_moves_the_agents_cursor_past_it():
+    adapter = _adapter()
+    _capture(adapter)
+    await _deliver(adapter, "poll", "room", text=_server_framed(""),
+                   **_room_agent(OTHER_ASSISTANT_ID))
+    assert adapter._cursors.get(OWN_ASSISTANT_ID) == 901
+
+
 @pytest.mark.parametrize("shape", ["read", "follow_up"])
 @pytest.mark.parametrize("chat_kind", CHAT_KINDS)
 @pytest.mark.parametrize("lane", LANES)
