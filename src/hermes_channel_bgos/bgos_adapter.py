@@ -902,11 +902,22 @@ def room_agent_provenance_line(sender_assistant_id: int | None) -> str:
     )
 
 
+# The start of the server's framing, its header line (renderPreamble).
+_SERVER_FRAMING_HEADER = "[BGOS "
+
+
 def _room_agent_body(text: str) -> str:
     """The body of another agent's row, without the server's framing. The
-    server puts its preamble (the framing sentence among its lines), then a
-    blank line, then the body (group-context.ts withDispatchPreamble), and it
-    frames an empty body too. Unframed text is its own body."""
+    server puts its preamble, then a blank line, then the body
+    (group-context.ts withDispatchPreamble), and it frames an empty body too.
+    The preamble starts with its header and has no blank line in it (each
+    name is printed on one line, backlog lines are indented), so the first
+    blank line ends it. That holds when the room could not be read too, and
+    then no line names the writer. Other text is cut after the framing
+    sentence, and unframed text is its own body."""
+    if text.startswith(_SERVER_FRAMING_HEADER):
+        end = text.find("\n\n")
+        return text[end + 2:] if end >= 0 else text
     at = text.find(_SERVER_AGENT_FRAMING)
     if at < 0:
         return text

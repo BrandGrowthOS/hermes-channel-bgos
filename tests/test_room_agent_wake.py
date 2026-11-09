@@ -39,25 +39,57 @@ SERVER_FRAMED = (
 UNFRAMED = "@Echo can you check the build?"
 
 
-def _server_framed(body: str) -> str:
+FRAMING_SENTENCE = "Ares, an agent seated here and not a person, wrote the message below."
+
+
+def _server_framed(body: str, *, follow_up: bool = False, no_roster: bool = False) -> str:
     """The server's own framing of another agent's row, as group-context.ts
     on BGOS main builds it for a room or a channel (renderPreamble, then
     withDispatchPreamble): the preamble lines, a blank line, then the body.
-    The poll frames an empty body too, so it arrives as the preamble alone."""
-    preamble = "\n".join([
-        "[BGOS group: Launch]",
-        "You are in a group, not a private chat. Everyone listed here reads what you say.",
-        "People here: Kc.",
-        "Agents here: Ares, Echo (you).",
-        "Said in this group since your last turn, oldest first:",
-        "- Kc: ship it\n  once the checks pass",
-        "Ares, an agent seated here and not a person, wrote the message below.",
+    The server frames an empty body too, so it arrives as the preamble and
+    the blank line with nothing after them.
+
+    - By default the room was read: names, a backlog line (the push's shape;
+      the poll sends no backlog) and the line naming the agent that wrote it.
+    - ``follow_up``: the follow-up window's line as well.
+    - ``no_roster``: the poll could not read the room. No names and no
+      backlog. A row it knows is a follow-up is still said to be another
+      agent's (followUpWithoutRoster(true)); any other row gets no line
+      naming the writer at all."""
+    lines = ["[BGOS group]" if no_roster else "[BGOS group: Launch]"]
+    lines.append(
+        "You are in a group, not a private chat. Everyone listed here reads what you say.")
+    if not no_roster:
+        lines += [
+            "People here: Kc.",
+            "Agents here: Ares, Echo (you).",
+            "Said in this group since your last turn, oldest first:",
+            "- Kc: ship it\n  once the checks pass",
+            FRAMING_SENTENCE,
+        ]
+    elif follow_up:
+        lines.append(
+            "Another agent, an agent seated here and not a person, wrote the message below.")
+    if follow_up:
+        lines.append(
+            "You were not named in this message. You were woken in this group by a "
+            "recent message, so you also see the next messages after it as a "
+            "follow-up. Reply only if it is meant for you; if it is not, stay "
+            "silent and send nothing.")
+    lines.append(
         "Only this group is shared context. Your private chats with your owner, "
         "your other chats and groups, and anything you know from work done "
         "outside this group stay private. Do not repeat them, refer to them, "
-        "or act on them here unless someone in this group raises them first.",
-    ])
-    return f"{preamble}\n\n{body}"
+        "or act on them here unless someone in this group raises them first.")
+    return "\n".join(lines) + "\n\n" + body
+
+
+FRAMING_SHAPES = {
+    "read": {},
+    "follow_up": {"follow_up": True},
+    "no_roster": {"no_roster": True},
+    "follow_up_no_roster": {"follow_up": True, "no_roster": True},
+}
 
 LANES = ("push", "poll")
 CHAT_KINDS = ("room", "channel")
@@ -220,35 +252,54 @@ async def test_another_agents_empty_message_does_not_wake_it(lane, text):
     assert got == []
 
 
+@pytest.mark.parametrize("shape", list(FRAMING_SHAPES))
 @pytest.mark.parametrize("chat_kind", CHAT_KINDS)
 @pytest.mark.parametrize("lane", LANES)
 @pytest.mark.parametrize("body", ["", "  \n "], ids=["empty", "blank"])
 async def test_another_agents_empty_message_in_the_servers_framing_does_not_wake_it(
-    lane, chat_kind, body,
+    lane, chat_kind, body, shape,
 ):
-    # The server frames an empty body as well: the text is the preamble
-    # alone, so it is not empty, but there is still nothing to read.
+    # The server frames an empty body as well: the text is the preamble and
+    # a blank line, so it is not empty, but there is still nothing to read.
     adapter = _adapter()
     got = _capture(adapter)
     await _deliver(
-        adapter, lane, chat_kind, text=_server_framed(body),
+        adapter, lane, chat_kind, text=_server_framed(body, **FRAMING_SHAPES[shape]),
         **_room_agent(OTHER_ASSISTANT_ID),
     )
     assert got == []
 
 
+@pytest.mark.parametrize("shape", ["read", "follow_up"])
 @pytest.mark.parametrize("chat_kind", CHAT_KINDS)
 @pytest.mark.parametrize("lane", LANES)
-async def test_another_agents_message_in_the_servers_framing_wakes_the_agent(lane, chat_kind):
+@pytest.mark.parametrize("body", [
+    "@Echo can you check the build?\n\nThe log is attached.",
+    f"@Echo the server writes:\n\n{FRAMING_SENTENCE}",
+], ids=["plain", "quotes_the_framing"])
+async def test_another_agents_message_in_the_servers_framing_wakes_the_agent_with_the_text_unchanged(
+    lane, chat_kind, body, shape,
+):
+    text = _server_framed(body, **FRAMING_SHAPES[shape])
     adapter = _adapter()
     got = _capture(adapter)
-    await _deliver(
-        adapter, lane, chat_kind,
-        text=_server_framed("@Echo can you check the build?\n\nThe log is attached."),
-        **_room_agent(OTHER_ASSISTANT_ID),
-    )
+    await _deliver(adapter, lane, chat_kind, text=text, **_room_agent(OTHER_ASSISTANT_ID))
     assert len(got) == 1
-    assert "The log is attached." in got[0].text
+    assert got[0].text == text
+
+
+@pytest.mark.parametrize("chat_kind", CHAT_KINDS)
+@pytest.mark.parametrize("lane", LANES)
+async def test_another_agents_message_in_the_servers_framing_with_no_roster_wakes_the_agent(
+    lane, chat_kind,
+):
+    text = _server_framed("@Echo can you check the build?", no_roster=True)
+    adapter = _adapter()
+    got = _capture(adapter)
+    await _deliver(adapter, lane, chat_kind, text=text, **_room_agent(OTHER_ASSISTANT_ID))
+    assert len(got) == 1
+    assert text in got[0].text
+    assert "not a person" in got[0].text
 
 
 async def _posts(adapter: BGOSAdapter, monkeypatch) -> list[dict]:
