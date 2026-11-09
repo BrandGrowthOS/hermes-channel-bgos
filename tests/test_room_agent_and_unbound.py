@@ -227,7 +227,7 @@ async def test_a_tool_progress_send_does_not_use_up_the_anchor(monkeypatch):
 
     monkeypatch.setattr(adapter, "_handle_tool_progress_edit", fake_progress)
     await adapter.send(chat_id=300, content='\U0001f4bb terminal: "ls -la"')
-    assert edits == [300]
+    assert edits == [(300, 7)]  # the chat, as the agent the tag was addressed to
     await adapter.send(chat_id=300, content="Here is my answer.")
     assert posts[-1]["text"].startswith("Here is my answer.")
     assert posts[-1]["reply_to_id"] == 901

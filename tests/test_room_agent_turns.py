@@ -582,3 +582,151 @@ async def test_a_tap_on_one_agents_card_does_not_drop_the_others_tag(monkeypatch
     await turns.reply(AGENT_A, "Achilles: the build is green.")
     achilles = [p for p in posts if p["assistant_id"] == AGENT_A]
     assert achilles[-1]["reply_to_id"] == 990, "a tap on B's card is not an answer to A's tag"
+
+
+# --- Two agents of one pairing working in one group at once -------------------
+#
+# Everything a turn keeps while it streams (the edit throttle, the tool
+# progress card, quiet mode's held output, the last message a peer call
+# anchors on) belongs to one agent in one chat. Each agent's turn below runs
+# as that agent (_speaking_as), the way the gateway's turn task does.
+
+
+class _Wire:
+    """BGOS as two agents' turns see it: every post and every edit."""
+
+    def __init__(self, adapter: BGOSAdapter, monkeypatch) -> None:
+        self.posts: list[dict] = []
+        self.patches: list[tuple[int, dict]] = []
+        self._next_id = 3000
+
+        async def get_chat(chat_id: int) -> dict:
+            return {"id": chat_id, "kind": "room", "assistantId": AGENT_A}
+
+        async def post_send_message(**kw: Any) -> dict:
+            self.posts.append(kw)
+            return {"message": {"id": self._new_id()}}
+
+        async def post_message(**kw: Any) -> dict:
+            self.posts.append(kw)
+            return {"id": self._new_id()}
+
+        async def patch_message(message_id: int, **kw: Any) -> dict:
+            self.patches.append((message_id, kw))
+            return {}
+
+        async def delete_message(message_id: int) -> dict:
+            return {}
+
+        for name, fake in (
+            ("get_chat", get_chat),
+            ("post_send_message", post_send_message),
+            ("post_message", post_message),
+            ("patch_message", patch_message),
+            ("delete_message", delete_message),
+        ):
+            monkeypatch.setattr(adapter._api, name, fake)
+
+    def _new_id(self) -> int:
+        self._next_id += 1
+        return self._next_id
+
+    def cards(self) -> list[dict]:
+        return [p for p in self.posts if p.get("message_type") == "tool_progress"]
+
+
+async def _both_agents_asked(adapter: BGOSAdapter) -> None:
+    """A person asks A, then B (so B is the chat's latest addressed agent)."""
+    _capture(adapter)
+    for message_id, to in ((990, AGENT_A), (991, AGENT_B)):
+        await _deliver(adapter, "push", _row(
+            "push", message_id=message_id, to=to, text="@both status?",
+        ))
+
+
+async def test_each_agents_streamed_edit_lands_while_the_other_streams(monkeypatch):
+    adapter = _adapter()
+    wire = _Wire(adapter, monkeypatch)
+    await _both_agents_asked(adapter)
+    adapter._edit_throttle_seconds = 0.2
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
+        await adapter.edit_message(CHAT_ID, 1001, "Achilles: checking")
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
+        await adapter.edit_message(CHAT_ID, 1002, "Shadow: the build is green.")
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
+        await adapter.edit_message(CHAT_ID, 1001, "Achilles: the tests pass.")
+    await asyncio.sleep(0.4)
+    last_text = {mid: kw.get("text") for mid, kw in wire.patches}
+    assert last_text.get(1002) == "Shadow: the build is green.", (
+        "B's edit must not be dropped for A's"
+    )
+    assert last_text.get(1001) == "Achilles: the tests pass."
+
+
+async def test_each_agents_tools_get_a_card_of_their_own(monkeypatch):
+    adapter = _adapter()
+    wire = _Wire(adapter, monkeypatch)
+    await _both_agents_asked(adapter)
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
+        await adapter.edit_message(CHAT_ID, 500, '📖 read_file: "/etc/hostname"')
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
+        await adapter.edit_message(CHAT_ID, 600, '📖 read_file: "/etc/hosts"')
+    assert len(wire.cards()) == 2, "B's tools must not be patched into A's card"
+    assert wire.patches == [], "neither card is patched with the other agent's tools"
+    # A's turn ends (the gateway deletes A's streaming preview): only A's
+    # card is closed, B's keeps running.
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
+        await adapter.delete_message(CHAT_ID, 500)
+    done = [
+        mid for mid, kw in wire.patches
+        if (kw.get("tool_progress") or {}).get("state") == "done"
+    ]
+    assert len(done) == 1
+    assert adapter._tool_progress_card_id_by_chat, "B's card is still open"
+
+
+async def test_another_agents_reply_does_not_cancel_an_agents_quiet_failsafe(monkeypatch):
+    monkeypatch.delenv("BGOS_CHAT_STYLE", raising=False)
+    adapter = _adapter()
+    wire = _Wire(adapter, monkeypatch)
+    await _both_agents_asked(adapter)
+    adapter._quiet_failsafe_seconds = 0.1
+    tool_json = '{"name":"calendar_read","arguments":{"start":"2026-07-18"}}'
+    # A's turn produced only a tool dump, which quiet mode holds back.
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
+        await adapter.send(chat_id=CHAT_ID, content=tool_json)
+    # B answers in prose meanwhile.
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
+        await adapter.send(chat_id=CHAT_ID, content="Shadow: all good.")
+    await asyncio.sleep(0.3)
+    finals = [
+        p for p in wire.posts
+        if p.get("message_type") != "tool_progress" and p.get("text") != "Shadow: all good."
+    ]
+    assert finals, "A's held output must still be posted when A sends no prose"
+
+
+async def test_an_agents_peer_call_anchors_on_that_agents_own_last_message(monkeypatch):
+    adapter = _adapter()
+    wire = _Wire(adapter, monkeypatch)
+    await _both_agents_asked(adapter)
+    anchors: list[Any] = []
+    monkeypatch.setattr(
+        adapter,
+        "_schedule_peer_requests",
+        lambda chat_key, requests, errors, anchor: anchors.append(anchor),
+    )
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
+        await adapter.send(chat_id=CHAT_ID, content="Shadow: I will ask the reviewer.")
+    shadow_message = wire.posts[-1]
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_A):
+        await adapter.send(chat_id=CHAT_ID, content="Achilles: noted.")
+    # B's marker-only send: its side thread hangs off B's own last message.
+    with bgos_adapter_module._speaking_as(CHAT_ID, AGENT_B):
+        await adapter.send(
+            chat_id=CHAT_ID,
+            content='[[BGOS_PEER]]{"op":"send_to_peer","target":894,'
+            '"text":"Ping","reqId":"s1"}[[/BGOS_PEER]]',
+        )
+    assert shadow_message["assistant_id"] == AGENT_B
+    assert anchors == [3001 + wire.posts.index(shadow_message)]

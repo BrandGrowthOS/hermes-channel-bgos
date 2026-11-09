@@ -95,7 +95,7 @@ async def test_adapter_send_posts_text_message(mock_bgos_server):
 
         # Adapter records the last assistant message id per chat for future
         # streaming-edit support
-        assert adapter._state.last_assistant_message_by_chat[11] == 300
+        assert adapter._state.last_assistant_message_by_chat[adapter._lane(11)] == 300
     finally:
         await adapter.disconnect()
 
@@ -579,10 +579,10 @@ async def test_deferred_flush_clears_pending_edit_entry(monkeypatch):
 
     await adapter.edit_message(chat_id=1, message_id=9, content="v1")  # immediate
     await adapter.edit_message(chat_id=1, message_id=9, content="v2")  # pending
-    assert 1 in adapter._pending_edits
+    assert adapter._lane(1) in adapter._pending_edits
     await asyncio.sleep(0.15)  # let the deferred flush run
-    assert 1 not in adapter._pending_edits
-    assert 1 not in adapter._pending_edit_content
+    assert adapter._lane(1) not in adapter._pending_edits
+    assert adapter._lane(1) not in adapter._pending_edit_content
 
 
 async def test_disconnect_cancels_pending_edit_flushes(monkeypatch):
@@ -603,8 +603,8 @@ async def test_disconnect_cancels_pending_edit_flushes(monkeypatch):
     await adapter.edit_message(chat_id=42, message_id=300, content="second")
 
     # Pending flush exists and is unfinished.
-    assert 42 in adapter._pending_edits
-    pending = adapter._pending_edits[42]
+    assert adapter._lane(42) in adapter._pending_edits
+    pending = adapter._pending_edits[adapter._lane(42)]
     assert not pending.done()
 
     await adapter.disconnect()

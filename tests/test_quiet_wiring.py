@@ -161,7 +161,7 @@ async def test_function_call_json_send_never_posts_standard(
             "tools"
         ]
         assert any(tool["name"] == "calendar_read" for tool in tools)
-        assert adapter._quiet_suppressed_text[CHAT_ID] == TOOL_JSON
+        assert adapter._quiet_suppressed_text[adapter._lane(CHAT_ID)] == TOOL_JSON
         assert result.message_id == str(CARD_ID)
     finally:
         await adapter.disconnect()
@@ -404,8 +404,8 @@ async def test_everything_mode_passes_dump_as_chat(mock_bgos_server):
         standards = _standard_post_bodies(mock_bgos_server)
         assert any(body["text"] == TOOL_JSON for body in standards)
         assert _tool_progress_bodies(mock_bgos_server) == []
-        assert CHAT_ID not in adapter._quiet_suppressed_text
-        assert CHAT_ID not in adapter._quiet_failsafe_tasks
+        assert adapter._lane(CHAT_ID) not in adapter._quiet_suppressed_text
+        assert adapter._lane(CHAT_ID) not in adapter._quiet_failsafe_tasks
         preview_patches = [
             request.json_body
             for request in mock_bgos_server.requests
@@ -579,7 +579,7 @@ async def test_deferred_prose_edit_cancels_suppressed_failsafe(
     adapter._edit_throttle_seconds = 0.03
     try:
         await adapter.send(CHAT_ID, TOOL_JSON)
-        adapter._last_edit_at[CHAT_ID] = asyncio.get_running_loop().time()
+        adapter._last_edit_at[adapter._lane(CHAT_ID)] = asyncio.get_running_loop().time()
         await adapter.edit_message(
             CHAT_ID, PREVIEW_ID, "The plan is ready.",
         )
@@ -592,8 +592,8 @@ async def test_deferred_prose_edit_cancels_suppressed_failsafe(
             and request.path == f"/api/v1/messages/{PREVIEW_ID}"
         ]
         assert preview_patches[-1]["text"] == "The plan is ready."
-        assert CHAT_ID not in adapter._quiet_suppressed_text
-        assert CHAT_ID not in adapter._quiet_failsafe_tasks
+        assert adapter._lane(CHAT_ID) not in adapter._quiet_suppressed_text
+        assert adapter._lane(CHAT_ID) not in adapter._quiet_failsafe_tasks
         assert not any(
             body.get("text") == TOOL_JSON
             for body in _standard_post_bodies(mock_bgos_server)
@@ -620,8 +620,8 @@ async def test_prose_edit_does_not_clear_newer_suppression(
             CHAT_ID, PREVIEW_ID, "The plan is ready.",
         )
 
-        assert adapter._quiet_suppressed_text[CHAT_ID] == "newer dump"
-        assert CHAT_ID in adapter._quiet_failsafe_tasks
+        assert adapter._quiet_suppressed_text[adapter._lane(CHAT_ID)] == "newer dump"
+        assert adapter._lane(CHAT_ID) in adapter._quiet_failsafe_tasks
     finally:
         await adapter.disconnect()
 
@@ -644,8 +644,8 @@ async def test_slow_visible_edit_pauses_old_failsafe(
         )
         await asyncio.sleep(0.9)
 
-        assert CHAT_ID not in adapter._quiet_suppressed_text
-        assert CHAT_ID not in adapter._quiet_failsafe_tasks
+        assert adapter._lane(CHAT_ID) not in adapter._quiet_suppressed_text
+        assert adapter._lane(CHAT_ID) not in adapter._quiet_failsafe_tasks
         assert not any(
             body.get("text") == TOOL_JSON
             for body in _standard_post_bodies(mock_bgos_server)

@@ -154,8 +154,8 @@ async def test_edit_message_first_tool_posts_card(mock_bgos_server):
         assert first["args"] == "/etc/hostname"
         assert first["status"] == "done"
         # Card id was tracked so delete_message can finalize it later.
-        assert adapter._tool_progress_card_id_by_chat[42] == 9001
-        assert adapter._tool_progress_preview_to_chat[500] == 42
+        assert adapter._tool_progress_card_id_by_chat[adapter._lane(42)] == 9001
+        assert adapter._tool_progress_preview_to_chat[500] == adapter._lane(42)
     finally:
         await adapter.disconnect()
 
@@ -228,7 +228,7 @@ async def test_send_first_tool_posts_card(mock_bgos_server):
         # `progress_msg_id` points at our card. Subsequent edit_messages
         # target the card directly.
         assert result.message_id == "7001"
-        assert adapter._tool_progress_card_id_by_chat[42] == 7001
+        assert adapter._tool_progress_card_id_by_chat[adapter._lane(42)] == 7001
     finally:
         await adapter.disconnect()
 
@@ -265,7 +265,7 @@ async def test_delete_message_finalizes_card_at_card_id(mock_bgos_server):
         deletes = [r for r in mock_bgos_server.requests
                    if r.method == "DELETE" and r.path == "/api/v1/messages/7001"]
         assert len(deletes) == 0
-        assert 42 not in adapter._tool_progress_card_id_by_chat
+        assert adapter._lane(42) not in adapter._tool_progress_card_id_by_chat
     finally:
         await adapter.disconnect()
 
@@ -298,7 +298,7 @@ async def test_delete_message_finalizes_card(mock_bgos_server):
         final_body = patches[-1].json_body
         assert final_body["toolProgress"]["state"] == "done"
         # The card-id tracking is cleared.
-        assert 42 not in adapter._tool_progress_card_id_by_chat
+        assert adapter._lane(42) not in adapter._tool_progress_card_id_by_chat
         # The actual DELETE on the preview still fires.
         deletes = [r for r in mock_bgos_server.requests
                    if r.method == "DELETE" and r.path == "/api/v1/messages/500"]
@@ -334,7 +334,7 @@ async def test_plain_send_finalizes_active_tool_progress_card(mock_bgos_server):
     try:
         # Turn 1, tool batch — card created.
         await adapter.send(42, '📖 read_file: "/etc/hostname"')
-        assert adapter._tool_progress_card_id_by_chat[42] == 7001
+        assert adapter._tool_progress_card_id_by_chat[adapter._lane(42)] == 7001
 
         # Turn 1 finale — agent posts the answer (no tool markers). This
         # is the new signal: finalize the active card so the next turn
@@ -343,7 +343,7 @@ async def test_plain_send_finalizes_active_tool_progress_card(mock_bgos_server):
         await adapter.send(42, "The hostname is foo.example.com.")
 
         # Card cache cleared.
-        assert 42 not in adapter._tool_progress_card_id_by_chat
+        assert adapter._lane(42) not in adapter._tool_progress_card_id_by_chat
         # The card was PATCHed with state='done' before the plain POST.
         patches = [r for r in mock_bgos_server.requests
                    if r.method == "PATCH" and r.path == "/api/v1/messages/7001"]
@@ -353,7 +353,7 @@ async def test_plain_send_finalizes_active_tool_progress_card(mock_bgos_server):
         # Turn 2 — next tool batch starts a FRESH card (different id).
         mock_bgos_server.on("POST", "/api/v1/messages").respond(200, {"id": 7003})
         await adapter.send(42, '💻 terminal: "uptime"')
-        assert adapter._tool_progress_card_id_by_chat[42] == 7003
+        assert adapter._tool_progress_card_id_by_chat[adapter._lane(42)] == 7003
     finally:
         await adapter.disconnect()
 
@@ -401,7 +401,7 @@ async def test_edit_message_replaces_not_appends(mock_bgos_server):
         await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
         await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
 
-        assert len(adapter._tool_progress_tools_by_chat[42]) == 1
+        assert len(adapter._tool_progress_tools_by_chat[adapter._lane(42)]) == 1
     finally:
         await adapter.disconnect()
 
@@ -446,7 +446,7 @@ async def test_concurrent_first_tools_post_only_once(mock_bgos_server):
         # observe the first racer's card_id_by_chat entry under the
         # lock and PATCH instead.
         assert len(posts) == 1, f"expected one POST, got {len(posts)}"
-        assert adapter._tool_progress_card_id_by_chat[42] == 9001
+        assert adapter._tool_progress_card_id_by_chat[adapter._lane(42)] == 9001
         # The final tool list depends on which racer landed last, but
         # since at least one of them carried both tools, the final
         # PATCH'd body has both — or the body of the lone POST has one.
@@ -474,9 +474,9 @@ async def test_disconnect_clears_tool_progress_state(mock_bgos_server):
     adapter._state.last_user_id_by_chat[42] = "user_abc"
 
     await adapter.edit_message(42, 500, '📖 read_file: "/etc/hostname"')
-    assert adapter._tool_progress_card_id_by_chat[42] == 9001
-    assert adapter._tool_progress_tools_by_chat[42]
-    assert adapter._tool_progress_preview_to_chat[500] == 42
+    assert adapter._tool_progress_card_id_by_chat[adapter._lane(42)] == 9001
+    assert adapter._tool_progress_tools_by_chat[adapter._lane(42)]
+    assert adapter._tool_progress_preview_to_chat[500] == adapter._lane(42)
 
     await adapter.disconnect()
     assert not adapter._tool_progress_card_id_by_chat
@@ -508,7 +508,7 @@ async def test_edit_message_non_tool_text_falls_through(mock_bgos_server):
                    if r.method == "PATCH" and r.path == "/api/v1/messages/500"]
         assert len(patches) == 1
         # No tool_progress card was created.
-        assert 42 not in adapter._tool_progress_card_id_by_chat
+        assert adapter._lane(42) not in adapter._tool_progress_card_id_by_chat
         # No POST to /messages either.
         posts = [r for r in mock_bgos_server.requests
                  if r.method == "POST" and r.path == "/api/v1/messages"]
