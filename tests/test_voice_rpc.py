@@ -231,7 +231,7 @@ async def test_mint_maps_openai_response_to_wire_contract() -> None:
     fake = FakeDeps()
     handler = VoiceRpcHandler(fake.to_deps())
     await handler.handle(
-        frame("mint", payload={"recentContext": "KC: hi\nYou: hello"})
+        frame("mint", payload={"recentContext": "Ada: hi\nYou: hello"})
     )
     rpc_id, body = fake.results[0]
     assert body["ok"] is True
@@ -263,7 +263,7 @@ async def test_mint_maps_openai_response_to_wire_contract() -> None:
     assert [t["name"] for t in session["tools"]] == [CONSULT_TOOL_NAME]
     assert "Athena" in session["instructions"]
     assert "A calm strategist." in session["instructions"]
-    assert "KC: hi" in session["instructions"]
+    assert "Ada: hi" in session["instructions"]
 
 
 def test_redact_voice_rpc_for_log_keeps_envelope_and_drops_payload_values() -> None:
@@ -273,11 +273,11 @@ def test_redact_voice_rpc_for_log_keeps_envelope_and_drops_payload_values() -> N
             "op": "mint",
             "assistantId": 894,
             "chatId": 830,
-            "payload": {"openaiApiKey": "sk-secret", "recentContext": "KC: hi"},
+            "payload": {"openaiApiKey": "sk-secret", "recentContext": "Ada: hi"},
         }
     )
     assert "sk-secret" not in out
-    assert "KC: hi" not in out
+    assert "Ada: hi" not in out
     # Still diagnosable: envelope + the payload's key NAMES.
     assert "rpc-1" in out and "mint" in out and "894" in out
     assert "openaiApiKey" in out and "recentContext" in out
@@ -317,7 +317,7 @@ async def test_mint_applies_voice_config_and_echoes_it() -> None:
         frame(
             "mint",
             payload={
-                "recentContext": "KC: hi",
+                "recentContext": "Ada: hi",
                 "voiceConfig": {
                     "voice": "cedar",
                     "speed": 1.25,
@@ -689,13 +689,13 @@ async def test_mint_instructions_compose_all_blocks() -> None:
     text = build_mint_instructions(
         agent_name="Athena",
         persona="Sharp, kind, allergic to fluff.",
-        recent_context="KC: status?\nYou: shipping tonight.",
+        recent_context="Ada: status?\nYou: shipping tonight.",
     )
     assert text.startswith("You are Athena")
     assert "Sharp, kind, allergic to fluff." in text
     assert CONSULT_TOOL_NAME in text
     assert "agent_dispatch" in text
-    assert "KC: status?" in text
+    assert "Ada: status?" in text
 
 
 async def test_mint_instructions_omit_empty_blocks() -> None:
@@ -918,7 +918,7 @@ async def test_load_voice_memory_reads_home_files_and_kill_switch(
     monkeypatch.delenv("BGOS_VOICE_MEMORY_FILE", raising=False)
     # No files yet.
     assert load_voice_memory() == ""
-    (tmp_path / "USER.md").write_text("Owner is Kc, tz Asia/Dubai.")
+    (tmp_path / "USER.md").write_text("Owner is Ada, tz Asia/Dubai.")
     (tmp_path / "MEMORY.md").write_text("Active project: the launch.")
     mem = load_voice_memory()
     assert "Asia/Dubai" in mem

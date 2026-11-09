@@ -227,10 +227,10 @@ def test_overlap_ignores_self_and_disjoint_pairings():
 
 def test_same_device_label_without_visible_overlap_warns():
     findings = overlapping_pairing_findings(
-        [{"id": 7, "device_label": "kc-box", "agent_catalog": []}],
+        [{"id": 7, "device_label": "ada-box", "agent_catalog": []}],
         self_pairing_id=5,
         routes=["shadow"],
-        device_label="kc-box",
+        device_label="ada-box",
     )
     assert len(findings) == 1
     assert findings[0].severity == WARN

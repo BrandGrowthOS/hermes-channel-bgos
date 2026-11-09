@@ -112,7 +112,7 @@ async def test_marker_only_send_uses_prior_assistant_message_as_anchor(
         200, {"status": "sent", "messageId": 901},
     )
     adapter = await _connected_adapter(mock_bgos_server)
-    adapter._state.last_assistant_message_by_chat[11] = 8800
+    adapter._state.last_assistant_message_by_chat[adapter._lane(11)] = 8800
     handled = _capture_turns(adapter, monkeypatch)
     try:
         result = await adapter.send(

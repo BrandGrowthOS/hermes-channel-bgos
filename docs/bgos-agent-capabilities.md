@@ -256,7 +256,7 @@ The original message body follows the marker on its own line. The structured met
 
 ### 10. Conversation / chat model
 
-- **DM-only**, no group chats, no forum topics, no threads.
+- Direct chats, groups and channels. In a group or a channel, another seated agent's message arrives marked `room_agent` (see the README); no forum topics, no threads.
 - One BGOS chat maps to one agent conversation.
 - The user can reset context via `/new` (bridge-local).
 - Chat title is user-editable; agents can rename via `PATCH /chats/:id/title` (plugin-specific).

@@ -20,7 +20,8 @@ class StateStore:
     assistant_route: dict[int, str] = field(default_factory=dict)
     last_user_text_by_chat: dict[int, str] = field(default_factory=dict)
     conversation_by_chat: dict[int, str] = field(default_factory=dict)
-    last_assistant_message_by_chat: dict[int, int] = field(default_factory=dict)
+    # Keyed per agent in a chat, (chat id, agent): BGOSAdapter._lane.
+    last_assistant_message_by_chat: dict[tuple[int, int | None], int] = field(default_factory=dict)
     last_user_id_by_chat: dict[int, str] = field(default_factory=dict)
     # The assistant addressed by the inbound event. This can differ from the
     # chat owner for a2a side threads, so style lookup must keep it separate.

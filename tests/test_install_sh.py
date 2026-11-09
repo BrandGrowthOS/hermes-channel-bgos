@@ -390,9 +390,9 @@ def test_parse_args_accepts_a_bare_pair_code(tmp_path: Path):
 
 
 def test_parse_args_keeps_a_device_label_containing_a_space(tmp_path: Path):
-    result = _run_parse_args(tmp_path, "'--device-label' 'Kc office mac'")
+    result = _run_parse_args(tmp_path, "'--device-label' 'Ada office mac'")
     assert result.returncode == 0, result.stderr
-    assert _resolved(result)["label"] == "Kc office mac"
+    assert _resolved(result)["label"] == "Ada office mac"
 
 
 def test_parse_args_ignores_an_unknown_flag_instead_of_aborting(tmp_path: Path):

@@ -60,7 +60,7 @@ async def test_pair_cli_normalizes_suffixed_base_url(mock_bgos_server, tmp_secre
 
     result = await _invoke_cli([
         "BGOS-ABCD-EF",
-        "--device-label", "kc-macbook",
+        "--device-label", "ada-macbook",
         "--base-url", f"{mock_bgos_server.url}/api/v1",
     ])
     assert result.exit_code == 0, result.output
@@ -274,7 +274,7 @@ async def test_pair_multi_route_aborts_when_profile_missing(
         200, {"pairing_token": "pair_x", "pairing_id": 1},
     )
     result = await _invoke_cli([
-        "BGOS-CODE", "--device-label", "kc-box",
+        "BGOS-CODE", "--device-label", "ada-box",
         "--base-url", mock_bgos_server.url,
         "--agents", "default:Achilles,shadow:Shadow",
     ])
@@ -294,7 +294,7 @@ async def test_pair_multi_route_aborts_when_multiplex_off(
     _make_profile("shadow")
     # no config.yaml -> multiplex_profiles defaults to off
     result = await _invoke_cli([
-        "BGOS-CODE", "--device-label", "kc-box",
+        "BGOS-CODE", "--device-label", "ada-box",
         "--base-url", mock_bgos_server.url,
         "--agents", "default:Achilles,shadow:Shadow",
     ])
@@ -314,7 +314,7 @@ async def test_pair_multi_route_aborts_on_stray_profile_secrets(
     stray.parent.mkdir(parents=True)
     stray.write_text(json.dumps({"pairing_token": "pair_old", "pairing_id": 9}))
     result = await _invoke_cli([
-        "BGOS-CODE", "--device-label", "kc-box",
+        "BGOS-CODE", "--device-label", "ada-box",
         "--base-url", mock_bgos_server.url,
         "--agents", "default:Achilles,shadow:Shadow",
     ])
@@ -335,7 +335,7 @@ async def test_pair_multi_route_proceeds_when_topology_is_clean(
     ).respond(200, {"ok": True})
     mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(
         200, [{
-            "id": 5, "device_label": "kc-box", "integration": "hermes",
+            "id": 5, "device_label": "ada-box", "integration": "hermes",
             "agent_catalog": [
                 {"agent_route": "default", "name": "Achilles"},
                 {"agent_route": "shadow", "name": "Shadow"},
@@ -343,7 +343,7 @@ async def test_pair_multi_route_proceeds_when_topology_is_clean(
         }],
     )
     result = await _invoke_cli([
-        "BGOS-CODE", "--device-label", "kc-box",
+        "BGOS-CODE", "--device-label", "ada-box",
         "--base-url", mock_bgos_server.url,
         "--agents", "default:Achilles,shadow:Shadow",
     ])
@@ -362,7 +362,7 @@ async def test_pair_skip_topology_check_overrides(
     ).respond(200, {"ok": True})
     mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(200, [])
     result = await _invoke_cli([
-        "BGOS-CODE", "--device-label", "kc-box",
+        "BGOS-CODE", "--device-label", "ada-box",
         "--base-url", mock_bgos_server.url,
         "--agents", "default:Achilles,shadow:Shadow",
         "--skip-topology-check",
@@ -387,14 +387,14 @@ async def test_pair_warns_on_overlapping_active_pairing(
     mock_bgos_server.on("GET", "/api/v1/integrations/pairings").respond(
         200, [
             {
-                "id": 5, "device_label": "kc-box", "integration": "hermes",
+                "id": 5, "device_label": "ada-box", "integration": "hermes",
                 "agent_catalog": [
                     {"agent_route": "default", "name": "Achilles"},
                     {"agent_route": "shadow", "name": "Shadow"},
                 ],
             },
             {
-                "id": 7, "device_label": "kc-box-old", "integration": "hermes",
+                "id": 7, "device_label": "ada-box-old", "integration": "hermes",
                 "agent_catalog": [
                     {"agent_route": "shadow", "name": "Shadow"},
                 ],
@@ -402,12 +402,12 @@ async def test_pair_warns_on_overlapping_active_pairing(
         ],
     )
     result = await _invoke_cli([
-        "BGOS-CODE", "--device-label", "kc-box",
+        "BGOS-CODE", "--device-label", "ada-box",
         "--base-url", mock_bgos_server.url,
         "--agents", "default:Achilles,shadow:Shadow",
     ])
     assert result.exit_code == 0, result.output
-    assert "kc-box-old" in result.output
+    assert "ada-box-old" in result.output
     assert "twice" in result.output.lower()
     assert "revoke" in result.output.lower()
 
@@ -427,7 +427,7 @@ async def test_pair_reports_when_overlap_check_unavailable(
     ).respond(200, {"ok": True})
     # GET /pairings left unstubbed -> 501
     result = await _invoke_cli([
-        "BGOS-CODE", "--device-label", "kc-box",
+        "BGOS-CODE", "--device-label", "ada-box",
         "--base-url", mock_bgos_server.url,
         "--agents", "default:Achilles,shadow:Shadow",
     ])

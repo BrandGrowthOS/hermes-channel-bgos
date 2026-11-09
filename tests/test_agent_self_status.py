@@ -8,10 +8,10 @@ from hermes_channel_bgos.bgos_adapter import _parse_status_line
 
 
 def test_status_line_extracted_and_stripped():
-    cleaned, status = _parse_status_line("STATUS: Reviewing the report\nHello KC")
+    cleaned, status = _parse_status_line("STATUS: Reviewing the report\nHello Ada")
     assert status == "Reviewing the report"
     assert "STATUS" not in cleaned
-    assert cleaned == "Hello KC"
+    assert cleaned == "Hello Ada"
 
 
 def test_status_midtext_line_is_honored_and_removed():

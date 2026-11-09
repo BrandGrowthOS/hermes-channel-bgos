@@ -193,7 +193,7 @@ def test_systemd_user_unit_parses_status_header(
             returncode=0,
             stdout=(
                 "● hermes-gateway-ava.service - Hermes Agent Gateway\n"
-                "     Loaded: loaded (/home/kc/.config/systemd/user/"
+                "     Loaded: loaded (/home/ada/.config/systemd/user/"
                 "hermes-gateway-ava.service; enabled)\n"
             ),
         )
@@ -767,11 +767,11 @@ def _launchctl_print(pid: int, label: str = "ai.hermes.gateway") -> str:
     return (
         f"gui/501/{label} = {{\n"
         "\tactive count = 1\n"
-        f"\tpath = /Users/kc/Library/LaunchAgents/{label}.plist\n"
+        f"\tpath = /Users/ada/Library/LaunchAgents/{label}.plist\n"
         "\ttype = LaunchAgent\n"
         "\tstate = running\n"
         "\n"
-        "\tprogram = /Users/kc/.hermes/hermes-agent/venv/bin/python\n"
+        "\tprogram = /Users/ada/.hermes/hermes-agent/venv/bin/python\n"
         f"\tpid = {pid}\n"
         "\timmediate reason = inefficient\n"
         "}\n"
@@ -823,9 +823,9 @@ def test_launchd_probe_refuses_a_job_running_another_pid() -> None:
 # kickstart -k on the job restarts this gateway like a direct one.
 
 WRAPPER_ARGV = (
-    "/Users/kc/.hermes/hermes-agent/venv/bin/python -m hermes_cli.stderr_timestamp"
-    " --error-log /Users/kc/.hermes/logs/gateway.error.log --"
-    " /Users/kc/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main"
+    "/Users/ada/.hermes/hermes-agent/venv/bin/python -m hermes_cli.stderr_timestamp"
+    " --error-log /Users/ada/.hermes/logs/gateway.error.log --"
+    " /Users/ada/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main"
     " gateway run --external-supervisor"
 )
 
@@ -866,7 +866,7 @@ def test_launchd_probe_refuses_a_parent_that_is_not_the_hermes_wrapper() -> None
     the stop to this process."""
     fake = _FakeLaunchctlAndPs(
         {"gui/501/ai.hermes.gateway": _launchctl_print(4200)},
-        {4200: "/bin/bash /Users/kc/bin/run-hermes.sh"},
+        {4200: "/bin/bash /Users/ada/bin/run-hermes.sh"},
     )
     assert self_update._probe_launchd_job(
         platform="darwin", uid=501, pid=4242, ppid=4200, hermes_home=None,
@@ -922,7 +922,7 @@ def test_launchd_probe_tries_the_profile_label() -> None:
     })
     target = self_update._probe_launchd_job(
         platform="darwin", uid=501, pid=77,
-        hermes_home="/Users/kc/.hermes/profiles/ava", run=fake,
+        hermes_home="/Users/ada/.hermes/profiles/ava", run=fake,
     )
     assert target == "gui/501/ai.hermes.gateway-ava"
     assert [c[-1] for c in fake.calls] == [
@@ -989,7 +989,7 @@ def test_launchd_probe_finds_a_profile_job_in_the_user_domain() -> None:
     })
     assert self_update._probe_launchd_job(
         platform="darwin", uid=501, pid=77,
-        hermes_home="/Users/kc/.hermes/profiles/ava", run=fake,
+        hermes_home="/Users/ada/.hermes/profiles/ava", run=fake,
     ) == "user/501/ai.hermes.gateway-ava"
 
 
@@ -1188,7 +1188,7 @@ def test_schedule_launchd_restart_refuses_a_trailing_newline() -> None:
 
 
 def test_launchd_probe_reads_the_process_hermes_home(monkeypatch) -> None:
-    monkeypatch.setenv("HERMES_HOME", "/Users/kc/.hermes/profiles/ava")
+    monkeypatch.setenv("HERMES_HOME", "/Users/ada/.hermes/profiles/ava")
     fake = _FakeLaunchctl({
         "gui/501/ai.hermes.gateway-ava": _launchctl_print(77, "ai.hermes.gateway-ava"),
     })
