@@ -36,6 +36,8 @@ SERVER_FRAMED = (
     "@Echo can you check the build?"
 )
 
+UNFRAMED = "@Echo can you check the build?"
+
 LANES = ("push", "poll")
 CHAT_KINDS = ("room", "channel")
 
@@ -117,12 +119,17 @@ def _room_agent(author: int | None) -> dict:
     return marker
 
 
+@pytest.mark.parametrize("text", [SERVER_FRAMED, UNFRAMED], ids=["framed", "unframed"])
 @pytest.mark.parametrize("chat_kind", CHAT_KINDS)
 @pytest.mark.parametrize("lane", LANES)
-async def test_another_agents_message_wakes_the_agent_as_another_agent(lane, chat_kind):
+async def test_another_agents_message_wakes_the_agent_as_another_agent(lane, chat_kind, text):
+    # Unframed: the server could not add its framing line (a roster it could
+    # not read); the adapter must then say an agent wrote it.
     adapter = _adapter()
     got = _capture(adapter)
-    await _deliver(adapter, lane, chat_kind, **_room_agent(OTHER_ASSISTANT_ID))
+    await _deliver(
+        adapter, lane, chat_kind, text=text, **_room_agent(OTHER_ASSISTANT_ID),
+    )
     assert len(got) == 1, "another agent's message must wake the agent once"
     event = got[0]
     # The agent is told who wrote it: another agent, never its owner.
