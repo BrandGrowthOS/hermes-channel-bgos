@@ -2,6 +2,14 @@
 
 Older releases are described in the README sections named after their version.
 
+## 0.32.2 (2026-11-09)
+
+Approval buttons work again on new Hermes, and a stale card can never approve the next request.
+
+- hermes-agent v0.22.6 (PR #87554) calls `send_exec_approval` with `request_id=...`; the hook raised TypeError and the gateway fell back to the plain text `/approve` prompt. It now accepts `request_id` and `**kwargs`. It also answers `supports_exec_approval_buttons()` with true: since v0.21.6 the runner hands an approval only to an adapter that says it renders buttons (the base answer looks for an override of `_send_exec_approval_prompt`, which this adapter does not need).
+- The card keeps its request id next to the approval id, and a tap resolves only that request: `tools.approval.resolve_gateway_approval_card` on v0.23.0 and later, `resolve_gateway_approval(..., request_id=...)` on v0.22.6 and v0.22.7, first in first out on an older Hermes that sends no id. A tap on a card whose request already settled (timed out, answered with a typed `/approve`) approves nothing and edits the bubble to "Approval expired"; a repeated tap on an answered card keeps its answer.
+- When the running Hermes has `tools.approval.observe_gateway_settle` (not on the published plugin API list, so optional) the stored card is dropped as soon as its request settles any other way, so `/status` stops counting it.
+
 ## 0.32.1 (2026-10-19)
 
 Safe media fetch, a working /reload-mcp confirm, and backoff on a revoked pairing.

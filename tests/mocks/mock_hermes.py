@@ -91,6 +91,21 @@ class BasePlatformAdapter:
         gateway/platforms/base.py line ~1711."""
         return SendResult(success=False, error="Not supported")
 
+    # Mirrors Hermes v0.21.6 and later: the runner hands an approval to
+    # `send_exec_approval` only when `supports_exec_approval_buttons()` is
+    # true, and the base answer is "the class overrides
+    # `_send_exec_approval_prompt`". An adapter that renders its own card in
+    # `send_exec_approval` must say so, or it gets the plain text prompt.
+    @classmethod
+    def supports_exec_approval_buttons(cls) -> bool:
+        return (
+            cls._send_exec_approval_prompt
+            is not BasePlatformAdapter._send_exec_approval_prompt
+        )
+
+    async def _send_exec_approval_prompt(self, prompt: Any) -> "SendResult":
+        raise NotImplementedError
+
     # NOTE: NO `send_update_prompt` here. Real upstream Hermes does NOT
     # define this method on BasePlatformAdapter — it's a Telegram-style
     # duck-typed method the gateway probes via

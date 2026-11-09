@@ -642,6 +642,8 @@ Hermes's default timeout is 60s, fail-closed. If you miss the window, the comman
 
 The adapter has a 15-second hard budget to post the approval bubble; if BGOS is slow, Hermes falls back to posting a plain-text "`/approve` or `/deny`" prompt.
 
+Each card answers only the request it shows. On hermes-agent v0.22.6 and later the gateway passes the request id with every card, and a tap resolves that request (with `tools.approval.resolve_gateway_approval_card` on v0.23.0 and later, with `resolve_gateway_approval(..., request_id=...)` on v0.22.6 and v0.22.7). A tap on a card whose request already settled (timed out, answered with a typed `/approve`) approves nothing, the bubble reads "Approval expired", and a newer request stays pending. On an older Hermes, which sends no request id, a tap resolves the oldest pending request of the session as before.
+
 ---
 
 ## Troubleshooting
@@ -805,3 +807,9 @@ The poll cursor is kept per agent (per assistant id), not per gateway. The backe
 - **Remote media is fetched safely.** A link an agent emits is checked with Hermes's `tools.url_safety` (`is_safe_url`, `create_ssrf_safe_async_client`, `redirect_target_from_response`; hermes-agent v0.21.7 or later). Private, loopback, link local and metadata addresses are refused, every redirect target is checked, and the body is capped at 25 MiB while streaming. On a Hermes without those helpers, remote media is not fetched at all; local files still work.
 - **`/reload-mcp` Approve and Cancel work.** The resolver is `tools.slash_confirm.resolve` and is awaited.
 - **A revoked pairing stops polling.** After 30 consecutive 401s over at least a minute the adapter logs one line (`BGOS rejected the pairing token ...`), pauses the 5 second poll and probes every 5 minutes. A good answer resumes it. Re-pair with `hermes-pair-bgos` if it stays paused. The WebSocket reconnect attempts (at most one every 30 seconds) are not paused.
+
+## Approval buttons on new Hermes, one card per request (0.32.2)
+
+- **Buttons are back on hermes-agent v0.21.6 and later.** Those versions hand an approval to the adapter only when `supports_exec_approval_buttons()` is true, and v0.22.6 also passes `request_id` to `send_exec_approval`. The adapter now says it renders buttons and accepts `request_id` plus any argument Hermes adds later (`**kwargs`), so the gateway no longer falls back to the plain text `/approve` prompt.
+- **A stale card can never approve the next request.** The card remembers its request id and a tap resolves only that request (`tools.approval.resolve_gateway_approval_card` when the running Hermes has it). A tap on a card whose request already settled answers "Approval expired" and approves nothing; a second tap on a card already answered keeps its answer. On a Hermes that sends no request id, taps resolve first in first out as before.
+- **Settled requests are forgotten.** When the running Hermes has `tools.approval.observe_gateway_settle` (v0.22.6 and later; it is not on the published plugin API list, so it is optional) the stored card is dropped as soon as its request settles any other way, and `/status` no longer counts it as pending.
