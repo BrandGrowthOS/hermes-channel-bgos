@@ -13,6 +13,7 @@ from hermes_channel_bgos.bgos_adapter import BGOSAdapter, _DEFAULT_MAX_MESSAGE_L
 from hermes_channel_bgos.plugin import (
     BGOS_PLATFORM_HINT,
     env_enablement,
+    register_skill_hooks,
     resolve_platform_hint,
     standalone_send,
 )
@@ -59,3 +60,4 @@ def register(ctx) -> None:
         # as the documented frozen fallback.
         platform_hint=resolve_platform_hint(),
     )
+    register_skill_hooks(ctx)

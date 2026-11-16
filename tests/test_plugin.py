@@ -288,7 +288,8 @@ def test_plugin_yaml_is_valid_and_declares_platform():
     assert "BGOS_ALLOW_ALL_USERS" in (req | opt)
 
 
-def test_register_wires_all_hooks():
+@pytest.mark.parametrize("supports_hooks", [False, True])
+def test_register_wires_all_hooks(monkeypatch, supports_hooks):
     import importlib.util
     import pathlib
     repo = pathlib.Path(__file__).resolve().parent.parent
@@ -297,12 +298,20 @@ def test_register_wires_all_hooks():
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "resolve_platform_hint", lambda: "Fixture capabilities")
 
     captured = {}
+    hooks = []
 
     class FakeCtx:
         def register_platform(self, **kwargs):
             captured.update(kwargs)
+
+    if supports_hooks:
+        def register_hook(self, name, callback):
+            assert captured["name"] == "bgos"
+            hooks.append((name, callback))
+        FakeCtx.register_hook = register_hook
 
     mod.register(FakeCtx())
     assert captured["name"] == "bgos"
@@ -313,6 +322,22 @@ def test_register_wires_all_hooks():
     assert callable(captured["env_enablement_fn"])
     assert callable(captured["standalone_sender_fn"])
     assert captured["platform_hint"]
+    if supports_hooks:
+        from hermes_channel_bgos.skill_origins import on_skill_lifecycle
+        assert hooks == [("on_skill_lifecycle", on_skill_lifecycle)]
+    else:
+        assert hooks == []
+
+
+def test_register_skill_hooks_failure_is_nonfatal(caplog):
+    from hermes_channel_bgos.plugin import register_skill_hooks
+
+    class BrokenCtx:
+        def register_hook(self, *_args):
+            raise RuntimeError("fixture failure")
+
+    register_skill_hooks(BrokenCtx())
+    assert len(caplog.records) == 1
 
 
 def test_resolve_pairing_prefers_secrets_over_non_pairing_env(tmp_path, monkeypatch):
