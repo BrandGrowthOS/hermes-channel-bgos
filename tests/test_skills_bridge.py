@@ -231,6 +231,9 @@ async def test_list_installed_classifies_bundled_hub_and_self_taught(monkeypatch
         False,
     )
     assert "learnedAt" in by_name["learned-skill"]
+    for name in ("hub-skill", "official-skill", "bundled-skill"):
+        assert by_name[name]["origin"] == "installed"
+    assert "origin" not in by_name["learned-skill"]
 
 
 async def test_list_installed_uses_lock_install_path_before_leaf_name(monkeypatch):
@@ -268,6 +271,60 @@ async def test_list_installed_uses_lock_install_path_before_leaf_name(monkeypatc
     assert by_name["Root Display"]["removable"] is False
     assert by_name["Nested Display"]["provenance"] == "hub"
     assert by_name["Nested Display"]["removable"] is True
+    assert by_name["Nested Display"]["origin"] == "installed"
+    assert "origin" not in by_name["Root Display"]
+
+
+@pytest.mark.parametrize("origin", ["taught", "made"])
+async def test_list_installed_reads_matching_origin_stamp(monkeypatch, origin):
+    from hermes_channel_bgos import skill_origins
+
+    home = Path(os.environ["HERMES_HOME"])
+    skills_dir = home / "skills"
+    folder = _write_skill(skills_dir, "category/example", "An example", frontmatter_name="Example")
+    _install_fake_machinery(monkeypatch)
+    bridge, posts = _make_bridge(monkeypatch)
+    await bridge.handle_frame({"rpcId": "before", "op": "list_installed", "payload": {}})
+    before = _result_bodies(posts)[-1]["payload"]["skills"][0]
+    info = folder.stat()
+    skill_origins.write_stamp(skill_origins.origins_path(), "category/example", origin, f"{info.st_dev}:{info.st_ino}")
+    await bridge.handle_frame({"rpcId": "after", "op": "list_installed", "payload": {}})
+    after = _result_bodies(posts)[-1]["payload"]["skills"][0]
+    assert after == {**before, "origin": origin}
+    assert after["provenance"] == "self_taught"
+    assert "taughtBy" not in after
+
+
+async def test_list_installed_ignores_changed_identity_and_plain_copy(monkeypatch):
+    from hermes_channel_bgos import skill_origins
+
+    skills_dir = Path(os.environ["HERMES_HOME"]) / "skills"
+    _write_skill(skills_dir, "replaced", "Replaced")
+    _write_skill(skills_dir, "plain", "Plain")
+    skill_origins.write_stamp(skill_origins.origins_path(), "replaced", "taught", "old:identity")
+    _install_fake_machinery(monkeypatch)
+    bridge, posts = _make_bridge(monkeypatch)
+    await bridge.handle_frame({"rpcId": "origins", "op": "list_installed", "payload": {}})
+    rows = _result_bodies(posts)[0]["payload"]["skills"]
+    assert len(rows) == 2
+    assert all("origin" not in row and row["provenance"] == "self_taught" for row in rows)
+
+
+async def test_list_installed_origin_error_preserves_listing(monkeypatch):
+    from hermes_channel_bgos import skill_origins
+
+    _write_skill(Path(os.environ["HERMES_HOME"]) / "skills", "plain", "Plain")
+    _install_fake_machinery(monkeypatch)
+
+    def fail(*_args):
+        raise OSError("fixture failure")
+
+    monkeypatch.setattr(skill_origins, "origin_for", fail)
+    bridge, posts = _make_bridge(monkeypatch)
+    await bridge.handle_frame({"rpcId": "failure", "op": "list_installed", "payload": {}})
+    result = _result_bodies(posts)[0]
+    assert result["ok"] is True
+    assert "origin" not in result["payload"]["skills"][0]
 
 
 async def test_catalog_without_query_browses_and_maps_installed_flags(monkeypatch):
@@ -1018,6 +1075,7 @@ async def test_list_and_remove_use_canonical_lock_key_for_display_name(monkeypat
             "identifier": "canonical-slug",
             "description": "Friendly description",
             "provenance": "hub",
+            "origin": "installed",
             "removable": True,
             "source": "github",
         }

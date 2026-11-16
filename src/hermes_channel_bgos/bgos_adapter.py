@@ -39,6 +39,7 @@ import httpx
 
 from . import __version__
 from . import scheduled_update
+from . import skill_origins
 from . import self_update
 from .auth_rejection import (
     AUTH_PAUSED_PROBE_SECONDS,
@@ -7418,6 +7419,12 @@ class BGOSAdapter(BasePlatformAdapter):
                 "buttonText": button_text,
             })
             return
+
+        if callback_data == "teach_approve" and user_id and str(user_id) == str(self.pairing_user_id or ""):
+            try:
+                skill_origins.open_teach_window(chat_id, str(user_id), time.time())
+            except Exception:
+                log.warning("Could not note a skill teach approval")
 
         # A committed restart holds new work: a turn started now would be
         # cut off by the restart moments later. A click is push only (the

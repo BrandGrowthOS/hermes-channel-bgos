@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from . import __version__
+from . import skill_origins
 from .bgos_adapter import (
     S3_THRESHOLD,
     _MEDIA_MAX_BYTES,
@@ -36,6 +37,16 @@ from .config import BgosConfig, choose_pairing_token, redact_token
 from .hermes_profiles import resolve_hermes_home
 
 log = logging.getLogger(__name__)
+
+
+def register_skill_hooks(ctx) -> None:
+    """Older Hermes can register the platform without lifecycle hooks."""
+    try:
+        if hasattr(ctx, "register_hook"):
+            ctx.register_hook("on_skill_lifecycle", skill_origins.on_skill_lifecycle)
+    except Exception:
+        log.warning("Could not register the skill lifecycle hook")
+
 
 _PROD_BASE_URL = "https://api.brandgrowthos.ai"
 

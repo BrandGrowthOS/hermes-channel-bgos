@@ -63,6 +63,54 @@ def _capture_gateway_messages(adapter: BGOSAdapter) -> list[GatewayMessageEvent]
     return received
 
 
+@pytest.mark.parametrize("callback,tapper,owner,opens", [
+    ("teach_approve", "owner", "owner", True),
+    ("teach_approve", "other", "owner", False),
+    ("teach_approve", "owner", None, False),
+    ("teach_approve", "", "", False),
+    ("teach_approve", 12, "12", True),
+    ("approve", "owner", "owner", False),
+    ("teach_edit", "owner", "owner", False),
+    ("teach_not_now", "owner", "owner", False),
+])
+async def test_teach_click_requires_pairing_owner(monkeypatch, callback, tapper, owner, opens):
+    import importlib
+    from hermes_channel_bgos import skill_origins
+
+    importlib.reload(skill_origins)
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter.pairing_user_id = owner
+    received = _capture_gateway_messages(adapter)
+    monkeypatch.setattr(bgos_adapter_module.time, "time", lambda: 100)
+    await adapter._handle_inbound_click({
+        "assistantId": 7, "chatId": 11, "messageId": 100,
+        "userId": tapper, "callbackData": callback, "buttonText": "Approve",
+    })
+    assert bool(skill_origins.take_teach_window("011", str(tapper), 101)) is opens
+    assert len(received) == 1
+    assert received[0].text == "Approve"
+
+
+async def test_teach_click_origin_error_does_not_drop_tap(monkeypatch):
+    from hermes_channel_bgos import skill_origins
+
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter.pairing_user_id = "owner"
+    received = _capture_gateway_messages(adapter)
+
+    def fail(*_args):
+        raise OSError("fixture failure")
+
+    monkeypatch.setattr(skill_origins, "open_teach_window", fail)
+    await adapter._handle_inbound_click({
+        "assistantId": 7, "chatId": 11, "messageId": 100,
+        "userId": "owner", "callbackData": "teach_approve", "buttonText": "Approve",
+    })
+    assert len(received) == 1
+
+
 async def test_inbound_message_translates_and_handles(mock_bgos_server, monkeypatch):
     mock_bgos_server.on("GET", "/api/v1/integrations/me").respond(
         200, {"pairing_id": 42, "assistants": [{"assistant_id": 7, "agent_route": "hades"}]},

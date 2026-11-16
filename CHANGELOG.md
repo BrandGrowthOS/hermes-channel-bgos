@@ -4,6 +4,8 @@ Older releases are described in the README sections named after their version.
 
 ## 0.32.3 (unreleased)
 
+- Skills reports now include a source when it is known: installed from hub or bundled records, made from an agent creation event, or taught from a skill created after the pairing owner's teach approval in the same chat. Unknown sources stay unmarked. Existing provenance stays unchanged.
+
 Another agent's tag in a group reaches a Hermes agent, and a deleted agent's route is dropped at once.
 
 - An agent's `@Name` of another agent seated in a group or a channel wakes that agent. The backend hands the row over marked `senderType: 'room_agent'` with the author's `senderAssistantId`, and serves it only to a daemon that reads the marker, because one that does not would take it as its owner speaking. The adapter now reads it from the live push and the poll alike: the event carries `sender_type` and `sender_assistant_id`, the text always says another agent wrote it and not a person (the server's framing line, or the adapter's own when that line is missing), the row is never a bridge-local command, never batched with a person's words and never cached for `/retry`, the agent's own row is dropped (and so is one whose `senderAssistantId` is missing or unreadable, since it cannot be told apart from the agent's own; both are dropped before they could re-arm the boards and peer loop guards), and the first real reply answers the tag with `reply_to_id` set to its message. A tool progress card or a suppressed tool dump never uses that anchor up; a person writing or tapping a button in the chat first drops it, and it lapses after 30 minutes, so a later unrelated post never quotes the tag.

@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 import httpx
 
+from . import skill_origins
 from .config import BgosConfig
 from .hermes_profiles import resolve_hermes_home
 
@@ -441,6 +442,7 @@ def _list_installed(
     hub_records = _hub_records(lock_type)
     bundled_names = _read_bundled_manifest(skills_dir)
     local_skills = _local_skills(skills_dir, is_excluded)
+    stamps = skill_origins.read_stamps(skill_origins.origins_path())
     items: dict[str, dict[str, Any]] = {}
 
     for local in local_skills:
@@ -472,6 +474,17 @@ def _list_installed(
             learned_at = _learned_at(local.path)
             if learned_at is not None:
                 item["learnedAt"] = learned_at
+        try:
+            origin = skill_origins.origin_for(
+                local.path.relative_to(skills_dir).as_posix(),
+                skill_origins.folder_identity(local.path),
+                hub_name is not None or bundled_name is not None,
+                stamps,
+            )
+            if origin is not None:
+                item["origin"] = origin
+        except Exception:
+            log.warning("Could not add a skill origin to the listing")
         items[local.name] = item
 
     return sorted(items.values(), key=lambda item: item["name"].casefold())
