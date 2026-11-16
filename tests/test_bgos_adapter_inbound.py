@@ -86,8 +86,9 @@ async def test_teach_click_requires_pairing_owner(monkeypatch, callback, tapper,
     await adapter._handle_inbound_click({
         "assistantId": 7, "chatId": 11, "messageId": 100,
         "userId": tapper, "callbackData": callback, "buttonText": "Approve",
+        "humanPrincipal": True,
     })
-    assert bool(skill_origins.take_teach_window("011", str(tapper), 101)) is opens
+    assert bool(skill_origins.take_teach_window("011", str(tapper), 101, assistant_id=7)) is opens
     assert len(received) == 1
     assert received[0].text == "Approve"
 
@@ -107,7 +108,30 @@ async def test_teach_click_origin_error_does_not_drop_tap(monkeypatch):
     await adapter._handle_inbound_click({
         "assistantId": 7, "chatId": 11, "messageId": 100,
         "userId": "owner", "callbackData": "teach_approve", "buttonText": "Approve",
+        "humanPrincipal": True,
     })
+    assert len(received) == 1
+
+
+@pytest.mark.parametrize("principal,opens", [(True, True), (False, False), (None, False), (1, False), ("true", False)])
+async def test_teach_click_requires_human_principal(monkeypatch, principal, opens):
+    import importlib
+    from hermes_channel_bgos import skill_origins
+
+    importlib.reload(skill_origins)
+    adapter = _make_adapter()
+    adapter._state.set_route(7, "default")
+    adapter.pairing_user_id = "owner"
+    received = _capture_gateway_messages(adapter)
+    monkeypatch.setattr(bgos_adapter_module.time, "time", lambda: 100)
+    click = {
+        "assistantId": 7, "chatId": 11, "messageId": 100,
+        "userId": "owner", "callbackData": "teach_approve", "buttonText": "Approve",
+    }
+    if principal is not None:
+        click["humanPrincipal"] = principal
+    await adapter._handle_inbound_click(click)
+    assert bool(skill_origins.take_teach_window(11, "owner", 101, assistant_id=7)) is opens
     assert len(received) == 1
 
 

@@ -7420,9 +7420,14 @@ class BGOSAdapter(BasePlatformAdapter):
             })
             return
 
-        if callback_data == "teach_approve" and user_id and str(user_id) == str(self.pairing_user_id or ""):
+        if (
+            callback_data == "teach_approve"
+            and data.get("humanPrincipal") is True
+            and user_id
+            and str(user_id) == str(self.pairing_user_id or "")
+        ):
             try:
-                skill_origins.open_teach_window(chat_id, str(user_id), time.time())
+                skill_origins.open_teach_window(chat_id, str(user_id), time.time(), assistant_id=assistant_id)
             except Exception:
                 log.warning("Could not note a skill teach approval")
 
