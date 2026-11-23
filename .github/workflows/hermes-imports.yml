@@ -1,0 +1,73 @@
+name: Hermes imports
+
+# Every Hermes name the plugin imports must still exist in Hermes. The plugin
+# wraps each Hermes import in try/except so it loads without Hermes, which
+# also hides a rename: the adapter imported gateway.slash_confirm for months,
+# a module Hermes never had. This runs scripts/check_hermes_imports.py, a
+# static check (no Hermes install), against Hermes' latest release and main,
+# and fails with the list of missing names.
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Hermes ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - release
+          - main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the Hermes ref
+        id: ref
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = release ]; then
+            ref="$(gh api repos/NousResearch/hermes-agent/releases/latest --jq .tag_name)"
+          else
+            ref=main
+          fi
+          if [ -z "$ref" ]; then
+            echo "::error::could not resolve the Hermes $TARGET ref"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out hermes-agent
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ steps.ref.outputs.ref }}
+          path: hermes-agent
+          persist-credentials: false
+
+      - name: Check every imported Hermes name exists
+        shell: bash
+        env:
+          HERMES_REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          sha="$(git -C hermes-agent rev-parse --short HEAD)"
+          python scripts/check_hermes_imports.py \
+            --hermes hermes-agent \
+            --src src \
+            --label "hermes-agent $HERMES_REF ($sha)" \
+            --summary "$GITHUB_STEP_SUMMARY"
