@@ -147,20 +147,52 @@ except ImportError:
     observe_gateway_settle = None  # type: ignore[assignment]
 
 
+class SlashConfirmUnavailable(RuntimeError):
+    """This Hermes has no ``tools.slash_confirm``, so a confirm button
+    (``sc:<choice>:<id>``) cannot be answered from BGOS; the typed
+    ``/approve``, ``/always`` and ``/cancel`` answers are the way through."""
+
+
+# Set once the missing resolver has been logged, so a chat full of taps on an
+# old Hermes writes one warning, not one per tap.
+_slash_confirm_missing_logged = False
+
+
 try:  # pragma: no cover - exercised only when Hermes is installed
-    # The real helper lives in tools.slash_confirm and `resolve` is a coroutine
-    # function (it awaits the registered handler), so callers must await it.
+    # The real helper is tools.slash_confirm.resolve (hermes-agent since
+    # 2026-04-30; gateway.slash_confirm never existed). Its signature is
+    # `async resolve(session_key, confirm_id, choice, timeout=300) ->
+    # Optional[str]`: it runs the handler the gateway registered for the
+    # session and returns that handler's text, or None when the confirm is
+    # stale, already answered or superseded. Callers must await it.
     # Tests monkeypatch this at the module level
-    # (hermes_channel_bgos.bgos_adapter.resolve_slash_confirm) with an async fake.
+    # (hermes_channel_bgos.bgos_adapter.resolve_slash_confirm).
     from tools.slash_confirm import resolve as resolve_slash_confirm  # type: ignore
 except ImportError:
-    async def resolve_slash_confirm(session_key: str, confirm_id: str, choice: str) -> None:  # type: ignore[no-redef]
-        raise RuntimeError(
-            "tools.slash_confirm.resolve is not importable, so Hermes is not "
-            "installed or is too old to ship the slash-confirm helper. Tests "
-            "should monkeypatch this at the module level "
-            "(hermes_channel_bgos.bgos_adapter)."
-        )
+    async def resolve_slash_confirm(  # type: ignore[no-redef]
+        session_key: str, confirm_id: str, choice: str,
+    ) -> str | None:
+        """Fallback bound when ``tools.slash_confirm`` was not importable as
+        this module loaded. It looks again at tap time (the plugin can load
+        before Hermes's ``tools`` package is importable); if the module is
+        still missing it logs once and raises ``SlashConfirmUnavailable``,
+        which the tap handler turns into a "type /approve" bubble."""
+        global _slash_confirm_missing_logged
+        try:
+            from tools.slash_confirm import resolve as _resolve  # type: ignore
+        except ImportError:
+            if not _slash_confirm_missing_logged:
+                _slash_confirm_missing_logged = True
+                log.warning(
+                    "tools.slash_confirm is not importable: this Hermes is "
+                    "not installed or predates the slash-command confirm "
+                    "helper, so BGOS confirm buttons cannot answer it. Type "
+                    "/approve, /always or /cancel instead."
+                )
+            raise SlashConfirmUnavailable(
+                "tools.slash_confirm.resolve is not importable"
+            ) from None
+        return await _resolve(session_key, confirm_id, choice)
 
 
 try:  # pragma: no cover - exercised only when Hermes is installed
@@ -7215,17 +7247,40 @@ class BGOSAdapter(BasePlatformAdapter):
                 log.info("stale slash-confirm click confirm_id=%s", confirm_id)
                 return
             import hermes_channel_bgos.bgos_adapter as _self_mod
-            await _self_mod.resolve_slash_confirm(session_key, confirm_id, choice)
-            # Edit the bubble in place to show the resolution.
-            choice_labels = {
-                "once":   "✅ Approved once",
-                "always": "🔒 Always approve",
-                "cancel": "❌ Cancelled",
-            }
+            # As Hermes's own button adapters do (Telegram, WhatsApp, the
+            # relay): await the resolver, and post the text it returns (the
+            # command's answer, e.g. what /reload-mcp reloaded) after the
+            # bubble edit. None (a cancel that says nothing, a stale or
+            # superseded confirm) posts nothing.
             user_id_label = data.get("user_id") or data.get("userId") or ""
-            text = choice_labels.get(choice, choice)
-            if user_id_label:
-                text += f" by {user_id_label}"
+            result_text: str | None = None
+            try:
+                result = await _self_mod.resolve_slash_confirm(
+                    session_key, confirm_id, choice,
+                )
+            except SlashConfirmUnavailable:
+                text = (
+                    "⚠️ This Hermes cannot take a button answer. Type "
+                    "/approve, /always or /cancel."
+                )
+            except Exception:
+                log.warning(
+                    "slash-confirm resolve failed confirm_id=%s",
+                    confirm_id, exc_info=True,
+                )
+                text = "⚠️ Could not confirm. The Hermes log has the error."
+            else:
+                if isinstance(result, str) and result.strip():
+                    result_text = result
+                # Edit the bubble in place to show the resolution.
+                choice_labels = {
+                    "once":   "✅ Approved once",
+                    "always": "🔒 Always approve",
+                    "cancel": "❌ Cancelled",
+                }
+                text = choice_labels.get(choice, choice)
+                if user_id_label:
+                    text += f" by {user_id_label}"
             if original_title:
                 # Wire limitation: backend UpdateMessageDto does not whitelist
                 # eventMeta, so PATCH cannot change the collapsed title.
@@ -7248,6 +7303,25 @@ class BGOSAdapter(BasePlatformAdapter):
                 # subsequent edit_message() doesn't double-fire within window.
                 if isinstance(chat_id, int):
                     self._last_edit_at[self._lane(chat_id)] = asyncio.get_running_loop().time()
+            if result_text is not None:
+                if isinstance(chat_id, int):
+                    try:
+                        await self._api.post_message(
+                            chat_id=chat_id,
+                            text=result_text,
+                            sender="assistant",
+                            message_type="standard",
+                        )
+                    except Exception:
+                        log.warning(
+                            "slash-confirm result post failed confirm_id=%s",
+                            confirm_id, exc_info=True,
+                        )
+                else:
+                    log.warning(
+                        "slash-confirm result has no chat to post to "
+                        "confirm_id=%s", confirm_id,
+                    )
             return
 
         m = _APPROVAL_CALLBACK_RE.match(cb)
