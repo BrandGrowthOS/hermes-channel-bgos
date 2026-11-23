@@ -1,0 +1,1 @@
+"""Fixture Hermes platform adapters."""
