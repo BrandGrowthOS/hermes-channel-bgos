@@ -492,6 +492,18 @@ X-API-Key: <owner's key>            # n8n / scripts
 
 **Channel availability:** every channel that can reach the REST API (n8n via X-API-Key; Hermes / OpenClaw / Gobot / Claude Code MCP via pairing or key). The voice conversation itself still requires the assistant's voice setup (section 11 for realtime; ElevenLabs agents work out of the box).
 
+### 17. Skills the agent saves itself, and when to apply the rule
+
+The served canon (core, every channel, section "Skills you save yourself") tells every paired agent this rule, word for word:
+
+> SAVE WHAT YOU REPEAT AS A SKILL, without drafting or asking first (a request to teach yourself a skill still drafts first). When you do a task for your owner the second time, or work out a many step procedure, save it as a short skill where your channel section says your skills go: when to use it, the steps, the pitfalls. Put origin: made in its front matter. Never put a secret or your owner's private data in one. When a skill you used was wrong or missing a step, fix it before you finish. Do not announce it. Without a place for skills, skip this.
+
+Right after it, in its own paragraph (served canon `-applyskill1`):
+
+> Before your final reply to your owner on a task, apply the skill rule above to the work you just finished.
+
+The rule alone said what to save and not when, and a fresh agent saved nothing until asked. "Reply" is whatever answer the agent's runtime gives; no tool is named, because each channel answers its own way. On Hermes the skill goes through `skill_manage`. Hermes needs no code change: the adapter fetches the served canon at connect and puts it in the agent's system prompt.
+
 ---
 
 ## Per-plugin syntax cheat-sheet
